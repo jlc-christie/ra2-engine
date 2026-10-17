@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The game's own files aren't here, so only the crates that don't need
+      # them are tested.
+      - run: cargo test --locked -p ra2-sim -p ra2-formats -p ra2-net -p ra2-bundle
+
+  bundle:
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mac: apple-silicon
+            target: aarch64-apple-darwin
+            minimum: "11.0"
+          - mac: intel
+            target: x86_64-apple-darwin
+            minimum: "10.13"
+
+    # Both are built on an Apple silicon runner; the Intel one cross-compiles.
+    runs-on: macos-14
+    steps:
+      - name: Check the signing secrets
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPSTORE_API_KEY_P8: ${{ secrets.APPSTORE_API_KEY_P8 }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+        run: |
+          missing=0
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD MACOS_SIGN_IDENTITY APPSTORE_API_KEY_P8 APPSTORE_API_KEY_ID APPSTORE_API_ISSUER_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::The secret $name is not set in the release environment."
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      # Everything is compiled before the secrets are loaded, so no dependency's
+      # build script or macro runs beside them.
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.minimum }}
+        run: |
+          cargo build --locked --profile dist --bin ra2-rust --target "$TARGET"
+          cargo build --locked -p ra2-bundle
+
+      - name: Import the signing certificate
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_CA: https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          curl -sSfL "$APPLE_CA" -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/certificate.p12"
+
+      - name: Write the notary key
+        env:
+          P8: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          umask 077
+          echo "$P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Bundle, sign and notarize
+        env:
+          IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          TARGET: ${{ matrix.mac }}
+        run: |
+          target/debug/ra2-bundle --no-build --target "$TARGET" --version "$GITHUB_REF_NAME" \
+            --sign "$IDENTITY" --notary-key "$RUNNER_TEMP/AuthKey.p8" --notary-key-id "$KEY_ID" --notary-issuer "$ISSUER"
+
+      - name: Clean up the keychain and key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: RA2-Engine-${{ matrix.mac }}
+          path: target/bundle/*.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [test, bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: images
+          merge-multiple: true
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" images/*.dmg --clobber
+          else
+            gh release create "$TAG" images/*.dmg --verify-tag --draft --title "$TAG" --generate-notes
+          fi
