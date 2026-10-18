@@ -455,6 +455,9 @@ pub enum Event {
     UnitDied { id: u32, kind: u16, owner: u8, at: (i32, i32, i32), facing: u8, infantry: bool, death: i32, explosion: u16 },
     /// `explosions`: one for each cell of the foundation, row by row.
     BuildingDied { id: u32, kind: u16, owner: u8, cell: (i32, i32), size: (i32, i32), explosions: Vec<u16> },
+    /// A parasite bit the vehicle it is in, rocking it from a point `side`
+    /// leptons to its left or right.
+    Bitten { host: u32, weapon: u16, side: i32 },
     /// A unit jumped from one place to another.
     Teleported { kind: u16, from: (i32, i32, i32), to: (i32, i32, i32) },
     /// Something was worn out of existence.
@@ -1232,6 +1235,9 @@ impl World {
         let Some(warhead) = self.warheads.get(warhead as usize).cloned() else {
             return false;
         };
+        if let Aim::Unit(id) = victim {
+            self.parasite_suppression(id, damage, source);
+        }
         if fighter.immune {
             return false;
         }
@@ -1623,6 +1629,10 @@ impl World {
         let Some(at) = self.map.index(cell.0, cell.1) else {
             return;
         };
+        // A parasite is put out where it
+        // was; it does not go along.
+        self.parasite_exit(index);
+        let unit = &self.units[index];
         let from = (unit.x, unit.y, self.ground_z(unit.x, unit.y));
         let (id, owner, infantry, kind) = (unit.id, unit.owner, unit.stats.infantry, unit.stats.kind);
         let (mut x, mut y) = cell_centre(cell);
@@ -1913,6 +1923,7 @@ impl World {
                     }
                     let building = &mut self.buildings[at];
                     building.owner = owner;
+                    building.captured = true;
                     building.primary = taken;
                     building.rally = None;
                     building.docked = None;
@@ -2522,7 +2533,7 @@ impl World {
                 continue;
             }
             // One held by a `Temporal` weapon does nothing at all.
-            if unit.frozen.is_some() || self.tick < unit.warp_until || matches!(unit.stance, Stance::Deploying(_) | Stance::Undeploying(_)) {
+            if unit.frozen.is_some() || self.tick < unit.warp_until || self.tick < unit.paralysed_until || matches!(unit.stance, Stance::Deploying(_) | Stance::Undeploying(_)) {
                 continue;
             }
             let dug_in = unit.stance == Stance::Deployed;
@@ -3003,6 +3014,8 @@ impl World {
             self.infest(id, target, weapon);
         }
         self.fly_bullets();
+        self.run_debris();
+        self.run_sinking();
         self.bury();
     }
 
@@ -3037,9 +3050,6 @@ impl World {
                     }
                     let at = (unit.x, unit.y, self.ground_z(unit.x, unit.y));
                     let (kind, owner, facing, infantry) = (unit.stats.kind, unit.owner, unit.facing, unit.stats.infantry);
-                    if death != VANISHED && death != ERASED {
-                        self.empty_the_dead(unit);
-                    }
                     if death == VANISHED {
                         continue;
                     }
@@ -3047,9 +3057,40 @@ impl World {
                         self.events.push(Event::Erased { at });
                         continue;
                     }
-                    let list = self.unit_types.get((kind as usize).wrapping_sub(1)).map(|kind| kind.explosions.clone()).unwrap_or_default();
-                    let explosion = self.death_anim(&list, at);
+                    // Nothing is thrown and nothing goes off
+                    // in the water.
+                    let wet = self.wet_death(at, self.altitude(&unit), unit.on_bridge);
+                    let centre = self.aim_point_of(&unit);
+                    if !wet {
+                        let leavings = self.unit_types.get((kind as usize).wrapping_sub(1)).map(|kind| kind.leavings.clone()).unwrap_or_default();
+                        self.throw_debris(&leavings, centre);
+                    }
+                    let crashes = unit.stats.jet.is_some_and(|jet| jet.crashable) || unit.plane.is_some();
+                    let sinks = !infantry && self.sinks(&unit);
+                    let shell = unit.clone();
+                    self.empty_the_dead(unit, wet);
+                    // A ship goes down; anything else in the water
+                    // leaves a wake and the last splash.
+                    let (death, explosion) = if infantry {
+                        self.infantry_death(&shell, death, at, wet)
+                    } else if sinks {
+                        self.start_sinking(&shell);
+                        (death, crate::smudge::NO_ANIM)
+                    } else if wet {
+                        let wake = self.remains_rules.wake;
+                        self.events.push(Event::Detonated { warhead: 0, damage: 0, at, water: true, anim: wake });
+                        if let Some(&splash) = self.splash_anims.last() {
+                            self.events.push(Event::Detonated { warhead: 0, damage: 0, at: (at.0, at.1, at.2 + 5), water: true, anim: splash });
+                        }
+                        (death, crate::smudge::NO_ANIM)
+                    } else {
+                        let list = self.unit_types.get((kind as usize).wrapping_sub(1)).map(|kind| kind.explosions.clone()).unwrap_or_default();
+                        (death, self.death_anim(&list, at))
+                    };
                     self.events.push(Event::UnitDied { id, kind, owner, at, facing, infantry, death, explosion });
+                    if !infantry && !crashes {
+                        self.vehicle_crew(&shell);
+                    }
                     self.crate_from_unit(kind, (at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL)));
                 }
                 Aim::Building(id) => {
@@ -3073,6 +3114,10 @@ impl World {
                         let point = (x, y, self.ground_z(x, y));
                         self.death_blast(point, own, percent, primary, strength, Aim::Building(id));
                     }
+                    let centre = (building.cell.0 * LEPTONS_PER_CELL + building.size.0 * 128, building.cell.1 * LEPTONS_PER_CELL + building.size.1 * 128);
+                    let centre = (centre.0, centre.1, self.ground_z(centre.0, centre.1));
+                    let leavings = self.building_types.get(building.kind as usize).map(|kind| kind.leavings.clone()).unwrap_or_default();
+                    self.throw_debris(&leavings, centre);
                     let list = self.building_types.get(building.kind as usize).map(|kind| kind.explosions.clone()).unwrap_or_default();
                     let mut explosions = Vec::new();
                     for dy in 0..building.size.1 {
@@ -3083,6 +3128,7 @@ impl World {
                         }
                     }
                     self.events.push(Event::BuildingDied { id, kind: building.kind, owner: building.owner, cell: building.cell, size: building.size, explosions });
+                    self.building_survivors(&building);
                     self.crate_from_building(building.kind, (building.cell.0 + building.size.0 / 2, building.cell.1 + building.size.1 / 2));
                 }
                 Aim::Cell(..) => {}

@@ -422,6 +422,9 @@ pub struct AnimType {
     /// `AltPalette`: drawn with the unit palette in the first colour scheme,
     /// not the animation palette.
     pub alt_palette: bool,
+    /// For a `Bouncer`: how it flies and ends, with `ExpireAnim`,
+    /// `BounceAnim` and `TrailerAnim` by name.
+    pub bouncer: Option<(ra2_sim::remains::Bouncer, [Option<String>; 3])>,
 }
 
 /// A list of ability names as bits by the engine's ability numbers.
@@ -507,7 +510,7 @@ pub struct Upkeep {
     pub repair_step: i32,
     pub repair_interval: u32,
     pub survivor_divisors: (i32, i32),
-    pub crew_types: (Option<u16>, Option<u16>, Option<u16>),
+    pub crew_types: (Option<u16>, Option<u16>, Option<u16>, Option<u16>),
 }
 
 /// A cell of ore the map starts with.
@@ -825,8 +828,17 @@ impl UnitArt {
         // the model that many thirds of the way there from another ramp's tilt.
         let (image, marks) = image.split_once('@').unwrap_or((image, ""));
         let (mut pitch, mut roll, mut ramp, mut from) = (0.0, 0.0, 0u8, None);
+        let (mut pitch, mut ramp, mut from, mut rock) = (0.0, 0u8, None, None);
         for mark in marks.split('@') {
             match mark.split_at_checked(1) {
+                // "@k<roll>_<pitch>_<facing>": rocked, in hundredths of a
+                // radian, about the axes of a body with that facing.
+                Some(("k", angles)) => {
+                    let parts: Vec<i32> = angles.split('_').filter_map(|n| n.parse().ok()).collect();
+                    if let [roll, rock_pitch, body] = parts[..] {
+                        rock = Some(voxel::rock_matrix(roll as f32 / 100.0, rock_pitch as f32 / 100.0, body as u8));
+                    }
+                }
                 Some(("p", steps)) => pitch = steps.parse::<i32>().unwrap_or(0) as f32 * std::f32::consts::FRAC_PI_2 / 16.0,
                 Some(("k", thousandths)) => roll = thousandths.parse::<i32>().unwrap_or(0) as f32 / 1000.0,
                 Some(("r", number)) => ramp = number.parse().unwrap_or(0),
@@ -834,7 +846,10 @@ impl UnitArt {
                 _ => {}
             }
         }
-        let tilt = voxel::slope_matrix(ramp, from);
+        let tilt = match (voxel::slope_matrix(ramp, from), rock) {
+            (Some(slope), Some(rock)) => Some(std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| slope[i][k] * rock[k][j]).sum()))),
+            (slope, rock) => slope.or(rock),
+        };
         let model = self.models.entry(image.to_owned()).or_insert_with(|| {
             let vxl = Vxl::parse(files.get(&format!("{image}.vxl"))?)?;
             let hva = files.get(&format!("{image}.hva")).and_then(Hva::parse);
@@ -1031,6 +1046,9 @@ pub struct Scene {
     pub radar_ground: RadarGround,
     pub armoury: crate::armoury::Armoury,
     pub upkeep: Upkeep,
+    /// `[General] CrewEscape` and `ShipSinkingWeight`.
+    pub crew_escape: f64,
+    pub ship_sinking_weight: f64,
     pub chrono: (i32, i32, i32, bool),
     /// Gravity, the most damage one hit may do, how much a missile's turning
     /// varies, and the frames between looks for a target.
@@ -2062,6 +2080,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 undeploys: None,
                 art: image,
                 sim: ra2_sim::BuildingType {
+                    leavings: Default::default(),
                     explosions: Vec::new(),
                     cost: number("Cost").unwrap_or(0),
                     power: number("Power").unwrap_or(0),
@@ -2242,11 +2261,24 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             }
         }
     }
-    let anim_types: HashMap<String, AnimType> = wanted_anims
-        .into_inner()
-        .into_iter()
-        .map(|name| name.to_uppercase())
-        .collect::<std::collections::BTreeSet<_>>()
+    // And those that debris shows as it flies and ends.
+    let mut wanted: std::collections::BTreeSet<String> = wanted_anims.into_inner().into_iter().map(|name| name.to_uppercase()).collect();
+    if let Some(art) = art_rules.as_ref() {
+        let mut queue: Vec<String> = wanted.iter().cloned().collect();
+        while let Some(name) = queue.pop() {
+            if !art.get_exact(&name, "Bouncer").is_some_and(|v| matches!(v.trim().to_lowercase().as_str(), "yes" | "true" | "1")) {
+                continue;
+            }
+            for key in ["ExpireAnim", "BounceAnim", "TrailerAnim"] {
+                if let Some(next) = art.get_exact(&name, key).map(|v| v.split(';').next().unwrap_or("").trim().to_uppercase()).filter(|v| !v.is_empty()) {
+                    if wanted.insert(next.clone()) {
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+    }
+    let anim_types: HashMap<String, AnimType> = wanted
         .into_iter()
         .filter_map(|name| {
             let art = art_rules.as_ref()?;
@@ -2289,7 +2321,27 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     _ => 1.0,
                 },
                 alt_palette: yes("AltPalette"),
+                bouncer: None,
             };
+            // DATA: a `Bouncer` animation's flight keys, matched exactly.
+            let exact = |key: &str| art.get_exact(&name, key).map(|v| v.split(';').next().unwrap_or("").trim().to_owned()).filter(|v| !v.is_empty());
+            let bouncer = exact("Bouncer").is_some_and(|v| matches!(v.to_lowercase().as_str(), "yes" | "true" | "1")).then(|| {
+                let real = |key: &str, default: f64| exact(key).and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
+                let defaults = ra2_sim::remains::Bouncer::anim();
+                let warhead = exact("Warhead").and_then(|w| object_rules.rules.as_ref().map(|rules| armoury.borrow_mut().warhead_named(rules, &w)));
+                let motion = ra2_sim::remains::Bouncer {
+                    elasticity: real("Elasticity", defaults.elasticity),
+                    max_xy: real("MaxXYVel", defaults.max_xy),
+                    min_z: real("MinZVel", defaults.min_z),
+                    damage: real("Damage", 0.0) as i32,
+                    radius: exact("DamageRadius").and_then(|v| v.parse().ok()).unwrap_or(0),
+                    warhead,
+                    trailer_every: exact("TrailerSeperation").and_then(|v| v.parse().ok()).unwrap_or(1),
+                    ..defaults
+                };
+                (motion, [exact("ExpireAnim"), exact("BounceAnim"), exact("TrailerAnim")])
+            });
+            let anim = AnimType { bouncer, ..anim };
             // Only the ones that mark the ground need their picture's size.
             let size = if anim.scorch || anim.crater {
                 find_shape(files, &anim.image, theater.extension, theater.letter).map_or((0, 0), |shp| (shp.width as i32, shp.height as i32))
@@ -2580,6 +2632,13 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 alt_cameo: art_rules.as_ref().and_then(|art| art.get(&made.image, "AltCameo")).map(|c| c.trim().to_lowercase()).filter(|c| !c.is_empty()),
                 sim: ra2_sim::UnitType {
                     explosions: Vec::new(),
+                    death_anims: Vec::new(),
+                    leavings: Default::default(),
+                    crewed: yes("Crewed"),
+                    weight: get("Weight").and_then(|v| v.split(';').next()?.trim().parse::<f64>().ok()).unwrap_or(0.0),
+                    underwater: yes("Underwater"),
+                    not_human: yes("NotHuman"),
+                    suppression_threshold: number("SuppressionThreshold").unwrap_or(0),
                     passengers: number("Passengers").unwrap_or(0),
                     size_limit: number("SizeLimit").unwrap_or(0),
                     carries_crate: yes("CarriesCrate"),
@@ -3436,11 +3495,16 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 get("AlliedSurvivorDivisor").and_then(|v| v.parse().ok()).unwrap_or(500),
                 get("SovietSurvivorDivisor").and_then(|v| v.parse().ok()).unwrap_or(250),
             ),
-            crew_types: (unit("AlliedCrew"), unit("SovietCrew"), unit("Engineer")),
+            crew_types: (unit("AlliedCrew"), unit("SovietCrew"), unit("Engineer"), unit("Technician")),
         }
     };
 
+    let general = |key: &str| object_rules.rules.as_ref().and_then(|rules| rules.get("General", key)).map(|v| v.split(';').next().unwrap_or("").trim().to_owned());
+    let crew_escape = general("CrewEscape").and_then(|v| if v.contains('%') { v.trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0) } else { v.parse::<f64>().ok() }).unwrap_or(0.5);
+    let ship_sinking_weight = general("ShipSinkingWeight").and_then(|v| v.parse::<f64>().ok()).unwrap_or(3.0);
     Some(Scene {
+        crew_escape,
+        ship_sinking_weight,
         chrono,
         upkeep,
         armoury,

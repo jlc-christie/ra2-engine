@@ -121,6 +121,23 @@ pub fn slope_matrix(ramp: u8, from: Option<(u8, u8)>) -> Option<[[f32; 3]; 3]> {
     ])
 }
 
+/// The turn of a model rolled and pitched about the axes of a body facing a
+/// compass direction, as a turn of the whole scene.
+pub fn rock_matrix(roll: f32, pitch: f32, facing: u8) -> [[f32; 3]; 3] {
+    let direction = (((facing as i32 >> 2) + 1) >> 1) & 31;
+    let turn = -(direction - 8) as f32 * std::f32::consts::PI / 16.0;
+    let z = |a: f32| {
+        let (sin, cos) = a.sin_cos();
+        [[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]
+    };
+    let (rs, rc) = roll.sin_cos();
+    let (ps, pc) = pitch.sin_cos();
+    let x = [[1.0, 0.0, 0.0], [0.0, rc, -rs], [0.0, rs, rc]];
+    let y = [[pc, 0.0, ps], [0.0, 1.0, 0.0], [-ps, 0.0, pc]];
+    let mul = |a: [[f32; 3]; 3], b: [[f32; 3]; 3]| -> [[f32; 3]; 3] { std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum())) };
+    mul(mul(mul(z(turn), x), y), z(-turn))
+}
+
 /// The same for a model tilted by a slope.
 // The model is turned to its
 // facing and the slope's matrix applied to that, before the view's.

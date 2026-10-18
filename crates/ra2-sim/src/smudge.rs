@@ -137,7 +137,7 @@ impl World {
 
     /// Whether a point is low enough for an animation there to mark the ground.
     // Lower than 30 above the cell's level.
-    fn marks_ground(&self, at: (i32, i32, i32)) -> bool {
+    pub(crate) fn marks_ground(&self, at: (i32, i32, i32)) -> bool {
         at.2 - self.map.level(at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL)) as i32 * crate::combat::LEVEL_HEIGHT < 30
     }
 

@@ -55,6 +55,44 @@ pub struct Armoury {
     pub die_sounds: std::collections::HashMap<String, Vec<String>>,
     /// By type name in lower case: `CrushSound`.
     pub crush_sounds: std::collections::HashMap<String, String>,
+    /// By type name in lower case: what it throws as it dies, its
+    /// `DeathAnims`, and a soldier's own `DeadBodies`.
+    pub leavings: std::collections::HashMap<String, Leavings>,
+    pub death_anims: std::collections::HashMap<String, Vec<String>>,
+    pub own_bodies: std::collections::HashMap<String, Vec<String>>,
+    /// `[AudioVisual]` `MetallicDebris` and `Wake`.
+    pub metallic_debris: Vec<String>,
+    pub wake: Option<String>,
+    /// `[VoxelAnims]`: the models that can be thrown as debris.
+    pub voxel_debris: Vec<VoxelDebrisInfo>,
+}
+
+/// What a type throws as it dies, by name.
+// DATA: `MinDebris`, `MaxDebris` (raised to `MinDebris`), `DebrisTypes`,
+// `DebrisMaximums`, `DebrisAnims`. Keys are matched exactly, so the many
+// `Maxdebris=` lines in rules.ini are never seen, nor is `DebrisAnim=`, which
+// no type reads.
+#[derive(Clone, Default)]
+pub struct Leavings {
+    pub min: i32,
+    pub max: i32,
+    pub types: Vec<String>,
+    pub maximums: Vec<i32>,
+    pub anims: Vec<String>,
+}
+
+/// A `[VoxelAnims]` entry.
+// DATA: `Image`, `Elasticity`, `MinAngularVelocity`, `MaxAngularVelocity`,
+// `Duration`, `MinZVel`, `MaxZVel`, `MaxXYVel`, `BounceAnim`, `ExpireAnim`,
+// `TrailerAnim`, `Damage`, `DamageRadius`, `Warhead`.
+#[derive(Clone, Default)]
+pub struct VoxelDebrisInfo {
+    pub name: String,
+    pub image: String,
+    pub motion: ra2_sim::remains::Bouncer,
+    pub expire: Option<String>,
+    pub bounce: Option<String>,
+    pub trailer: Option<String>,
 }
 
 fn yes(value: Option<&str>, default: bool) -> bool {
@@ -84,8 +122,39 @@ impl Armoury {
                 [name("InfantryExplode"), name("FlamingInfantry"), rules.section("Animations").get(1).map(|(_, v)| v.trim().to_owned()), name("InfantryHeadPop"), name("InfantryNuked")]
             },
             dead_bodies: list(["AudioVisual", "General"].iter().find_map(|section| rules.get(section, "DeadBodies"))),
+            metallic_debris: list(["AudioVisual", "General"].iter().find_map(|section| rules.get(section, "MetallicDebris"))),
+            wake: ["AudioVisual", "General"].iter().find_map(|section| rules.get(section, "Wake")).map(|v| v.split(';').next().unwrap_or("").trim().to_owned()).filter(|v| !v.is_empty()),
             ..Self::default()
         };
+        for (_, name) in rules.section("VoxelAnims") {
+            let name = name.split(';').next().unwrap_or("").trim().to_owned();
+            if name.is_empty() {
+                continue;
+            }
+            let get = |key: &str| rules.get_exact(&name, key).map(|v| v.split(';').next().unwrap_or("").trim().to_owned()).filter(|v| !v.is_empty());
+            let real = |key: &str, default: f64| get(key).and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
+            let whole = |key: &str, default: i32| get(key).and_then(|v| v.parse::<i32>().ok()).unwrap_or(default);
+            let warhead = get("Warhead").map(|w| armoury.warhead(rules, &w));
+            armoury.voxel_debris.push(VoxelDebrisInfo {
+                image: get("Image").unwrap_or_else(|| name.clone()).to_lowercase(),
+                motion: ra2_sim::remains::Bouncer {
+                    elasticity: real("Elasticity", 0.8),
+                    max_xy: real("MaxXYVel", 15.0),
+                    min_z: real("MinZVel", 3.5),
+                    max_z: real("MaxZVel", 3.5),
+                    damage: whole("Damage", 0),
+                    radius: whole("DamageRadius", 0),
+                    warhead,
+                    duration: Some(whole("Duration", 0)),
+                    spin: (real("MinAngularVelocity", 0.0), real("MaxAngularVelocity", 0.0)),
+                    ..ra2_sim::remains::Bouncer::anim()
+                },
+                expire: get("ExpireAnim"),
+                bounce: get("BounceAnim"),
+                trailer: get("TrailerAnim"),
+                name,
+            });
+        }
         for section in ["InfantryTypes", "VehicleTypes", "AircraftTypes", "BuildingTypes"] {
             for (_, kind) in rules.section(section) {
                 let name = kind.trim().to_lowercase();
@@ -93,6 +162,20 @@ impl Armoury {
                 if let Some(sound) = rules.get(kind.trim(), "CrushSound").map(|v| v.split(';').next().unwrap_or("").trim().to_owned()).filter(|v| !v.is_empty()) {
                     armoury.crush_sounds.insert(name.clone(), sound);
                 }
+                let exact = |key: &str| rules.get_exact(kind.trim(), key).map(|v| v.split(';').next().unwrap_or("").trim().to_owned());
+                let min = exact("MinDebris").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0).max(0);
+                armoury.leavings.insert(
+                    name.clone(),
+                    Leavings {
+                        min,
+                        max: exact("MaxDebris").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0).max(min),
+                        types: list(exact("DebrisTypes").as_deref()),
+                        maximums: list(exact("DebrisMaximums").as_deref()).iter().map(|v| v.parse().unwrap_or(0)).collect(),
+                        anims: list(exact("DebrisAnims").as_deref()),
+                    },
+                );
+                armoury.death_anims.insert(name.clone(), list(exact("DeathAnims").as_deref()));
+                armoury.own_bodies.insert(name.clone(), list(exact("DeadBodies").as_deref()));
                 armoury.die_sounds.insert(name, list(rules.get(kind.trim(), "DieSound")));
                 for key in ["Primary", "Secondary", "ElitePrimary", "EliteSecondary"] {
                     if let Some(name) = rules.get(kind.trim(), key) {
@@ -327,6 +410,12 @@ impl Armoury {
             .chain(self.explosions.values().flatten())
             .chain(self.infantry_deaths.iter().flatten())
             .chain(self.dead_bodies.iter())
+            .chain(self.own_bodies.values().flatten())
+            .chain(self.leavings.values().flat_map(|l| l.anims.iter()))
+            .chain(self.death_anims.values().flatten())
+            .chain(self.metallic_debris.iter())
+            .chain(self.wake.iter())
+            .chain(self.voxel_debris.iter().flat_map(|v| v.expire.iter().chain(v.bounce.iter()).chain(v.trailer.iter())))
             .cloned()
             .chain(["WARPOUT".to_owned(), "WARPAWAY".to_owned()])
             .collect()

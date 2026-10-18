@@ -160,6 +160,9 @@ pub(crate) struct UnitView {
     house_palettes: Vec<Option<usize>>,
     /// Drawn images by model, direction (0 to 31), palette and height level.
     images: HashMap<(String, u8, Option<u8>, Option<usize>, i32), Option<UnitImage>>,
+    /// Vehicles being rocked, by unit id, and the tick they were last stepped.
+    rocks: HashMap<u32, Rock>,
+    rock_tick: u64,
 }
 
 /// What is needed to show and voice a unit type.
@@ -273,6 +276,7 @@ impl Plugin for UnitsPlugin {
             .add_systems(
                 Update,
                 (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_radiation)
+                (auto_build, announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, show_radiation, show_debris, show_sinking, show_sparks)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>),
@@ -542,6 +546,49 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
     for (kind, entry) in world.building_types.iter_mut().zip(&catalog) {
         kind.explosions = explosions(&entry.name);
     }
+    // What dying things throw and leave, by number.
+    let armoury = &scene.armoury;
+    let named = |list: &[String]| list.iter().map(number).collect::<Vec<u16>>();
+    let maybe = |name: &Option<String>| name.as_ref().map_or(ra2_sim::smudge::NO_ANIM, number);
+    let voxel = |name: &String| armoury.voxel_debris.iter().position(|v| v.name.eq_ignore_ascii_case(name)).map(|i| i as u16);
+    let leavings = |name: &str| {
+        armoury.leavings.get(&name.to_lowercase()).map_or_else(Default::default, |l| ra2_sim::remains::Leavings {
+            min: l.min,
+            max: l.max,
+            types: l.types.iter().filter_map(voxel).collect(),
+            maximums: l.maximums.clone(),
+            anims: named(&l.anims),
+        })
+    };
+    for (kind, entry) in world.unit_types.iter_mut().zip(&unit_catalog) {
+        kind.leavings = leavings(&entry.name);
+        kind.death_anims = armoury.death_anims.get(&entry.name.to_lowercase()).map(|list| named(list)).unwrap_or_default();
+    }
+    for (kind, entry) in world.building_types.iter_mut().zip(&catalog) {
+        kind.leavings = leavings(&entry.name);
+    }
+    world.remains_rules = ra2_sim::remains::Rules {
+        crew_escape: scene.crew_escape,
+        ship_sinking_weight: scene.ship_sinking_weight,
+        wake: maybe(&armoury.wake),
+        metallic_debris: named(&armoury.metallic_debris),
+        infantry_explode: maybe(&armoury.infantry_deaths[0]),
+        bouncers: anim_names
+            .iter()
+            .map(|name| {
+                let (motion, [expire, bounce, trailer]) = scene.anim_types[name].bouncer.clone()?;
+                Some(ra2_sim::remains::Bouncer { expire: maybe(&expire), bounce: maybe(&bounce), trailer: maybe(&trailer), ..motion })
+            })
+            .collect(),
+        voxels: armoury
+            .voxel_debris
+            .iter()
+            .map(|v| ra2_sim::remains::VoxelDebris {
+                image: v.image.clone(),
+                motion: ra2_sim::remains::Bouncer { expire: maybe(&v.expire), bounce: maybe(&v.bounce), trailer: maybe(&v.trailer), ..v.motion.clone() },
+            })
+            .collect(),
+    };
     BuiltWorld {
         anim_names,
         unit_catalog,
@@ -665,6 +712,8 @@ pub fn setup(
         shadow_images: HashMap::new(),
         masked: HashMap::new(),
         walk_counters: HashMap::new(),
+        rocks: HashMap::new(),
+        rock_tick: 0,
         ramps: HashMap::new(),
         walk_tick: 0,
         body_boxes: HashMap::new(),
@@ -1185,6 +1234,10 @@ fn show_units(
         };
         let model = tipped.as_ref().unwrap_or(model);
         let direction = (((unit.facing >> 2) + 1) >> 1) & 31;
+        // A rocking vehicle is drawn rolled and pitched
+        // about its own axes.
+        let rocked = view.rocks.get(&unit.id).and_then(|rock| rock.mark(direction << 3)).map(|mark| format!("{model}{mark}"));
+        let model = rocked.as_ref().unwrap_or(model);
         // The turret's facing in 32 steps.
         let which = unit.gun.map_or(0, |(_, turret)| turret);
         let turret = unit.stats.fighter.turret.then(|| ((((unit.arms.turret_facing() >> 2) + 1) >> 1) & 31, unit.stats.fighter.turret_offset));
@@ -2618,7 +2671,16 @@ fn show_effects(
                             let look = (kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k));
                             let sequence = look.and_then(|k| k.sequences.as_ref()).and_then(|s| s.get(if death == 1 { "die1" } else { "die2" })).copied();
                             if let (Some(look), Some((first, count, _))) = (look, sequence) {
-                                let body = (!armoury.dead_bodies.is_empty()).then(|| armoury.dead_bodies[pick(armoury.dead_bodies.len())].clone());
+                                // The type's own `DeadBodies`, else
+                                // the rules' unless it is `NotHuman`.
+                                let own = armoury.own_bodies.get(&name).filter(|list| !list.is_empty());
+                                let not_human = (kind as usize).checked_sub(1).and_then(|k| sim.0.unit_types.get(k)).is_some_and(|k| k.not_human);
+                                let bodies = match own {
+                                    Some(list) => list.as_slice(),
+                                    None if not_human => &[],
+                                    None => armoury.dead_bodies.as_slice(),
+                                };
+                                let body = (!bodies.is_empty()).then(|| bodies[pick(bodies.len())].clone());
                                 commands.spawn((
                                     DespawnOnExit(Screen::InGame),
                                     Corpse { image: look.image.clone(), palette: view.palette_of(owner), first, count: count.max(1), began: tick, at, depth, body },
@@ -2689,6 +2751,23 @@ fn show_effects(
                 let sounds = (kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map(|k| k.chrono_sounds.clone()).unwrap_or_default();
                 cues.write_batch(sounds.0.map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, from))));
                 cues.write_batch(sounds.1.map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, to))));
+            }
+            // `DefaultSparkSystem` at the vehicle, the
+            // weapon's animation for its direction, and the rock.
+            Event::Bitten { host, weapon, side } => {
+                let Some(unit) = sim.0.unit(host) else {
+                    continue;
+                };
+                let at = sim.0.aim_point(ra2_sim::combat::Aim::Unit(host)).unwrap_or((unit.x, unit.y, 0));
+                spawn_sparks(&mut commands, at, tick, &mut pick);
+                if let Some(look) = armoury.weapon_looks.get(weapon as usize).filter(|look| !look.anims.is_empty()) {
+                    let direction = ((((unit.facing as usize) >> 4) + 1) >> 1) & 7;
+                    let name = look.anims[direction.min(look.anims.len() - 1)].clone();
+                    let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 1.5) * DEPTH_PER_ROW;
+                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), depth);
+                }
+                let weight = (unit.stats.kind as usize).checked_sub(1).and_then(|k| sim.0.unit_types.get(k)).map_or(1.0, |k| k.weight) as f32;
+                view.rocks.entry(host).or_default().push(unit.facing, side as f32, 1.5, weight);
             }
             Event::Erased { at } => {
                 let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 1.5) * DEPTH_PER_ROW;
@@ -3111,6 +3190,313 @@ fn show_effects(
     for (entity, beam) in &beams {
         if tick >= beam.until {
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// A vehicle's roll and pitch, and how fast each is changing, in radians.
+#[derive(Default, Clone, Copy)]
+struct Rock {
+    roll: f32,
+    roll_speed: f32,
+    pitch: f32,
+    pitch_speed: f32,
+}
+
+impl Rock {
+    /// A push from a point `side` leptons to the vehicle's left or right, of
+    /// a strength, on a vehicle of a `Weight`.
+    // The push is 0.04 less 0.000025 a lepton of the distance, times the
+    // strength, over the weight; under 0.01 it does nothing, over 0.05 it is
+    // 0.05. Of the direction from the point, the part across the vehicle
+    // sets the roll's speed and half the part along it the pitch's.
+    fn push(&mut self, facing: u8, side: f32, strength: f32, weight: f32) {
+        let facing16 = (facing as i32) << 8;
+        let turn = |f: i32| (f as i16 as i32 - 0x3fff) as f32 * (-2.0 * std::f32::consts::PI / 65536.0);
+        let a = turn(facing16 - 0x3fff);
+        let point = (a.cos() * side, -a.sin() * side);
+        // From the point to the vehicle, with y the other way up.
+        let d = (-point.0, point.1);
+        let distance = (d.0 * d.0 + d.1 * d.1).sqrt();
+        let mut impulse = (0.04 - distance * 0.000025) * strength / weight.max(f32::MIN_POSITIVE);
+        if distance < 0.00002 || impulse < 0.01 {
+            return;
+        }
+        impulse = impulse.min(0.05);
+        let (n0, n1) = if distance == 0.0 { d } else { (d.0 / distance, d.1 / distance) };
+        let b = turn(facing16);
+        let (sin, cos) = b.sin_cos();
+        let along = n1 * sin + n0 * cos;
+        let mut across = (n0 * sin - n1 * cos).abs();
+        if (cos * along - sin * across - n0).abs() > 0.0002 || (sin * along + cos * across - n1).abs() > 0.0002 {
+            across = -across;
+        }
+        self.pitch_speed = along * impulse * 0.5;
+        self.roll_speed = -across * impulse;
+    }
+
+    /// One frame: each angle moves by its speed (no further than an eighth
+    /// of a turn), is pulled back by 0.005 a frame coming back and 0.002 going
+    /// out, and stops when it passes level.
+    fn step(&mut self) {
+        fn axis(angle: &mut f32, speed: &mut f32) {
+            const EPS: f32 = 0.00002;
+            let limit = std::f32::consts::FRAC_PI_4;
+            let old = *angle;
+            if *speed == 0.0 {
+                *angle = 0.0;
+            } else {
+                *angle += *speed;
+                if *angle > limit {
+                    *angle = limit;
+                    *speed = 0.0;
+                } else if *angle < -limit {
+                    *angle = -limit;
+                    *speed = 0.0;
+                }
+                if old > EPS {
+                    *speed -= if *speed <= 0.0 { 0.005 } else { 0.002 };
+                    if *angle < EPS {
+                        *angle = 0.0;
+                        *speed = 0.0;
+                    }
+                } else {
+                    *speed += if *speed >= 0.0 { 0.005 } else { 0.002 };
+                }
+            }
+            if old < -EPS && *angle > -EPS {
+                *angle = 0.0;
+                *speed = 0.0;
+            }
+        }
+        axis(&mut self.roll, &mut self.roll_speed);
+        axis(&mut self.pitch, &mut self.pitch_speed);
+    }
+
+    fn still(&self) -> bool {
+        self.roll == 0.0 && self.roll_speed == 0.0 && self.pitch == 0.0 && self.pitch_speed == 0.0
+    }
+
+    /// The model-name mark that draws it so (see `UnitArt::sprite`), in
+    /// hundredths of a radian, with the body's facing.
+    fn mark(&self, facing: u8) -> Option<String> {
+        let (roll, pitch) = ((self.roll * 100.0).round() as i32, (self.pitch * 100.0).round() as i32);
+        (roll != 0 || pitch != 0).then(|| format!("@k{roll}_{pitch}_{facing}"))
+    }
+}
+
+/// Steps the rocking vehicles once for each tick that has passed.
+fn rock_units(sim: Res<Sim>, mut view: ResMut<UnitView>) {
+    let tick = sim.0.current_tick();
+    let steps = tick.saturating_sub(view.rock_tick).min(60);
+    view.rock_tick = tick;
+    for _ in 0..steps {
+        for rock in view.rocks.values_mut() {
+            rock.step();
+        }
+    }
+    view.rocks.retain(|id, rock| !rock.still() && sim.0.unit(*id).is_some());
+}
+
+/// A spark flying from a bitten vehicle.
+#[derive(Component)]
+struct Spark {
+    at: Vec3,
+    speed: Vec3,
+    born: u64,
+}
+
+/// The `Spark` particles of `DefaultSparkSystem`.
+// DATA: `[SparkSys] ParticleCap=6` and `[Spark]` `XVelocity`, `YVelocity`,
+// `MinZVelocity`, `ZVelocityRange`, `ColorList`, `ColorSpeed`.
+// Not original behaviour: how the particles move and fade is a stand-in; the
+// particle system's own rules are not followed.
+fn spawn_sparks(commands: &mut Commands, at: (i32, i32, i32), tick: u64, pick: &mut impl FnMut(usize) -> usize) {
+    for _ in 0..6 {
+        let speed = Vec3::new(pick(21) as f32 - 10.0, pick(21) as f32 - 10.0, 40.0 + pick(16) as f32) / 4.0;
+        commands.spawn((
+            DespawnOnExit(Screen::InGame),
+            Spark { at: Vec3::new(at.0 as f32, at.1 as f32, at.2 as f32 + 40.0), speed, born: tick },
+            Sprite { color: Color::WHITE, custom_size: Some(Vec2::splat(2.0)), ..default() },
+            Transform::from_xyz(0.0, 0.0, -10.0),
+        ));
+    }
+}
+
+const SPARK_COLOURS: [[f32; 3]; 4] = [[255.0, 255.0, 255.0], [200.0, 200.0, 80.0], [200.0, 10.0, 10.0], [0.0, 0.0, 0.0]];
+
+fn show_sparks(mut commands: Commands, sim: Res<Sim>, view: Res<UnitView>, mut sparks: Query<(Entity, &Spark, &mut Sprite, &mut Transform)>) {
+    let tick = sim.0.current_tick();
+    for (entity, spark, mut sprite, mut transform) in &mut sparks {
+        let age = tick.saturating_sub(spark.born) as f32;
+        let along = age * 0.13;
+        if along >= (SPARK_COLOURS.len() - 1) as f32 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let (i, t) = (along as usize, along.fract());
+        let colour: Vec<f32> = (0..3).map(|c| (SPARK_COLOURS[i][c] * (1.0 - t) + SPARK_COLOURS[i + 1][c] * t) / 255.0).collect();
+        sprite.color = Color::srgb(colour[0], colour[1], colour[2]);
+        let gravity = 1.5;
+        let p = spark.at + spark.speed * age - Vec3::new(0.0, 0.0, gravity * age * age / 2.0);
+        let point = scene_point_3d(view.origin, (p.x as i32, p.y as i32, p.z.max(0.0) as i32));
+        let depth = 2.0 + ((p.x + p.y) / LEPTONS_PER_CELL as f32 + 2.0) * DEPTH_PER_ROW;
+        transform.translation = Vec3::new(point.x.round(), -point.y.round(), depth);
+    }
+}
+
+/// A thrown piece of debris on the screen, by its id.
+#[derive(Component)]
+struct DebrisSprite(u32);
+
+/// Draws thrown debris, and lays its trailer as it flies.
+// An animation shows its loop, a frame every other tick; a model
+// turns by its angular speed. A `TrailerAnim` is left every
+// `TrailerSeperation` frames, a model's every other frame.
+// Not original behaviour: a model is turned about the upright only, where
+// the engine tumbles it about a random axis; the loop's rate is not the
+// type's `RandomRate`.
+#[allow(clippy::too_many_arguments)]
+fn show_debris(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    files: Res<GameFiles>,
+    mut view: ResMut<UnitView>,
+    mut images: ResMut<Assets<Image>>,
+    mut sprites: Query<(Entity, &DebrisSprite, &mut Sprite, &mut Transform)>,
+    mut trailed: Local<u64>,
+) {
+    let view = &mut *view;
+    let world = &sim.0;
+    let tick = world.current_tick();
+    let lay = tick != *trailed;
+    *trailed = tick;
+    let mut seen = Vec::new();
+    for (entity, shown, mut sprite, mut transform) in &mut sprites {
+        let Some(piece) = world.debris().iter().find(|d| d.id == shown.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        seen.push(piece.id);
+        let at = (piece.position.0 as i32, piece.position.1 as i32, piece.position.2 as i32);
+        let age = tick.saturating_sub(piece.born);
+        let point = scene_point_3d(view.origin, at);
+        let depth = 2.0 + ((piece.position.0 + piece.position.1) as f32 / LEPTONS_PER_CELL as f32 + 2.0) * DEPTH_PER_ROW;
+        let (image, trailer, every) = match piece.voxel {
+            Some(voxel) => {
+                let Some(rule) = world.remains_rules.voxels.get(voxel as usize) else {
+                    continue;
+                };
+                let facing = ((piece.spin * age as f64) as i64 + piece.id as i64 * 37).rem_euclid(256) as u8 & !7;
+                let key = (format!("vxl:{}", rule.image), facing as usize);
+                let art = &mut view.art;
+                let image = view.effect_images.entry(key).or_insert_with(|| {
+                    let drawn = art.sprite(&files, &rule.image, facing, None, 0)?;
+                    let size = Vec2::new(drawn.width as f32, drawn.height as f32);
+                    let image = Image::new(Extent3d { width: drawn.width, height: drawn.height, depth_or_array_layers: 1 }, TextureDimension::D2, drawn.rgba, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
+                    Some((images.add(image), size / 2.0 - Vec2::new(drawn.origin.0 as f32, drawn.origin.1 as f32)))
+                });
+                (image.clone(), rule.motion.trailer, 2)
+            }
+            None => {
+                let Some(name) = view.anim_names.get(piece.anim as usize).cloned() else {
+                    continue;
+                };
+                let Some(anim) = view.anim_types.get(&name) else {
+                    continue;
+                };
+                let count = view.art.frame_count(&files, &anim.image);
+                let count = if anim.shadow { count / 2 } else { count };
+                let end = anim.loop_end.unwrap_or(count).min(count).max(anim.loop_start + 1);
+                let frame = anim.loop_start + (age as usize / 2) % (end - anim.loop_start);
+                let art = &mut view.art;
+                let image = view.effect_images.entry((anim.image.clone(), frame)).or_insert_with_key(|key| {
+                    let drawn = art.effect(&files, &key.0, key.1)?;
+                    let size = Vec2::new(drawn.width as f32, drawn.height as f32);
+                    let image = Image::new(Extent3d { width: drawn.width, height: drawn.height, depth_or_array_layers: 1 }, TextureDimension::D2, drawn.rgba, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
+                    Some((images.add(image), Vec2::new(drawn.offset.0 as f32, drawn.offset.1 as f32) + size / 2.0))
+                });
+                let rule = world.remains_rules.bouncers.get(piece.anim as usize).cloned().flatten();
+                (image.clone(), rule.as_ref().map_or(ra2_sim::smudge::NO_ANIM, |r| r.trailer), rule.map_or(1, |r| r.trailer_every.max(1) as u64))
+            }
+        };
+        if let Some((handle, middle)) = image {
+            if sprite.image != handle {
+                sprite.image = handle;
+            }
+            let centre = snapped(point, middle);
+            transform.translation = Vec3::new(centre.x, -centre.y, depth);
+        }
+        if lay && trailer != ra2_sim::smudge::NO_ANIM && tick % every == 0 {
+            if let Some(name) = view.anim_names.get(trailer as usize).cloned() {
+                commands.spawn((DespawnOnExit(Screen::InGame), Effect { anim: name, began: tick, at: point, depth: depth - 0.0001 }, Sprite::default()));
+            }
+        }
+    }
+    for piece in world.debris() {
+        if !seen.contains(&piece.id) {
+            commands.spawn((DespawnOnExit(Screen::InGame), DebrisSprite(piece.id), Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
+        }
+    }
+}
+
+/// A sinking ship on the screen, by its id.
+#[derive(Component)]
+struct SinkSprite(u32);
+
+/// Draws ships going down.
+// Not original behaviour: the hull fades as it goes down instead of being
+// hidden by the water.
+fn show_sinking(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    files: Res<GameFiles>,
+    mut view: ResMut<UnitView>,
+    mut images: ResMut<Assets<Image>>,
+    mut sprites: Query<(Entity, &SinkSprite, &mut Sprite, &mut Transform)>,
+) {
+    let view = &mut *view;
+    let world = &sim.0;
+    let mut seen = Vec::new();
+    for (entity, shown, mut sprite, mut transform) in &mut sprites {
+        let Some(ship) = world.sinking().iter().find(|s| s.id == shown.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        seen.push(ship.id);
+        let Some(model) = (ship.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map(|k| k.image.clone()) else {
+            continue;
+        };
+        let palette = view.looks.get(&ship.id).map_or_else(|| view.palette_of(ship.owner), |look| look.1);
+        let cell = (ship.x.div_euclid(LEPTONS_PER_CELL), ship.y.div_euclid(LEPTONS_PER_CELL));
+        let level = world.map.level(cell.0, cell.1) as i32;
+        let direction = (((ship.facing >> 2) + 1) >> 1) & 31;
+        // It tips 0.01 a frame, up to an eighth of a turn: one way when
+        // its eight-way direction is 1 to 5, the other otherwise.
+        let eighth = (((ship.facing as u32) >> 4) + 1) >> 1 & 7;
+        let tip = (0.01 * (ship.depth / 5) as f32).min(std::f32::consts::FRAC_PI_4) * if (1..=5).contains(&eighth) { 1.0 } else { -1.0 };
+        let model = format!("{model}{}", Rock { pitch: tip, ..Rock::default() }.mark(direction << 3).unwrap_or_default());
+        let key = (model.clone(), direction, None, palette, level);
+        let image = view.images.entry(key).or_insert_with(|| {
+            let drawn = view.art.vehicle(&files, &model, direction << 3, None, palette, level)?;
+            let size = Vec2::new(drawn.width as f32, drawn.height as f32);
+            let image = Image::new(Extent3d { width: drawn.width, height: drawn.height, depth_or_array_layers: 1 }, TextureDimension::D2, drawn.rgba, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::all());
+            Some(UnitImage { handle: images.add(image), origin: Vec2::new(drawn.origin.0 as f32, drawn.origin.1 as f32), size })
+        });
+        let Some(image) = image else {
+            continue;
+        };
+        if sprite.image != image.handle {
+            sprite.image = image.handle.clone();
+        }
+        sprite.color = Color::srgba(1.0, 1.0, 1.0, (1.0 - ship.depth as f32 / 400.0).clamp(0.0, 1.0));
+        let centre = scene_point(view.origin, ship.x, ship.y, level) - image.origin + image.size / 2.0 + Vec2::new(0.0, lift(ship.depth));
+        let depth = 2.0 + ((cell.0 + cell.1) as f32 + 0.9) * DEPTH_PER_ROW;
+        transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), depth);
+    }
+    for ship in world.sinking() {
+        if !seen.contains(&ship.id) {
+            commands.spawn((DespawnOnExit(Screen::InGame), SinkSprite(ship.id), Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
         }
     }
 }

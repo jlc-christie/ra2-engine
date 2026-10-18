@@ -1168,6 +1168,10 @@ fn tanya_over_an_enemy_building_is_offered_the_charge() {
         assert_eq!(action, Action::Sabotage, "{soldier} over {name}");
         game.world.order(Order::Sell { building: id });
         game.run(120);
+        // The crews that walked out would fight the soldier.
+        for crew in game.world.units().iter().filter(|u| u.owner == 2 && u.stats.infantry).map(|u| u.id).collect::<Vec<_>>() {
+            game.world.remove_unit(crew);
+        }
     }
     }
 }
@@ -3979,4 +3983,144 @@ fn a_team_sent_to_its_own_refinery_waits_by_its_corner_not_its_dock() {
     };
     let corner = game.world.buildings().iter().find(|b| b.id == refinery).unwrap().cell;
     assert!((x - corner.0).abs().max((y - corner.1).abs()) <= 2, "sent to {:?}, the refinery's corner is {corner:?}", (x, y));
+/// A cell of open water with water all round it, on the first map that has one.
+fn open_water() -> Option<(Scenario, (i32, i32))> {
+    for map in ["mp01t4", "mp02t2", "mp05t4", "mp06t2", "mp08t2", "mp10s4", "mp11t2"] {
+        let Some(game) = Scenario::load(map) else {
+            continue;
+        };
+        let water = |x: i32, y: i32| game.world.map.describe(x, y).3 == ra2_sim::Land::Water as u8;
+        let (width, height) = game.world.map.size();
+        let found = (2..height - 2).flat_map(|y| (2..width - 2).map(move |x| (x, y))).find(|&(x, y)| (-1..=1).all(|dy| (-1..=1).all(|dx| water(x + dx, y + dy))));
+        if let Some(cell) = found {
+            return Some((game, cell));
+        }
+    }
+    None
+}
+
+#[test]
+fn crews_get_out_of_destroyed_vehicles_and_buildings() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    let at = (yard.0 + 8, yard.1 + 8);
+    let crew_kind = game.stats("E1").kind;
+    let survivors = |game: &Scenario| game.world.units().iter().filter(|u| u.owner == PLAYER && u.stats.kind == crew_kind).map(|u| (u.id, u.health)).collect::<Vec<_>>();
+    // A `Crewed` vehicle with no room for passengers: its crew gets out half
+    // the time (`CrewEscape`), hurt to between 5 and half his strength.
+    let strength = game.stats("E1").strength;
+    let mut escaped = 0;
+    for _ in 0..40 {
+        let truck = game.world.add_unit(at, 0, game.stats("TRUCKA"), PLAYER);
+        game.world.kill_unit_for_tests(truck);
+        let out = survivors(&game);
+        assert!(out.len() <= 1);
+        for (id, health) in out {
+            assert!((5..=strength / 2).contains(&health), "crew at {health} of {strength}");
+            escaped += 1;
+            game.world.remove_unit(id);
+        }
+        game.run(1);
+    }
+    assert!((8..=32).contains(&escaped), "{escaped} of 40 crews got out");
+    // A tank is not `Crewed`.
+    let tank = game.world.add_unit(at, 0, game.stats("MTNK"), PLAYER);
+    game.world.kill_unit_for_tests(tank);
+    assert!(survivors(&game).is_empty());
+
+    // A power plant holds one (400 back over 500 a soldier, at least one):
+    // at most one gets out, usually one, at up to full strength.
+    let plant = game.building("GAPOWR");
+    let mut out_of_plants = 0;
+    for _ in 0..20 {
+        let id = game.world.add_map_building(PLAYER, plant, at, 256);
+        game.world.kill_building_for_tests(id);
+        let out = survivors(&game);
+        assert!(out.len() <= 1, "{} out of a power plant", out.len());
+        for (id, health) in out {
+            assert!((5..=strength).contains(&health));
+            out_of_plants += 1;
+            game.world.remove_unit(id);
+        }
+        game.run(300);
+    }
+    assert!((8..=20).contains(&out_of_plants), "{out_of_plants} of 20 power plants let somebody out");
+}
+
+#[test]
+fn a_ship_sinks_for_81_frames_and_a_light_one_does_not() {
+    let Some((mut game, cell)) = open_water() else {
+        return;
+    };
+    let ship = game.world.add_unit(cell, 0, game.stats("DEST"), 2);
+    game.world.kill_unit_for_tests(ship);
+    assert!(game.world.unit(ship).is_none(), "the destroyer is still about");
+    assert_eq!(game.world.sinking().len(), 1, "the destroyer did not go down");
+    game.run(80);
+    assert_eq!(game.world.sinking().first().map(|s| s.depth), Some(400));
+    game.run(1);
+    assert!(game.world.sinking().is_empty(), "the destroyer is still sinking");
+    // Nothing is thrown on water.
+    assert!(game.world.debris().is_empty());
+    // A sea scorpion weighs 2: under `ShipSinkingWeight`, it is just gone.
+    let light = game.world.add_unit(cell, 0, game.stats("HYD"), 2);
+    game.world.kill_unit_for_tests(light);
+    assert!(game.world.unit(light).is_none() && game.world.sinking().is_empty());
+}
+
+#[test]
+fn a_destroyed_building_throws_debris_that_comes_down() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    let at = (yard.0 + 8, yard.1 + 8);
+    let plant = game.world.add_map_building(PLAYER, game.building("GAPOWR"), at, 256);
+    game.world.kill_building_for_tests(plant);
+    let thrown = game.world.debris().len();
+    assert!(thrown >= 4, "{thrown} pieces thrown");
+    game.run(300);
+    assert!(game.world.debris().is_empty(), "debris still in the air");
+}
+
+#[test]
+fn a_chrono_miner_jumping_leaves_its_terror_drone_behind() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    let spot = game.find_spot("GAREFN", (yard.0 + 5, yard.1 + 5), 8).unwrap();
+    let refinery = game.world.add_map_building(2, game.building("GAREFN"), spot, 256);
+    for id in game.world.units().iter().filter(|u| u.stats.harvester).map(|u| u.id).collect::<Vec<_>>() {
+        game.world.remove_unit(id);
+    }
+    game.run(2);
+    let home = (spot.0 + 14, spot.1 + 9);
+    let miner = game.world.add_unit(home, 0, game.stats("CMIN"), 2);
+    game.world.units_mut_for_tests(miner, 100_000);
+    let drone = game.world.add_unit((home.0 - 3, home.1), 0, game.stats("DRON"), PLAYER);
+    game.world.order(Order::Attack { unit: drone, target: ra2_sim::combat::Aim::Unit(miner) });
+    game.run(200);
+    assert!(game.world.unit(drone).is_none() && game.world.unit(miner).is_some_and(|u| u.parasite.len() == 1), "the drone is not inside");
+    game.world.order(Order::Dock { unit: miner, building: refinery });
+    let dock = (spot.0 + 3, spot.1 + 1);
+    let mut left_from = game.world.unit(miner).unwrap().cell();
+    for _ in 0..300 {
+        let here = game.world.unit(miner).unwrap().cell();
+        if here == dock {
+            break;
+        }
+        left_from = here;
+        game.run(1);
+    }
+    let miner_now = game.world.unit(miner).unwrap();
+    assert_eq!(miner_now.cell(), dock, "the miner did not jump");
+    assert!(miner_now.parasite.is_empty(), "the drone went along");
+    let drone_now = game.world.unit(drone).expect("the drone was lost");
+    let (dx, dy) = (drone_now.cell().0 - left_from.0, drone_now.cell().1 - left_from.1);
+    assert!(dx.abs() <= 1 && dy.abs() <= 1, "the drone came out at {:?}, the miner left {left_from:?}", drone_now.cell());
+    // It waits three times its weapon's rate of fire before doing anything.
+    assert!(drone_now.paralysed_until > game.world.current_tick());
 }

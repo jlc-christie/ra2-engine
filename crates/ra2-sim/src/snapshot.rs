@@ -16,8 +16,8 @@
 //!
 //! | `World`   | fields |
 //! |-----------|--------|
-//! | State     | `random` `tick` `next_id` `over`; `houses`; `units` `landing_orders` `unpacked`; `buildings`; `claims` `spots` `spot_house`; `bullets` `events` `dying` `bombs` `pending_bites` `leaps` `waves` `rad_sites` `storm` `nukes` `animated`; `teams`; `ore_queues` `ore_ready`; `trigger_scores`; `map` (below) |
-//! | Rules     | `end_checks` `short_game` `supers_allowed` `bridges_destroyable` `bridge_strength` `tracks` `blockage_delay` `path_delay` `close_enough` `building_types` `unit_types` `queue_limit` `build_rules` `mcv_repacks` `buildup_ticks` `chrono` `refund_percent` `repair_step` `repair_percent` `repair_interval` `survivor_divisors` `crew_types` `weapons` `warheads` `projectiles` `gravity` `max_damage` `missile_rot_var` `targeting_delay` `condition_red` `c4_delay` `ai_rules` `team_data` `rockets` `super_types` `super_rules` `veterancy` `rad_rules` `ability_rules` `reload_delay` `ore_values` `ore_near_scan` `ore_far_scan` `harvester_load_rate` `harvester_dump_rate` `harvester_too_far` `chrono_too_far` `ore_types` |
+//! | State     | `random` `tick` `next_id` `over`; `houses`; `units` `landing_orders` `unpacked`; `buildings`; `claims` `spots` `spot_house`; `bullets` `events` `dying` `bombs` `pending_bites` `leaps` `waves` `rad_sites` `storm` `nukes` `animated` `wreckage`; `teams`; `ore_queues` `ore_ready`; `trigger_scores`; `map` (below) |
+//! | Rules     | `end_checks` `short_game` `supers_allowed` `bridges_destroyable` `bridge_strength` `tracks` `blockage_delay` `path_delay` `close_enough` `building_types` `unit_types` `queue_limit` `build_rules` `mcv_repacks` `buildup_ticks` `chrono` `refund_percent` `repair_step` `repair_percent` `repair_interval` `survivor_divisors` `crew_types` `remains_rules` `weapons` `warheads` `projectiles` `gravity` `max_damage` `missile_rot_var` `targeting_delay` `condition_red` `c4_delay` `ai_rules` `team_data` `rockets` `super_types` `super_rules` `veterancy` `rad_rules` `ability_rules` `reload_delay` `ore_values` `ore_near_scan` `ore_far_scan` `harvester_load_rate` `harvester_dump_rate` `harvester_too_far` `chrono_too_far` `ore_types` |
 //! | Derived   | none |
 //!
 //! | `Map`     | fields |
@@ -85,7 +85,7 @@ classify! { World, write_world, read_world,
         "units": units landing_orders unpacked;
         "buildings": buildings;
         "cells": claims spots spot_house;
-        "transient": bullets events dying bombs pending_bites leaps waves rad_sites storm nukes animated;
+        "transient": bullets events dying bombs pending_bites leaps waves rad_sites storm nukes animated wreckage;
         "teams": teams trigger_scores;
         "crates": crates crates_on;
         "ore queues": ore_queues ore_ready;
@@ -102,7 +102,7 @@ classify! { World, write_world, read_world,
         c4_delay ai_rules team_data rockets super_types super_rules crate_rules veterancy rad_rules
         ability_rules reload_delay ore_values ore_near_scan ore_far_scan
         harvester_load_rate harvester_dump_rate harvester_too_far chrono_too_far ore_types
-        anim_marks splash_anims
+        anim_marks splash_anims remains_rules
     }
 }
 

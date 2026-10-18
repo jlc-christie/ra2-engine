@@ -10,6 +10,7 @@ pub mod combat;
 pub mod flight;
 pub mod path;
 pub mod radiation;
+pub mod remains;
 pub mod ore;
 pub mod smudge;
 pub mod snapshot;
@@ -1310,6 +1311,11 @@ pub struct Unit {
     pub arms: combat::Arms,
     /// The tick until which it is out of action after a jump.
     pub warp_until: u64,
+    /// For a parasite inside something: until when a hit on its host by
+    /// somebody else would be the end of it if it had to leave. And for
+    /// anything, until when it stays where it is and holds its fire.
+    pub suppressed_until: u64,
+    pub paralysed_until: u64,
     /// Held by a `Temporal` weapon: what is left of it to wear away.
     pub frozen: Option<i32>,
     /// The building it has been sent into.
@@ -1497,6 +1503,8 @@ impl Unit {
             work: Work::default(),
             arms: combat::Arms::facing(facing),
             warp_until: 0,
+            suppressed_until: 0,
+            paralysed_until: 0,
             frozen: None,
             capture: None,
             stance: combat::Stance::Standing,
@@ -1618,6 +1626,8 @@ pub struct BuildingType {
     /// `Explosion`: what it may go up in, as numbers in the world's list of
     /// animation types.
     pub explosions: Vec<u16>,
+    /// What it throws as it is destroyed.
+    pub leavings: remains::Leavings,
     /// `Factory`: what kind of thing it produces, if any.
     pub factory: Option<Factory>,
     /// `BuildCat=Combat`: it goes in the defences tab and has its own production.
@@ -1789,6 +1799,16 @@ pub struct UnitType {
     /// `Explosion`: what it may go up in, as numbers in the world's list of
     /// animation types.
     pub explosions: Vec<u16>,
+    /// `Crewed`, `Weight`, `Underwater`; for a soldier `NotHuman` and
+    /// `DeathAnims` (animations by number); and what it throws as it dies.
+    pub crewed: bool,
+    pub weight: f64,
+    pub underwater: bool,
+    pub not_human: bool,
+    pub death_anims: Vec<u16>,
+    pub leavings: remains::Leavings,
+    /// `SuppressionThreshold`: a parasite's.
+    pub suppression_threshold: i32,
     /// `RequiresStolenAlliedTech` or `RequiresStolenSovietTech`: only for a house
     /// whose spy has been into the right laboratory.
     /// `RequiresStolenSovietTech` (1) or `RequiresStolenAlliedTech` (2).
@@ -2048,6 +2068,8 @@ pub struct Building {
     looked: bool,
     /// A charge planted in it: the tick it goes off, and who planted it.
     pub c4: Option<(u64, u32)>,
+    /// Taken by an engineer.
+    pub captured: bool,
     /// The aircraft holding each of its pads.
     pub docks: Vec<Option<u32>>,
     /// A shot being charged: the tick it began, the tick it is let go, and
@@ -2277,7 +2299,10 @@ pub struct World {
     pub repair_percent: f64,
     pub repair_interval: u32,
     pub survivor_divisors: (i32, i32),
-    pub crew_types: (Option<u16>, Option<u16>, Option<u16>),
+    pub crew_types: (Option<u16>, Option<u16>, Option<u16>, Option<u16>),
+    /// Debris, crews and sinking ships, and the pieces and wrecks now shown.
+    pub remains_rules: remains::Rules,
+    wreckage: remains::Wreckage,
     /// Weapon, warhead and projectile types.
     pub weapons: Vec<combat::Weapon>,
     pub warheads: Vec<combat::Warhead>,
@@ -2403,7 +2428,9 @@ impl World {
             repair_percent: 0.15,
             repair_interval: 14,
             survivor_divisors: (500, 250),
-            crew_types: (None, None, None),
+            crew_types: (None, None, None, None),
+            remains_rules: remains::Rules::default(),
+            wreckage: remains::Wreckage::default(),
             weapons: Vec::new(),
             warheads: Vec::new(),
             projectiles: Vec::new(),
@@ -2720,6 +2747,7 @@ impl World {
             muzzle: 0,
             looked: false,
             c4: None,
+            captured: false,
             docks: vec![None; self.building_types.get(kind as usize).map_or(0, |kind| kind.number_of_docks)],
             charge: None,
             refining: None,
@@ -3220,27 +3248,22 @@ impl World {
     }
 
     /// The people who walk out of a building being sold.
-    // One for each
-    // `AlliedSurvivorDivisor` or `SovietSurvivorDivisor` credits of the refund,
-    // from one to five; each the side's crew type, with one chance in four of an
-    // engineer from a construction yard, and at most one engineer; each put on a
-    // cell of the foundation picked at random and told to scatter.
+    // As many as the building's crew count; each its crew type, and at most
+    // one engineer; each put on a cell of the foundation picked at random and
+    // told to scatter, at full health.
     fn sale_crew(&mut self, index: usize) {
         let building = self.buildings[index].clone();
         let Some(kind) = self.building_types.get(building.kind as usize).cloned() else {
             return;
         };
-        let side = self.houses.get(building.owner as usize).map_or(0, |house| house.side);
-        let divisor = if side == 1 { self.survivor_divisors.1 } else { self.survivor_divisors.0 };
-        if !kind.crewed || divisor == 0 {
-            return;
-        }
-        let count = (self.refund(building.kind) / divisor).clamp(1, 5);
+        let count = self.crew_count(&building, &kind);
         let mut engineer = false;
         for _ in 0..count {
-            let mut crew = if side == 1 { self.crew_types.1 } else { self.crew_types.0 };
-            if kind.construction_yard && !engineer && self.next_random() % 100 < 25 {
-                crew = self.crew_types.2;
+            let mut crew = self.building_crew_kind(&building, &kind);
+            while engineer && crew.is_some() && crew == self.crew_types.2 {
+                crew = self.building_crew_kind(&building, &kind);
+            }
+            if crew.is_some() && crew == self.crew_types.2 {
                 engineer = true;
             }
             let Some(stats) = crew.and_then(|crew| self.unit_types.get(crew as usize).map(|t| UnitStats { kind: crew + 1, ..t.stats })) else {
@@ -3968,6 +3991,7 @@ impl World {
             if self.units[index].stats.teleporter {
                 let free = self.map.index(spot.0, spot.1).is_some_and(|at| self.claims[at] == 0);
                 if free {
+                    self.parasite_exit(index);
                     if let Some(at) = self.map.index(here.0, here.1) {
                         if self.claims[at] == id + 1 {
                             self.claims[at] = 0;
@@ -4599,7 +4623,7 @@ impl World {
                 // computer's soldier getting up (above) keeps the destination
                 // and sets off once it stands; movement waits for that.
                 let getting_up = matches!(self.units[index].stance, combat::Stance::Undeploying(_));
-                if (self.units[index].stance != combat::Stance::Standing && !getting_up) || self.units[index].frozen.is_some() || self.tick < self.units[index].warp_until {
+                if (self.units[index].stance != combat::Stance::Standing && !getting_up) || self.units[index].frozen.is_some() || self.tick < self.units[index].warp_until || self.tick < self.units[index].paralysed_until {
                     return;
                 }
                 if self.units[index].plane.is_some() {

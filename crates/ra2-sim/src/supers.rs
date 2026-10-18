@@ -555,6 +555,16 @@ impl World {
                 unit.arms.target = None;
                 unit.warp_until = tick + WARP_WAIT;
                 unit.chrono = Some(Warp { to: point, at: tick + WARP_WAIT, sink: None });
+                // A parasite is put out where it was.
+                self.parasite_exit(index);
+                let mut moved = self.lift(index);
+                moved.dest = None;
+                moved.head_to = None;
+                moved.drop_path();
+                let back = moved.clone();
+                if !self.set_down(moved, dest) {
+                    self.set_down(back, source);
+                }
             }
         }
     }

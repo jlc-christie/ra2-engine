@@ -983,6 +983,13 @@ impl World {
             let (host, on_foot, health, source) = (self.units[index].id, self.units[index].stats.infantry, self.units[index].health, Aim::Unit(biter.id));
             self.units[index].parasite[0].bite = Some((weapon_index, self.tick + weapon.rof.max(1) as u64));
             let damage = if on_foot { health } else { weapon.damage };
+            // A vehicle sparks, shows the
+            // weapon's animation for its direction, and is rocked from a point
+            // two leptons to one side or the other.
+            if !on_foot {
+                let side = if self.random_below(2) == 1 { -2 } else { 2 };
+                self.events.push(Event::Bitten { host, weapon: weapon_index, side });
+            }
             self.receive_damage(Aim::Unit(host), damage, 0, weapon.warhead, Some(source));
         }
 
@@ -1019,7 +1026,7 @@ impl World {
     // The bomb. The
     // parasite comes out where its host stood. Passengers of a vehicle that does not crash come out on
     // its cell if they could stand there, and scatter; otherwise they die.
-    pub(crate) fn empty_the_dead(&mut self, mut dead: Unit) {
+    pub(crate) fn empty_the_dead(&mut self, mut dead: Unit, wet: bool) {
         let cell = dead.cell();
         if let Some(at) = self.bombs.iter().position(|bomb| bomb.target == Aim::Unit(dead.id)) {
             let bomb = self.bombs.remove(at);
@@ -1051,12 +1058,17 @@ impl World {
         // `Suicide` weapon takes its passengers with it and goes off: its
         // `DeathWeapon`, else its first weapon, at `DeathWeaponDamageModifier`
         // times the weapon's damage, where it stood.
-        if dead.stats.explodes || dead.has_ability(1 << 10) || dead.died_by_suicide {
+        // None of this in the water.
+        if !wet && (dead.stats.explodes || dead.has_ability(1 << 10) || dead.died_by_suicide) {
             dead.cargo.clear();
             let point = (dead.x, dead.y, self.ground_z(dead.x, dead.y));
             self.death_blast(point, dead.stats.death_weapon, dead.stats.death_percent, dead.stats.fighter.primary.map(|mount| mount.weapon), dead.stats.strength, Aim::Unit(dead.id));
         }
         let crashes = dead.stats.jet.is_some_and(|jet| jet.crashable) || dead.plane.is_some();
+        // A parasite whose
+        // host was lately hurt by somebody else goes with it.
+        let tick = self.tick;
+        dead.parasite.retain(|biter| tick >= biter.suppressed_until || biter.curtain_until > tick);
         let riders: Vec<Unit> = dead.parasite.drain(..).chain(if crashes { Vec::new() } else { std::mem::take(&mut dead.cargo) }).collect();
         let mut out = Vec::new();
         for mut rider in riders {
