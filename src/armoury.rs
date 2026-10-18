@@ -24,6 +24,9 @@ pub struct WeaponLook {
     pub house_colour: bool,
     pub electric_bolt: bool,
     pub alternate_colour: bool,
+    /// `IsRadBeam`: the beam's colour, `ChronoBeamColor` for a `Temporal`
+    /// warhead, else `RadColor`.
+    pub rad_beam: Option<[u8; 3]>,
 }
 
 #[derive(Clone, Default)]
@@ -308,6 +311,11 @@ impl Armoury {
             house_colour: yes(get("IsHouseColor"), false),
             electric_bolt: yes(get("IsElectricBolt"), false),
             alternate_colour: yes(get("IsAlternateColor"), false),
+            rad_beam: yes(get("IsRadBeam"), false).then(|| {
+                let temporal = self.warheads.get(warhead as usize).is_some_and(|w| w.temporal);
+                let (section, key) = if temporal { ("AudioVisual", "ChronoBeamColor") } else { ("Radiation", "RadColor") };
+                triple(rules.get(section, key).map(|v| v.split(';').next().unwrap_or(""))).map_or(if temporal { [128, 200, 255] } else { [0, 255, 0] }, |(r, g, b)| [r as u8, g as u8, b as u8])
+            }),
         });
         Some(self.weapons.len() as u16 - 1)
     }

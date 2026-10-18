@@ -2,9 +2,9 @@
 //!
 //! Follows the original game
 //!
-//! Not the original's structure: the engine makes a mark at the largest frame of
-//! an animation, which is part of its simulation; animations here belong to the
-//! view, which asks for the mark as it starts one.
+//! The engine makes a mark when an animation reaches its largest picture; the
+//! animations here belong to the view, so the sim keeps the time that picture
+//! is due instead.
 
 use crate::{Land, Map, World, LEPTONS_PER_CELL};
 
@@ -27,6 +27,23 @@ impl Map {
             .enumerate()
             .filter(|(_, (kind, part))| **kind != 0 && **part == 0)
             .map(move |(index, (kind, _))| ((index as i32 % width, index as i32 / width), kind - 1))
+    }
+
+    /// Puts down a mark of a type as a map places it: every cell of its block
+    /// that is on the map and has no mark.
+    pub fn place_smudge(&mut self, cell: (i32, i32), kind: u16) {
+        let Some(&size) = self.smudge_types.get(kind as usize) else {
+            return;
+        };
+        for row in 0..size.height.max(1) {
+            for col in 0..size.width.max(1) {
+                if let Some(at) = self.index(cell.0 + col, cell.1 + row).filter(|&at| self.smudge[at] == 0) {
+                    self.smudge[at] = kind + 1;
+                    self.smudge_part[at] = (row * size.width + col) as u8;
+                }
+            }
+        }
+        self.smudge_version += 1;
     }
 
     // Every cell of the block must be on the map, flat, without a mark or
@@ -56,7 +73,11 @@ pub struct AnimMark {
     pub scorch: bool,
     pub crater: bool,
     pub force_big: bool,
+    /// The largest picture's width and height.
     pub size: (i32, i32),
+    /// Frames from the start until that picture shows; `None` when it never
+    /// does.
+    pub after: Option<u32>,
 }
 
 impl World {
@@ -145,6 +166,36 @@ impl World {
     pub(crate) fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
         if let Some(mark) = self.anim_marks.get(anim as usize).copied() {
             self.animation_mark(at, mark.scorch, mark.crater, mark.force_big, mark.size.0, mark.size.1);
+    /// The mark of an animation type, by its number, made when the
+    /// animation reaches its largest picture.
+    // At once when that is its first picture; otherwise when the start
+    // frame plus the stage reaches it.
+    fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
+        let Some(mark) = self.anim_marks.get(anim as usize).copied() else {
+            return;
+        };
+        if !mark.scorch && !mark.crater {
+            return;
+        }
+        match mark.after {
+            Some(0) => self.animation_mark(at, mark.scorch, mark.crater, mark.force_big, mark.size.0, mark.size.1),
+            Some(after) => self.pending_marks.push((self.tick + after as u64, at, anim)),
+            None => {}
+        }
+    }
+
+    /// Makes the marks that are due.
+    pub(crate) fn run_marks(&mut self) {
+        if self.pending_marks.is_empty() {
+            return;
+        }
+        let tick = self.tick;
+        let due: Vec<((i32, i32), u16)> = self.pending_marks.iter().filter(|m| m.0 <= tick).map(|m| (m.1, m.2)).collect();
+        self.pending_marks.retain(|m| m.0 > tick);
+        for (at, anim) in due {
+            if let Some(mark) = self.anim_marks.get(anim as usize).copied() {
+                self.animation_mark(at, mark.scorch, mark.crater, mark.force_big, mark.size.0, mark.size.1);
+            }
         }
     }
 

@@ -18,6 +18,7 @@ mod fuzz;
 mod game;
 mod home;
 mod hud;
+mod lighting;
 mod net;
 mod notice;
 mod pause;

@@ -4184,4 +4184,11 @@ fn a_chrono_miner_jumping_leaves_its_terror_drone_behind() {
     game.world.order(Order::Cheer { house: PLAYER });
     game.run(1);
     assert_eq!(game.world.unit(ours).unwrap().fidget.map(|f| f.0), Some(3), "no cheer");
+#[test]
+fn a_map_starts_with_its_own_marks() {
+    let Some(game) = Scenario::load("mp02t2") else {
+        return;
+    };
+    // DATA: the Isle of War's `[Smudge]` puts CRATER07 at 103,66.
+    assert!(game.world.map.smudges().any(|(cell, _)| cell == (103, 66)), "the map's crater is missing");
 }

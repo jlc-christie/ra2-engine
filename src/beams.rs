@@ -1,4 +1,5 @@
-//! Lasers and electric bolts: the lines drawn between a weapon and what it hits.
+//! Lasers, electric bolts and rad beams: the lines drawn between a weapon and
+//! what it hits.
 //!
 //! Follows the original game.
 
@@ -86,7 +87,7 @@ impl Plugin for BeamsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(Material2dPlugin::<Additive>::default())
             .add_systems(OnEnter(Screen::InGame), setup)
-            .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>)).run_if(in_state(Screen::InGame)));
+            .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>), wave_rad_beams, show_sonic_waves.run_if(resource_exists::<Sim>)).run_if(in_state(Screen::InGame)));
     }
 }
 
@@ -307,6 +308,117 @@ fn flicker_bolts(mut commands: Commands, colours: Res<BoltColours>, mut bolts: Q
             let colour = colours.0[if k == 0 { 1 } else if bolt.alternate { 2 } else { 0 }];
             let id = commands.spawn((DespawnOnExit(Screen::InGame), line(project(from), project(to), 0.0, colour, 1.0))).id();
             bolt.lines.push(id);
+        }
+    }
+}
+
+/// A rad beam (the Desolator's, the Chrono Legionnaire's): its ends in world
+/// leptons, its colour, and the drawn frames it has had.
+#[derive(Component)]
+pub struct RadBeam {
+    from: (i32, i32, i32),
+    to: (i32, i32, i32),
+    origin: Vec2,
+    colour: [u8; 3],
+    stage: u32,
+    lines: Vec<Entity>,
+}
+
+/// Rendered frames a rad beam lasts.
+const RAD_BEAM_FRAMES: u32 = 15;
+/// How far, in leptons of height, the beam swings at the end of its life.
+const RAD_BEAM_AMPLITUDE: f64 = 40.0;
+/// The length of each straight piece, in leptons.
+// The engine sets it from the frame rate, held to 10..100.
+const RAD_BEAM_STEP: f64 = 20.0;
+
+/// Starts a rad beam between two points in world leptons.
+pub fn rad_beam(commands: &mut Commands, from: (i32, i32, i32), to: (i32, i32, i32), origin: Vec2, colour: [u8; 3]) {
+    commands.spawn((DespawnOnExit(Screen::InGame), RadBeam { from, to, origin, colour, stage: 0, lines: Vec::new() }));
+}
+
+// Drawn afresh each rendered frame for 15 frames: straight pieces along the
+// line, each point raised by a sine of twice its distance along in degrees
+// (at least 360 leptons' worth over the beam), times an amplitude that grows
+// from nothing to 40 leptons over the beam's life. Each piece's colour is
+// the beam's times one half plus half its share of the full swing.
+fn wave_rad_beams(mut commands: Commands, mut beams: Query<(Entity, &mut RadBeam)>) {
+    for (entity, mut beam) in &mut beams {
+        for line in beam.lines.drain(..) {
+            commands.entity(line).despawn();
+        }
+        if beam.stage >= RAD_BEAM_FRAMES {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let (from, to) = (beam.from, beam.to);
+        let delta = [(to.0 - from.0) as f64, (to.1 - from.1) as f64, (to.2 - from.2) as f64];
+        let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let pieces = ((length / RAD_BEAM_STEP) as i32).max(1);
+        let amplitude = beam.stage as f64 / RAD_BEAM_FRAMES as f64 * RAD_BEAM_AMPLITUDE;
+        let span = length.max(360.0) * 2.0;
+        let point = |i: i32| -> ((i32, i32, i32), f64) {
+            let swing = ((i as f64 / pieces as f64) * span).to_radians().sin() * amplitude;
+            let along = |c: usize, base: i32| base + (delta[c] as i32 / pieces) * i;
+            ((along(0, from.0), along(1, from.1), along(2, from.2) + swing as i32), swing)
+        };
+        let origin = beam.origin;
+        let project = |p: (i32, i32, i32)| crate::units::scene_point_3d(origin, p);
+        for i in 0..pieces {
+            let (a, swing) = point(i);
+            let (b, _) = point(i + 1);
+            let shade = if amplitude > 0.0 { (swing as i32).abs() as f64 * 0.5 / amplitude + 0.5 } else { 0.5 };
+            let colour = beam.colour.map(|c| (c as f64 * shade) as u8);
+            let id = commands.spawn((DespawnOnExit(Screen::InGame), line(project(a), project(b), 0.0, colour, 1.0))).id();
+            beam.lines.push(id);
+        }
+        // RA2_RADBEAM_HOLD=n holds beams at their nth frame, for looking at them.
+        match std::env::var("RA2_RADBEAM_HOLD").ok().and_then(|n| n.parse::<u32>().ok()) {
+            Some(hold) if beam.stage >= hold => {}
+            _ => beam.stage += 1,
+        }
+    }
+}
+
+/// A stripe of a sonic wave's ripple.
+#[derive(Component)]
+struct SonicStripe;
+
+/// The dolphin's sonic wave between the firer and the wave's head.
+// The engine bends the picture under the wave: each pixel within the wave's
+// band takes a neighbour's colour by a sine of its distance from the middle
+// line, its green and blue raised by a level table. Not original behaviour:
+// here stripes across the band, brightest where that sine peaks, move along
+// the wave in a pale blue-green.
+fn show_sonic_waves(mut commands: Commands, sim: Res<Sim>, view: Option<Res<crate::units::UnitView>>, old: Query<Entity, With<SonicStripe>>, mut drawn: Local<u64>) {
+    let Some(view) = view else {
+        return;
+    };
+    *drawn += 1;
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    let origin = view.origin();
+    for wave in sim.0.waves() {
+        let Some((from, head)) = sim.0.wave_span(wave) else {
+            continue;
+        };
+        let (a, b) = (crate::units::scene_point_3d(origin, from), crate::units::scene_point_3d(origin, head));
+        let along = b - a;
+        let length = along.length();
+        if length < 1.0 {
+            continue;
+        }
+        let dir = along / length;
+        let across = Vec2::new(-dir.y, dir.x);
+        let mut at = (*drawn % 8) as f32;
+        while at < length {
+            let middle = a + dir * at;
+            let swell = (at / length * std::f32::consts::PI).sin();
+            let half = 6.0 + 10.0 * swell;
+            let (sprite, transform) = line(middle - across * half, middle + across * half, 0.0, [120, 220, 255], 0.25 + 0.35 * swell);
+            commands.spawn((DespawnOnExit(Screen::InGame), SonicStripe, sprite, transform));
+            at += 8.0;
         }
     }
 }

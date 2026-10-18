@@ -88,6 +88,7 @@ classify! { World, write_world, read_world,
         "buildings": buildings;
         "cells": claims spots spot_house;
         "transient": bullets events dying bombs pending_bites leaps waves rad_sites storm nukes animated wreckage;
+        "transient": bullets events dying bombs pending_bites leaps waves pending_marks rad_sites storm nukes animated;
         "teams": teams trigger_scores;
         "crates": crates crates_on;
         "ore queues": ore_queues ore_ready;

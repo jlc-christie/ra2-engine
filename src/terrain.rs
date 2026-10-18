@@ -49,6 +49,9 @@ struct Theater {
     tile_names: Vec<String>,
     /// The set's `AllowTiberium`, for each tile index.
     tile_tiberium: Vec<bool>,
+    /// Animations attached to tiles, by tile index: the animation, its offset
+    /// in pixels from the cell's middle, and the cell of the tile it is on.
+    tile_anims: HashMap<usize, (String, (i32, i32), u8)>,
 }
 
 impl Theater {
@@ -63,12 +66,24 @@ impl Theater {
         let ini = Ini::parse(files.get(&format!("{stem}.ini"))?);
         let mut tile_names = Vec::new();
         let mut tile_tiberium = Vec::new();
+        let mut tile_anims = HashMap::new();
         for set in 0.. {
             let section = format!("TileSet{set:04}");
             let Some(file_stem) = ini.get(&section, "FileName") else {
                 break;
             };
             let count: usize = ini.get(&section, "TilesInSet")?.parse().ok()?;
+            // DATA: a section named by the set's `SetName` gives a tile's
+            // `TileNNAnim`, `TileNNXOffset`, `TileNNYOffset`, `TileNNAttachesTo`.
+            if let Some(name) = ini.get(&section, "SetName").map(str::trim) {
+                for n in 1..=count {
+                    let key = |what: &str| ini.get(name, &format!("Tile{n:02}{what}")).map(|v| v.split(';').next().unwrap_or("").trim().to_owned());
+                    if let Some(anim) = key("Anim").filter(|a| !a.is_empty()) {
+                        let number = |what: &str| key(what).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                        tile_anims.insert(tile_names.len() + n - 1, (anim.to_uppercase(), (number("XOffset"), number("YOffset")), number("AttachesTo") as u8));
+                    }
+                }
+            }
             tile_names.extend((1..=count).map(|n| format!("{file_stem}{n:02}")));
             let allowed = ini.get(&section, "AllowTiberium").is_some_and(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "yes" | "1"));
             tile_tiberium.extend(std::iter::repeat_n(allowed, count));
@@ -84,6 +99,7 @@ impl Theater {
             unit_palette: palette(format!("unit{extension}.pal"))?,
             tile_names,
             tile_tiberium,
+            tile_anims,
         })
     }
 
@@ -95,18 +111,6 @@ impl Theater {
         }
     }
 }
-
-/// A map's `[Lighting]` settings, in the engine's units of 1000 = 100%.
-struct Lighting {
-    ambient: i32,
-    ground: i32,
-    /// Added per height level.
-    level: i32,
-    tint: [i32; 3],
-}
-
-/// Brightest a cell can be.
-const MAX_LIGHT: i32 = 2000;
 
 /// Which alternate image a cell uses when its tile has up to four of them, indexed
 /// by `(y & 3) * 4 + (x & 3)`.
@@ -142,60 +146,6 @@ fn large_variant_table() -> [usize; 64] {
 }
 
 type Light = [u32; 3];
-
-impl Lighting {
-    fn from_map(map: &Map) -> Self {
-        let value = |key: &str, default: f64| -> f64 {
-            map.ini
-                .get("Lighting", key)
-                .and_then(|text| text.parse().ok())
-                .unwrap_or(default)
-        };
-        // The engine stores ambient and tint as whole percentages, and
-        // ground and level in thousandths, truncating each.
-        let percent = |key: &str| (value(key, 1.0) * 100.0) as i32 * 10;
-        Self {
-            ambient: percent("Ambient"),
-            ground: (value("Ground", 0.0) * 1000.0) as i32,
-            level: (value("Level", 0.0) * 1000.0) as i32,
-            tint: [percent("Red"), percent("Green"), percent("Blue")],
-        }
-    }
-
-    /// Per-channel multipliers, in thousandths, for something at a height level.
-    // Brightness formula, clamps and tint
-    // normalisation.
-    fn at(&self, level: i32) -> Light {
-        let light = (self.ambient + self.level * level - self.ground).clamp(0, MAX_LIGHT);
-        // The tint is normalised to its strongest channel, and that channel's
-        // strength is folded into the brightness.
-        let tint = self.tint.map(|c| c.clamp(0, MAX_LIGHT));
-        let strongest = tint.into_iter().max().unwrap_or(1000).max(1);
-        let light = shade_step((light * strongest / 1000).min(MAX_LIGHT));
-        tint.map(|c| (light * c / strongest) as u32)
-    }
-
-    /// Brightness at a height level without the colour tint, for art drawn with a
-    /// palette that the map's tint is not applied to.
-    // Ore drills are drawn with a global palette and the cell's brightness,
-    // not the cell's own tinted palette.
-    fn untinted(&self, level: i32) -> Light {
-        let light = (self.ambient + self.level * level - self.ground).clamp(0, MAX_LIGHT);
-        let strongest = self.tint.map(|c| c.clamp(0, MAX_LIGHT)).into_iter().max();
-        let light = (light * strongest.unwrap_or(1000).max(1) / 1000).min(MAX_LIGHT);
-        [shade_step(light) as u32; 3]
-    }
-}
-
-/// Rounds a brightness to one of the engine's shade steps and returns it in
-/// thousandths.
-// The tile blitter turns brightness into a shade row,
-// `brightness * 261 >> 11` capped at 254, so 1000 is row 127 and there are 127
-// steps per 100%.
-fn shade_step(brightness: i32) -> i32 {
-    let row = ((brightness.max(0) * 261) >> 11).min(254);
-    row * 1000 / 127
-}
 
 // The rows are lookup tables built when the palette is set up; that code is unread.
 fn lit(color: [u8; 3], light: Light) -> [u8; 4] {
@@ -322,6 +272,9 @@ pub struct Placement {
     /// for a building the nearest cell of its foundation.
     pub cell: (i32, i32),
     pub kind: PlacementKind,
+    /// How it takes the light of `light_cell`, if at all.
+    pub light: Option<crate::lighting::LightRule>,
+    pub light_cell: (i32, i32),
 }
 
 /// One cell of the map as the simulation sees it.
@@ -413,8 +366,10 @@ pub struct AnimType {
     pub scorch: bool,
     pub crater: bool,
     pub force_big_craters: bool,
-    /// The size of its picture, which sets the size of the mark.
+    /// The size of its largest picture, which sets the size of the mark, and
+    /// that picture's number.
     pub size: (i32, i32),
+    pub middle: usize,
     /// `StartSound`, else `Report`: what is heard as it starts.
     pub report: Option<String>,
     /// `Translucent` and `Translucency`: how much of it is drawn (1 is solid).
@@ -643,9 +598,6 @@ pub struct UnitArt {
     normals: NormalTables,
     base_palette: Palette,
     owner_palettes: Vec<Palette>,
-    lighting: Lighting,
-    extra_light: u32,
-    extra_infantry_light: u32,
     theater_palette: Palette,
     iso_palette: Palette,
     anim_palette: Option<Palette>,
@@ -685,10 +637,9 @@ impl UnitArt {
         palette.and_then(|index| self.owner_palettes.get(index)).map_or([192, 192, 192], |palette| palette.0[21])
     }
 
-    /// Draws a mark on the ground for a cell at a height level.
-    // With the cell's own
-    // lit palette, which is the ground's.
-    pub fn smudge(&mut self, files: &GameFiles, art: &str, level: i32) -> Option<BuildingSprite> {
+    /// Draws a mark on the ground at full light; the sprite takes the
+    /// ground's light (`LightRule::Ground`). The level only keys the caches.
+    pub fn smudge(&mut self, files: &GameFiles, art: &str, _level: i32) -> Option<BuildingSprite> {
         let (extension, letter) = (self.extension, self.letter);
         let shp = self
             .shapes
@@ -699,14 +650,13 @@ impl UnitArt {
         Some(BuildingSprite {
             width: frame.width as u32,
             height: frame.height as u32,
-            rgba: frame_rgba(frame, &self.iso_palette, self.lighting.at(level)),
+            rgba: frame_rgba(frame, &self.iso_palette, [1000; 3]),
             offset: (frame.x as i32 - shp.width as i32 / 2, frame.y as i32 - shp.height as i32 / 2),
         })
     }
 
-    /// Draws a frame of a bridge's overlay art, or its shadow, lit for a level.
-    // With the cell's lit palette.
-    pub fn bridge(&mut self, files: &GameFiles, art: &str, frame: usize, level: i32, shadow: bool) -> Option<BuildingSprite> {
+    /// Draws a frame of a bridge's overlay art, or its shadow, at full light.
+    pub fn bridge(&mut self, files: &GameFiles, art: &str, frame: usize, _level: i32, shadow: bool) -> Option<BuildingSprite> {
         let (extension, letter) = (self.extension, self.letter);
         let shp = self
             .shapes
@@ -717,7 +667,7 @@ impl UnitArt {
         Some(BuildingSprite {
             width: frame.width as u32,
             height: frame.height as u32,
-            rgba: if shadow { shadow_rgba(frame) } else { frame_rgba(frame, &self.iso_palette, self.lighting.at(level)) },
+            rgba: if shadow { shadow_rgba(frame) } else { frame_rgba(frame, &self.iso_palette, [1000; 3]) },
             offset: (frame.x as i32 - shp.width as i32 / 2, frame.y as i32 - shp.height as i32 / 2),
         })
     }
@@ -741,16 +691,15 @@ impl UnitArt {
         })
     }
 
-    /// Draws a frame of a foot soldier's art, lit for a cell at a height level.
-    // Brightness is the cell's untinted value plus
-    // rules.ini `ExtraInfantryLight`.
+    /// Draws a frame of a foot soldier's art at full light; the sprite takes
+    /// its cell's light (`LightRule::Object` with `ExtraInfantryLight`).
     pub fn infantry(
         &mut self,
         files: &GameFiles,
         art: &str,
         frame: usize,
         palette: Option<usize>,
-        level: i32,
+        _level: i32,
     ) -> Option<BuildingSprite> {
         let (extension, letter) = (self.extension, self.letter);
         let shp = self
@@ -762,11 +711,10 @@ impl UnitArt {
         let palette = palette
             .and_then(|index| self.owner_palettes.get(index))
             .unwrap_or(&self.base_palette);
-        let light = self.lighting.untinted(level).map(|c| c + self.extra_infantry_light);
         Some(BuildingSprite {
             width: frame.width as u32,
             height: frame.height as u32,
-            rgba: frame_rgba(frame, palette, light),
+            rgba: frame_rgba(frame, palette, [1000; 3]),
             offset: (frame.x as i32 - shp.width as i32 / 2, frame.y as i32 - shp.height as i32 / 2),
         })
     }
@@ -797,7 +745,7 @@ impl UnitArt {
         art: &str,
         frame: usize,
         palette: Option<usize>,
-        level: i32,
+        _level: i32,
         shadow: bool,
     ) -> Option<BuildingSprite> {
         let (extension, letter) = (self.extension, self.letter);
@@ -813,21 +761,20 @@ impl UnitArt {
         Some(BuildingSprite {
             width: frame.width as u32,
             height: frame.height as u32,
-            rgba: if shadow { shadow_rgba(frame) } else { frame_rgba(frame, palette, self.lighting.untinted(level)) },
+            rgba: if shadow { shadow_rgba(frame) } else { frame_rgba(frame, palette, [1000; 3]) },
             offset: (frame.x as i32 - shp.width as i32 / 2, frame.y as i32 - shp.height as i32 / 2),
         })
     }
 
-    /// Draws a vehicle facing a direction, lit for a cell at a height level.
-    // Brightness is the cell's untinted value plus
-    // rules.ini `ExtraUnitLight`.
+    /// Draws a vehicle facing a direction at full light; the sprite takes its
+    /// cell's light (`LightRule::Object` with `ExtraUnitLight`).
     pub fn sprite(
         &mut self,
         files: &GameFiles,
         image: &str,
         facing: u8,
         palette: Option<usize>,
-        level: i32,
+        _level: i32,
     ) -> Option<voxel::VoxelSprite> {
         // A name ending "@p<n>" is the model with its nose raised n sixteenths
         // of a right angle (a rocket climbing or diving); "@r<n>" is the model
@@ -870,7 +817,7 @@ impl UnitArt {
             Some((vxl, hva))
         });
         let (vxl, hva) = model.as_ref()?;
-        let light = self.lighting.untinted(level).map(|c| c + self.extra_light);
+        let light = [1000; 3];
         let palette = palette
             .and_then(|index| self.owner_palettes.get(index))
             .unwrap_or(&self.base_palette);
@@ -1060,8 +1007,15 @@ pub struct Enemy {
 }
 
 pub struct Scene {
+    /// What lights the map while the game runs.
+    pub light_setup: crate::lighting::LightSetup,
     /// The kinds of mark explosions leave, by art name.
     pub smudge_types: Vec<(String, ra2_sim::smudge::SmudgeType)>,
+    /// Animations on tiles (waterfalls): the animation, where its middle is in
+    /// scene pixels, and its cell.
+    pub tile_anims: Vec<(String, (i32, i32), (i32, i32))>,
+    /// The marks the map starts with: cell and type.
+    pub map_smudges: Vec<((i32, i32), u16)>,
     /// The super weapon types, with each one's name, sidebar picture and the
     /// number of its `Action`, and the paradrops' rules.
     pub super_types: Vec<SuperInfo>,
@@ -1471,8 +1425,8 @@ pub const PLAYER_COLOURS: [&str; 8] =
 
 pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     let theater = Theater::load(files, &map.theater)?;
-    let lighting = Lighting::from_map(map);
     let object_rules = ObjectRules::load(files, &map.ini, &player.mode_rules);
+    let mut light_setup = crate::lighting::LightSetup::read(&map.ini, object_rules.rules.as_ref());
 
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
     for tile in &map.tiles {
@@ -1494,6 +1448,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     let mut depth_tiles: HashMap<(i32, usize, u8, bool), usize> = HashMap::new();
 
     let mut ramp_types: Vec<((i32, i32), u8)> = Vec::new();
+    let mut tile_anims: Vec<(String, (i32, i32), (i32, i32))> = Vec::new();
     let mut ground: Vec<((i32, i32), u8, u8)> = Vec::new();
     // Ore may come to lie on the clear tile and on
     // tiles of sets with `AllowTiberium`.
@@ -1574,7 +1529,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         // brightness.
         let colors = &theater.iso_palette.0;
 
-        let light = lighting.at(level);
+        let light = [1000; 3];
         let entry = *art
             .entry(ArtKey::Tile(index, variant, tile.sub_tile, light))
             .or_insert_with(|| {
@@ -1596,7 +1551,16 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             layer: Layer::Terrain,
             cell: cell_xy,
             kind: PlacementKind::Tile,
+            light: Some(crate::lighting::LightRule::Ground { raise: 0 }),
+            light_cell: cell_xy,
         });
+        // A tile's animation is started on the cell of its template it
+        // attaches to, at the cell's middle on the ground moved by its offset.
+        if let Some((anim, offset, attaches)) = theater.tile_anims.get(&(index as usize)) {
+            if tile.sub_tile == *attaches {
+                tile_anims.push((anim.clone(), (x + CELL_WIDTH / 2 + offset.0, y + CELL_HEIGHT / 2 + offset.1), cell_xy));
+            }
+        }
         // The tile's depth, for hiding units behind raised ground.
         // DATA: a tile without depth data is taken as flat (29 less the row).
         let flat_top = y + 15 * level;
@@ -1633,6 +1597,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 layer: Layer::Terrain,
                 cell: cell_xy,
                 kind: PlacementKind::TileExtra,
+                light: Some(crate::lighting::LightRule::Ground { raise: 0 }),
+                light_cell: cell_xy,
             });
             if let Some(extra_z) = &extra.z {
                 let shape = *depth_tiles.entry((index, variant, tile.sub_tile, true)).or_insert_with(|| {
@@ -1827,13 +1793,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     let opponent_palettes: Vec<Option<usize>> =
         opponent_colours.iter().map(|&colour| house_colors.palette_for_color(PLAYER_COLOURS[colour.min(7)], &theater.unit_palette)).collect();
 
-    // DATA: rules.ini `[AudioVisual] ExtraInfantryLight`, a fraction of full light.
-    let extra_infantry_light = object_rules
-        .rules
-        .as_ref()
-        .and_then(|rules| rules.get("AudioVisual", "ExtraInfantryLight"))
-        .and_then(|value| value.parse::<f64>().ok())
-        .map_or(0, |value| (value * 1000.0) as u32);
     let mut sprites: HashMap<String, Option<Shp>> = HashMap::new();
     let mut animations: Vec<Animation> = Vec::new();
     let mut missing_objects = 0;
@@ -1889,6 +1848,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     layer: Layer::Shadow,
                     cell: object.sort_cell,
                     kind: PlacementKind::Shadow,
+                    light: None,
+                    light_cell: object.cell,
                 });
             }
         }
@@ -1896,16 +1857,16 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         if frame.width == 0 || frame.height == 0 {
             continue;
         }
-        let light = match (object.kind, object.palette) {
+        use crate::lighting::LightRule;
+        let light_rule = match (object.kind, object.palette) {
             // Ore and gems are drawn at full brightness
             // with a global palette, not lit by their cell.
-            (PlacementKind::Ore, _) => [1000; 3],
-            (PlacementKind::Infantry, _) => {
-                lighting.untinted(level).map(|c| c + extra_infantry_light)
-            }
-            (_, PaletteKind::Unit) => lighting.untinted(level),
-            _ => lighting.at(level + object.light_levels),
+            (PlacementKind::Ore, _) => None,
+            (PlacementKind::Infantry, _) => Some(LightRule::Object { extra: light_setup.extra_infantry }),
+            (_, PaletteKind::Unit) => Some(LightRule::Object { extra: 0 }),
+            _ => Some(LightRule::Ground { raise: object.light_levels }),
         };
+        let light = [1000; 3];
         let key = ArtKey::Frame(object.art.clone(), object.frame, object.palette, object.remap, light);
         let entry = *art.entry(key).or_insert_with(|| {
             let palette = match object.remap {
@@ -1922,6 +1883,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             layer: Layer::Object,
             cell: object.sort_cell,
             kind: object.kind,
+            light: light_rule,
+            light_cell: object.cell,
         });
 
         // An animated object's image is its stage, and
@@ -2304,6 +2267,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         }
         wanted_anims.borrow_mut().extend(["NUKEBALL".to_owned(), "PSIWARN".to_owned()]);
     }
+    wanted_anims.borrow_mut().extend(tile_anims.iter().map(|(anim, _, _)| anim.clone()));
     // And those the crates show (`[Powerups]`, the second value).
     if let Some(rules) = object_rules.rules.as_ref() {
         for name in ra2_sim::powerups::NAMES {
@@ -2364,6 +2328,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 crater: yes("Crater"),
                 force_big_craters: yes("ForceBigCraters"),
                 size: (0, 0),
+                middle: 0,
                 report: art.get(&name, "StartSound").or(art.get(&name, "Report")).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()),
                 // `Translucent` alone is half see-through.
                 opacity: match number("Translucency") {
@@ -2398,10 +2363,21 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             // Only the ones that mark the ground need their picture's size.
             let size = if anim.scorch || anim.crater {
                 find_shape(files, &anim.image, theater.extension, theater.letter).map_or((0, 0), |shp| (shp.width as i32, shp.height as i32))
+            // Only the ones that mark the ground need their largest picture:
+            // the first of the greatest width times height (30 by 30 without
+            // art).
+            let (size, middle) = if anim.scorch || anim.crater {
+                find_shape(files, &anim.image, theater.extension, theater.letter)
+                    .and_then(|shp| {
+                        let frames = if anim.shadow { &shp.frames[..shp.frames.len() / 2] } else { &shp.frames[..] };
+                        let (index, frame) = frames.iter().enumerate().rev().max_by_key(|(_, f)| f.width as u32 * f.height as u32)?;
+                        Some(((frame.width as i32, frame.height as i32), index))
+                    })
+                    .unwrap_or(((30, 30), 0))
             } else {
-                (0, 0)
+                ((0, 0), 0)
             };
-            Some((name, AnimType { size, ..anim }))
+            Some((name, AnimType { size, middle, ..anim }))
         })
         .collect();
     let map_structures: Vec<MapStructure> = map
@@ -3042,6 +3018,18 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         }
     };
 
+    // Each building type's light and art.ini `ExtraLight`.
+    light_setup.buildings = building_names
+        .iter()
+        .map(|name| {
+            let rules = object_rules.rules.as_ref();
+            let light = crate::lighting::TypeLight::read(|key| rules?.get(name, key).map(str::to_owned));
+            let image = rules.and_then(|rules| rules.get(name, "Image")).map_or(name.as_str(), |image| image.trim());
+            let extra = art_rules.as_ref().and_then(|art| art.get(image, "ExtraLight")).and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(0);
+            (light, extra)
+        })
+        .collect();
+
     let unit_art = UnitArt {
         hva_frame: 0,
         models: HashMap::new(),
@@ -3052,18 +3040,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             .unwrap_or_else(NormalTables::empty),
         base_palette: Palette(theater.unit_palette.0),
         owner_palettes: all_palettes,
-        lighting,
-        // DATA: rules.ini `[AudioVisual] ExtraUnitLight`, a fraction of full light.
-        extra_infantry_light,
         theater_palette: Palette(theater.theater_palette.0),
         iso_palette: Palette(theater.iso_palette.0),
         anim_palette: files.get("anim.pal").and_then(Palette::parse),
-        extra_light: object_rules
-            .rules
-            .as_ref()
-            .and_then(|rules| rules.get("AudioVisual", "ExtraUnitLight"))
-            .and_then(|value| value.parse::<f64>().ok())
-            .map_or(0, |value| (value * 1000.0) as u32),
         extension: theater.extension,
         letter: theater.letter,
         shapes: HashMap::new(),
@@ -3410,6 +3389,19 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 .collect()
         })
         .unwrap_or_default();
+    // The map's `[Smudge]`: `type,x,y,…` per line.
+    let map_smudges: Vec<((i32, i32), u16)> = map
+        .ini
+        .section("Smudge")
+        .iter()
+        .filter_map(|(_, line)| {
+            let mut fields = line.split(',').map(str::trim);
+            let name = fields.next()?.to_lowercase();
+            let (x, y) = (fields.next()?.parse().ok()?, fields.next()?.parse().ok()?);
+            let kind = smudge_types.iter().position(|(n, _)| *n == name)?;
+            Some(((x, y), kind as u16))
+        })
+        .collect();
     // DATA: rules.ini `[General]` paradrop lists, `ParadropRadius`,
     // `ParachuteMaxFallRate`. The plane is the
     // aircraft type PDPLANE.
@@ -3570,6 +3562,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     Some(Scene {
         crew_escape,
         ship_sinking_weight,
+        light_setup,
         chrono,
         upkeep,
         armoury,
@@ -3603,6 +3596,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         bolt_explosion: object_rules.rules.as_ref().and_then(|rules| rules.get("AudioVisual", "WeatherConBoltExplosion")).map(|v| v.trim().to_uppercase()).filter(|v| !v.is_empty()),
         crate_rules,
         smudge_types,
+        map_smudges,
+        tile_anims,
         ai_rules,
         base_units: Vec::new(),
         player_country: player.country as u8,

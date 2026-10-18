@@ -7,6 +7,8 @@ use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+
+use crate::lighting::{LightRule, Lit, StormLight, WorldLight};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ra2_sim::{LEPTONS_PER_CELL, Map, Order, TICKS_PER_SECOND, World};
 
@@ -335,6 +337,11 @@ impl UnitView {
         self.art.owner_colour(self.player_palette)
     }
 
+    /// Where the map's corner is in the scene.
+    pub(crate) fn origin(&self) -> Vec2 {
+        self.origin
+    }
+
     pub(crate) fn game_speed(&self) -> i32 {
         self.game_speed
     }
@@ -367,6 +374,7 @@ impl Plugin for UnitsPlugin {
                 Update,
                 (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_radiation)
                 (auto_build, announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, show_radiation, show_debris, show_sinking, show_sparks)
+                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>),
@@ -504,6 +512,9 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
     world.super_rules = scene.super_rules.clone();
     world.crate_rules = scene.crate_rules.clone();
     world.map.smudge_types = scene.smudge_types.iter().map(|(_, kind)| *kind).collect();
+    for &(cell, kind) in &scene.map_smudges {
+        world.map.place_smudge(cell, kind);
+    }
     // DATA: `[MultiplayerDialogSettings] Shroud=yes`. RA2_NOSHROUD=1 turns it off
     // for checks.
     world.map.shroud_on = std::env::var("RA2_NOSHROUD").is_err();
@@ -624,7 +635,14 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
         .iter()
         .map(|name| {
             let anim = &scene.anim_types[name];
-            ra2_sim::smudge::AnimMark { scorch: anim.scorch, crater: anim.crater, force_big: anim.force_big_craters, size: anim.size }
+            // The stage counts images from `Start`, one each `900 / Rate`
+            // frames.
+            let after = match anim.middle.checked_sub(anim.start) {
+                _ if anim.middle == 0 => Some(0),
+                Some(stages) => Some(stages as u32 * anim.delay.max(1)),
+                None => None,
+            };
+            ra2_sim::smudge::AnimMark { scorch: anim.scorch, crater: anim.crater, force_big: anim.force_big_craters, size: anim.size, after }
         })
         .collect();
     world.splash_anims = scene.armoury.splashes.iter().map(number).collect();
@@ -1891,7 +1909,11 @@ fn show_bridges(mut commands: Commands, sim: Res<Sim>, files: Res<GameFiles>, mu
             let key: PartKey = (format!("bridge:{art}"), frame, None, level + if high { 4 } else { 0 }, shadow);
             if let Some((handle, centre)) = part_image(view, &files, &mut images, &key) {
                 let centre = snapped(anchor, centre);
-                commands.spawn((DespawnOnExit(Screen::InGame), BridgeSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, z)));
+                let mut spawned = commands.spawn((DespawnOnExit(Screen::InGame), BridgeSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, z)));
+                // A high bridge is lit as four levels up.
+                if !shadow {
+                    spawned.insert(Lit { cell, level, rule: LightRule::Ground { raise: if high { 4 } else { 0 } } });
+                }
             }
         }
     }
@@ -1953,7 +1975,8 @@ fn show_ore(
             let level = sim.0.map.level(cell.0, cell.1) as i32;
             let at = scene_point(view.origin, cell.0 * LEPTONS_PER_CELL + half, cell.1 * LEPTONS_PER_CELL + half, level) - Vec2::new(0.0, 15.0) + centre;
             let translation = Vec3::new(at.x.round(), -at.y.round(), 0.55 + (cell.0 + cell.1) as f32 * DEPTH_PER_ROW);
-            let entity = commands.spawn((DespawnOnExit(Screen::InGame), Sprite::from_image(handle), Transform::from_translation(translation))).id();
+            let lit = Lit { cell, level, rule: LightRule::Ground { raise: 0 } };
+            let entity = commands.spawn((DespawnOnExit(Screen::InGame), Sprite::from_image(handle), Transform::from_translation(translation), lit)).id();
             view.smudge_sprites.insert(cell, entity);
         }
     }
@@ -2064,7 +2087,8 @@ fn show_crates(
         });
         if let Some((handle, centre)) = picture.clone() {
             let centre = snapped(anchor, centre);
-            commands.spawn((DespawnOnExit(Screen::InGame), CrateSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, 2.0 + row * DEPTH_PER_ROW)));
+            let lit = Lit { cell, level, rule: LightRule::Ground { raise: 0 } };
+            commands.spawn((DespawnOnExit(Screen::InGame), CrateSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, 2.0 + row * DEPTH_PER_ROW), lit));
         }
     }
 }
@@ -2169,13 +2193,114 @@ fn show_walls(
             let key: PartKey = (art.clone(), frame, palette, level, shadow);
             if let Some((handle, centre)) = part_image(view, &files, &mut images, &key) {
                 let centre = snapped(anchor, centre);
-                commands.spawn((
+                let mut spawned = commands.spawn((
                     DespawnOnExit(Screen::InGame),
                     WallSprite,
                     Sprite::from_image(handle),
                     Transform::from_xyz(centre.x, -centre.y, z),
                 ));
+                if !shadow {
+                    spawned.insert(Lit { cell, level, rule: LightRule::Object { extra: 0 } });
+                }
             }
+        }
+    }
+}
+
+/// Follows the storm and gathers the lights on the map: lit buildings while
+/// they are working, the terrain's own, and radiation.
+fn light_world(sim: Res<Sim>, storm: Option<ResMut<StormLight>>, light: Option<ResMut<WorldLight>>) {
+    let (Some(mut storm), Some(mut light)) = (storm, light) else {
+        return;
+    };
+    let world = &sim.0;
+    let tick = world.current_tick();
+    // RA2_STORM=tick shows the storm's light from that tick on, for checks.
+    let forced = std::env::var("RA2_STORM").ok().and_then(|t| t.trim().parse::<u64>().ok()).is_some_and(|from| tick >= from);
+    let raging = forced || world.storm.as_ref().is_some_and(|storm| storm.started.is_some());
+    if storm.0 != raging {
+        storm.0 = raging;
+    }
+    light.set_storm(storm.0, tick);
+    light.step(tick);
+    let mut sources = light.setup.statics.clone();
+    // A building's light is at its middle, on while it is online.
+    for building in world.buildings() {
+        let Some((Some(kind), _)) = light.setup.buildings.get(building.kind as usize) else {
+            continue;
+        };
+        if building.buildup.is_none() && world.online(building) {
+            sources.push(kind.at(building.cell.0 * LEPTONS_PER_CELL + building.size.0 * 128, building.cell.1 * LEPTONS_PER_CELL + building.size.1 * 128));
+        }
+    }
+    // A radiation site's light reaches its spread and half a cell, at
+    // `RadLightFactor` times its level; every `RadLightDelay` frames it dims by
+    // an even step and its tint by the share of its life left.
+    let rules = world.rad_rules;
+    for site in &world.rad_sites {
+        let duration = (site.level as i64 * rules.duration_multiple as i64).max(1);
+        let delay = rules.light_delay.max(1) as i64;
+        let steps = (duration / delay).max(1);
+        let elapsed = tick.saturating_sub(site.born) as i64;
+        let taken = elapsed / delay;
+        let intensity = (site.level as f64 * light.setup.rad_light_factor).min(crate::lighting::MAX_LIGHT as f64) as i32;
+        let intensity = intensity - intensity / steps as i32 * taken as i32;
+        let left = (duration - taken * delay).max(0);
+        let tint = light.setup.rad_tint.map(|c| (c as i64 * left / duration) as i32);
+        sources.push(crate::lighting::Source {
+            x: site.cell.0 * LEPTONS_PER_CELL + 128,
+            y: site.cell.1 * LEPTONS_PER_CELL + 128,
+            radius: site.spread * 256 + 128,
+            intensity,
+            tint,
+        });
+    }
+    light.set_sources(sources);
+}
+
+/// Tints the units and buildings by the light where they stand.
+fn light_units(
+    sim: Res<Sim>,
+    view: Res<UnitView>,
+    light: Option<Res<WorldLight>>,
+    mut units: Query<(&UnitSprite, &mut Sprite), Without<BuildingSprite>>,
+    mut buildings: Query<(&BuildingSprite, &mut Sprite), Without<UnitSprite>>,
+) {
+    let Some(light) = light else {
+        return;
+    };
+    for (sprite, mut picture) in &mut units {
+        let Some(unit) = sim.0.unit(sprite.0) else {
+            continue;
+        };
+        let cell = unit.cell();
+        let level = sim.0.map.level(cell.0, cell.1) as i32 + if unit.on_bridge { 4 } else { 0 };
+        let aircraft = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).is_some_and(|kind| kind.considered_aircraft);
+        let extra = if unit.stats.infantry {
+            light.setup.extra_infantry
+        } else if aircraft {
+            light.setup.extra_aircraft
+        } else {
+            light.setup.extra_unit
+        };
+        let wanted = light.colour(&Lit { cell, level, rule: LightRule::Object { extra } }, picture.color.alpha());
+        if picture.color != wanted {
+            picture.color = wanted;
+        }
+    }
+    for (sprite, mut picture) in &mut buildings {
+        let Some(building) = sim.0.buildings().iter().find(|b| b.id == sprite.0) else {
+            continue;
+        };
+        if sprite.2.as_ref().is_some_and(|key| key.4) {
+            continue;
+        }
+        let level = sim.0.map.level(building.cell.0, building.cell.1) as i32;
+        // Plus the type's `ExtraLight`.
+        let extra = light.setup.buildings.get(building.kind as usize).map_or(0, |b| b.1);
+        let wanted = light.colour(&Lit { cell: building.cell, level, rule: LightRule::Object { extra } }, picture.color.alpha());
+        if picture.color != wanted {
+            picture.color = wanted;
         }
     }
 }
@@ -2500,6 +2625,14 @@ struct Effect {
     depth: f32,
 }
 
+/// Starts the animations the map's tiles carry (waterfalls), playing for ever.
+pub fn spawn_tile_anims(commands: &mut Commands, anims: &[(String, (i32, i32), (i32, i32))]) {
+    for (anim, at, cell) in anims {
+        let depth = 0.57 + (cell.0 + cell.1) as f32 * DEPTH_PER_ROW;
+        commands.spawn((DespawnOnExit(Screen::InGame), Effect { anim: anim.clone(), began: 0, at: Vec2::new(at.0 as f32, at.1 as f32), depth }, Sprite::default()));
+    }
+}
+
 /// A soldier's death sequence being played out, and the body to leave after.
 #[derive(Component)]
 struct Corpse {
@@ -2520,11 +2653,12 @@ fn show_corpses(
     files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
-    mut corpses: Query<(Entity, &Corpse, &mut Sprite, &mut Transform)>,
+    light: Option<Res<WorldLight>>,
+    mut corpses: Query<(Entity, &Corpse, &mut Sprite, &mut Transform, Option<&Lit>)>,
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
-    for (entity, corpse, mut sprite, mut transform) in &mut corpses {
+    for (entity, corpse, mut sprite, mut transform, lit_now) in &mut corpses {
         let stage = tick.saturating_sub(corpse.began) as usize;
         let point = scene_point_3d(view.origin, corpse.at);
         if stage >= corpse.count {
@@ -2556,6 +2690,11 @@ fn show_corpses(
             }
             let centre = snapped(point, *middle);
             transform.translation = Vec3::new(centre.x, -centre.y, corpse.depth);
+        }
+        let cell = (corpse.at.0.div_euclid(LEPTONS_PER_CELL), corpse.at.1.div_euclid(LEPTONS_PER_CELL));
+        let lit = Lit { cell, level, rule: LightRule::Object { extra: light.as_ref().map_or(0, |light| light.setup.extra_infantry) } };
+        if lit_now != Some(&lit) {
+            commands.entity(entity).insert(lit);
         }
     }
 }
@@ -2668,78 +2807,6 @@ pub(crate) fn lift(altitude: i32) -> f32 {
 }
 
 /// A point in the air above the map, in scene pixels.
-/// A cell lit by radiation: the cell, and how strongly it is shown.
-#[derive(Component)]
-struct RadiationPatch((i32, i32), f32);
-
-/// Shows where the ground is radioactive.
-// The engine draws nothing for
-// radiation but a green light at each site, which tints the cells round it:
-// round, strongest in the middle, fading to nothing at the edge and dimming
-// in steps as the site wears out (`World::rad_glow`). Lighting is by the
-// cell, so each cell is one shade.
-// Not original behaviour: the light is laid over the ground as a green
-// wash, where the engine multiplies the ground's green (up to double) and
-// leaves red and blue alone; things standing there are not tinted.
-fn show_radiation(
-    mut commands: Commands,
-    sim: Res<Sim>,
-    view: Res<UnitView>,
-    mut images: ResMut<Assets<Image>>,
-    mut diamond: Local<Option<Handle<Image>>>,
-    mut patches: Query<(Entity, &mut RadiationPatch, &mut Sprite)>,
-) {
-    let world = &sim.0;
-    let mut cells: HashMap<(i32, i32), f32> = HashMap::new();
-    for site in &world.rad_sites {
-        for dy in -site.spread..=site.spread {
-            for dx in -site.spread..=site.spread {
-                let cell = (site.cell.0 + dx, site.cell.1 + dy);
-                cells.entry(cell).or_insert_with(|| world.rad_glow(cell));
-            }
-        }
-    }
-    cells.retain(|_, glow| *glow > 0.0);
-    let colour = |glow: f32| Color::srgba(0.0, 1.0, 0.0, 0.45 * glow);
-    for (entity, mut patch, mut sprite) in &mut patches {
-        match cells.remove(&patch.0) {
-            Some(glow) if glow != patch.1 => {
-                patch.1 = glow;
-                sprite.color = colour(glow);
-            }
-            Some(_) => {}
-            None => commands.entity(entity).despawn(),
-        }
-    }
-    if cells.is_empty() {
-        return;
-    }
-    // One cell's outline on the screen: a diamond 60 pixels by 30.
-    let handle = diamond.get_or_insert_with(|| {
-        let (w, h) = (60usize, 30usize);
-        let mut rgba = vec![0u8; w * h * 4];
-        for y in 0..h {
-            for x in 0..w {
-                let (fx, fy) = ((x as f32 + 0.5 - 30.0).abs() / 30.0, (y as f32 + 0.5 - 15.0).abs() / 15.0);
-                if fx + fy <= 1.0 {
-                    rgba[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&[255; 4]);
-                }
-            }
-        }
-        images.add(Image::new(Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 }, TextureDimension::D2, rgba, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD))
-    });
-    for (cell, glow) in cells {
-        let level = world.map.level(cell.0, cell.1) as i32;
-        let at = scene_point(view.origin, cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128, level);
-        commands.spawn((
-            DespawnOnExit(Screen::InGame),
-            RadiationPatch(cell, glow),
-            Sprite { image: handle.clone(), color: colour(glow), ..default() },
-            Transform::from_xyz(at.x, -at.y, 0.58 + (cell.0 + cell.1) as f32 * DEPTH_PER_ROW),
-        ));
-    }
-}
-
 pub(crate) fn scene_point_3d(origin: Vec2, (x, y, z): (i32, i32, i32)) -> Vec2 {
     scene_point(origin, x, y, 0) - Vec2::new(0.0, z as f32 * LEVEL_HEIGHT as f32 / ra2_sim::combat::LEVEL_HEIGHT as f32)
 }
@@ -2798,6 +2865,9 @@ fn show_effects(
                 // layers thick in house colours, 3 from a prism tower.
                 // 5 and brighter when other
                 // towers have lent their beams to the shot.
+                if let Some(colour) = look.rad_beam {
+                    crate::beams::rad_beam(&mut commands, at, to, view.origin, colour);
+                }
                 if look.is_laser || look.electric_bolt {
                     let (from, end) = (scene_point_3d(view.origin, at), scene_point_3d(view.origin, to));
                     if look.electric_bolt {

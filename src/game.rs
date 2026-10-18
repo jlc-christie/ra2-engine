@@ -378,9 +378,13 @@ pub(crate) fn load_map(
     );
 
     let mut built = crate::units::build_world(&files, &mut scene);
+    let built_levels: std::collections::HashMap<(i32, i32), i32> =
+        scene.placements.iter().map(|p| p.light_cell).map(|cell| (cell, built.world.map.level(cell.0, cell.1) as i32)).collect();
     commands.insert_resource(std::mem::take(&mut scene.radar_ground));
     commands.insert_resource(std::mem::take(&mut scene.depth));
     commands.insert_resource(scene.armoury.clone());
+    commands.insert_resource(crate::lighting::WorldLight::new(std::mem::take(&mut scene.light_setup)));
+    commands.insert_resource(crate::lighting::StormLight::default());
     // A computer house
     // starts with `MultiplayerAICM` per cent more (the hardest with five times
     // the credits).
@@ -448,6 +452,7 @@ pub(crate) fn load_map(
         }
     }
     commands.insert_resource(recording);
+    crate::units::spawn_tile_anims(&mut commands, &scene.tile_anims);
     crate::units::setup(&mut commands, &files, built, scene.player_palette, scene.unit_art, scene.origin, options.speed);
 
     // One texture and one layout per atlas page; `slots[entry]` is the entry's index
@@ -547,6 +552,10 @@ pub(crate) fn load_map(
         ));
         if let Some(animated) = animated {
             spawned.insert(animated);
+        }
+        if let Some(rule) = placement.light {
+            let level = built_levels.get(&placement.light_cell).copied().unwrap_or(0);
+            spawned.insert(crate::lighting::Lit { cell: placement.light_cell, level, rule });
         }
     }
 

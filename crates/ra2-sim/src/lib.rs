@@ -581,6 +581,15 @@ impl Map {
         let centre = (cell.0 - level / 2, cell.1 - level / 2);
         let mut changed = false;
         for (dx, dy) in combat::spread_offsets(radius.min(10)) {
+            // High ground hides what is behind it: a cell is not seen when
+            // the cell one step back towards the viewer, taken from the
+            // viewer's own cell moved two cells down, is more than three
+            // levels above the viewer.
+            let (sx, sy) = sight_step(dx, dy);
+            let (tx, ty) = (cell.0 + dx + 2 + sx, cell.1 + dy + 2 + sy);
+            if self.index(tx, ty).is_some() && self.level(tx, ty) as i32 > level + 3 {
+                continue;
+            }
             if let Some(index) = self.index(centre.0 + dx, centre.1 + dy) {
                 if self.revealed[index] & bit == 0 {
                     self.revealed[index] |= bit;
@@ -2366,6 +2375,9 @@ pub struct World {
     pending_bites: Vec<(u32, combat::Aim, u16)>,
     leaps: Vec<abilities::Leap>,
     waves: Vec<combat::Wave>,
+    /// Marks due when an animation reaches its largest picture: the tick, the
+    /// point and the animation.
+    pending_marks: Vec<(u64, (i32, i32), u16)>,
     pub rad_sites: Vec<radiation::Site>,
     pub rad_rules: radiation::Rules,
     pub storm: Option<supers::Storm>,
@@ -2492,6 +2504,7 @@ impl World {
             pending_bites: Vec::new(),
             leaps: Vec::new(),
             waves: Vec::new(),
+            pending_marks: Vec::new(),
             rad_sites: Vec::new(),
             rad_rules: radiation::Rules::default(),
             storm: None,
@@ -5313,6 +5326,7 @@ impl World {
         self.run_supers();
         self.run_weather();
         self.run_radiation();
+        self.run_marks();
         self.run_patients();
         self.run_depots();
         self.run_cash();
@@ -7723,5 +7737,33 @@ mod tests {
         places.sort_unstable();
         places.dedup();
         assert_eq!(places.len(), 4);
+    }
+}
+
+/// The step from a cell of the sight circle back towards its middle: the
+/// offset scaled to its longer side and rounded, negated.
+// The engine keeps these in a table; one entry, for (5, -2), steps away from
+// the middle instead.
+fn sight_step(dx: i32, dy: i32) -> (i32, i32) {
+    if (dx, dy) == (5, -2) {
+        return (1, 0);
+    }
+    let longer = dx.abs().max(dy.abs());
+    if longer == 0 {
+        return (0, 0);
+    }
+    let round = |v: i32| -((v.abs() * 2 + longer) / (2 * longer)) * v.signum();
+    (round(dx), round(dy))
+}
+
+#[cfg(test)]
+mod sight_step_tests {
+    #[test]
+    fn steps_lead_back_towards_the_middle() {
+        assert_eq!(super::sight_step(1, -1), (-1, 1));
+        assert_eq!(super::sight_step(-1, -2), (1, 1));
+        assert_eq!(super::sight_step(-1, -3), (0, 1));
+        assert_eq!(super::sight_step(3, 1), (-1, 0));
+        assert_eq!(super::sight_step(0, 0), (0, 0));
     }
 }
