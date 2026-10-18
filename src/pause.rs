@@ -88,13 +88,21 @@ const LIST_ROW: f32 = 18.0;
 /// The list box of a list of saves.
 // At (24,50), 266 wide
 // and 187 high, or 157 in the Save dialog, which has the name box under it.
-fn list_box(kind: Kind) -> Rect {
-    crate::shell::dialog_rect(24.0, 50.0, 266.0, if kind == Kind::Save { 157.0 } else { 187.0 })
+fn list_box(window: &Window, kind: Kind) -> Rect {
+    dialog_rect(window, 24.0, 50.0, 266.0, if kind == Kind::Save { 157.0 } else { 187.0 })
+}
+
+/// A rectangle of a dialog template, moved with the screen size as the engine
+/// moves ordinary controls: kept centred as it is at 640x480.
+fn dialog_rect(window: &Window, x: f32, y: f32, width: f32, height: f32) -> Rect {
+    let at = crate::shell::dialog_rect(x, y, width, height);
+    let shift = ((Vec2::new(window.width(), window.height()) - Vec2::new(800.0, 600.0)) / 2.0).round();
+    Rect::from_corners(at.min + shift, at.max + shift)
 }
 
 /// Where a row of a list of saves is.
-fn list_row(_window: &Window, kind: Kind, row: usize) -> Rect {
-    let list = list_box(kind);
+fn list_row(window: &Window, kind: Kind, row: usize) -> Rect {
+    let list = list_box(window, kind);
     let corner = Vec2::new(list.min.x + 1.0, list.min.y + 1.0 + LIST_ROW * row as f32);
     Rect::from_corners(corner, Vec2::new(list.max.x - 1.0, corner.y + LIST_ROW))
 }
@@ -175,7 +183,7 @@ fn run_menu(
     mut commands: Commands,
     mut menu: ResMut<Menu>,
     mut saves: ResMut<crate::saves::SaveLoad>,
-    mut shown: Local<Menu>,
+    mut shown: Local<(Menu, Vec2)>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     pointer: Res<Pointer>,
@@ -308,11 +316,13 @@ fn run_menu(
     if now != *menu {
         *menu = now;
     }
-    if now == *shown && !saves.dirty {
+    // A new window size lays the menu out again.
+    let size = Vec2::new(window.width(), window.height());
+    if (now, size) == *shown && !saves.dirty {
         return;
     }
     saves.dirty = false;
-    *shown = now;
+    *shown = (now, size);
     for entity in &parts {
         commands.entity(entity).despawn();
     }
@@ -358,8 +368,10 @@ fn run_menu(
                 }
             };
             // The map area: black, then the side's backdrop for this screen size.
-            parent.spawn((
-                hud::absolute(0.0, 0.0, Vec2::new(side, height - hud::BOTTOM_BAR_HEIGHT)),
+            // The bottom bar is drawn over the backdrop, so the backdrop is
+            // cut off above it.
+            let mut map_area = parent.spawn((
+                Node { overflow: Overflow::clip(), ..hud::absolute(0.0, 0.0, Vec2::new(side, height - hud::BOTTOM_BAR_HEIGHT)) },
                 BackgroundColor(Color::BLACK),
             ));
             let backdrop = if width <= 640.0 {
@@ -369,7 +381,7 @@ fn run_menu(
             } else {
                 "bkgdlg.shp"
             };
-            piece(parent, &mut images, backdrop, 0, 0.0, 0.0);
+            map_area.with_children(|area| piece(area, &mut images, backdrop, 0, 0.0, 0.0));
             // The sidebar with its buttons and cameos blanked.
             piece(parent, &mut images, "side1.shp", 0, side, hud::CONTROLS_Y);
             let rows = hud::strip_rows(height);
@@ -419,10 +431,10 @@ fn run_menu(
                     Kind::Save => "GUI:SaveMission",
                     Kind::Delete => "GUI:DeleteMission",
                 };
-                let over = crate::shell::dialog_rect(24.0, 16.0, 266.0, 24.0);
+                let over = dialog_rect(&window, 24.0, 16.0, 266.0, 24.0);
                 let (image, size) = hud::text_image(font, &mut images, &text(heading));
                 parent.spawn((hud::absolute((over.center().x - size.x / 2.0).round(), over.min.y, size), ImageNode::new(image)));
-                let list = list_box(kind);
+                let list = list_box(&window, kind);
                 frame(parent, list);
                 let empty = Some(text("TXT_EMPTY_SLOT")).filter(|words| words != "TXT_EMPTY_SLOT").unwrap_or_else(|| "[Empty slot]".to_owned());
                 let rows: Vec<(String, String)> = (kind == Kind::Save).then(|| (empty, String::new())).into_iter().chain(saves.entries.iter().map(|entry| (entry.description.clone(), crate::saves::stamp(entry.modified)))).collect();
@@ -437,7 +449,7 @@ fn run_menu(
                     line(parent, &mut images, when, rect.min.x + rect.width() * 255.0 / 399.0, rect.min.y + 2.0);
                 }
                 if kind == Kind::Save {
-                    let edit = crate::shell::dialog_rect(25.0, 223.0, 266.0, 14.0);
+                    let edit = dialog_rect(&window, 25.0, 223.0, 266.0, 14.0);
                     frame(parent, edit);
                     let shown: String = saves.text.chars().rev().take(48).collect::<Vec<_>>().into_iter().rev().collect();
                     line(parent, &mut images, &format!("{shown}_"), edit.min.x + 3.0, edit.min.y + 3.0);
