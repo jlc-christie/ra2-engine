@@ -8,8 +8,11 @@
 //!
 //! `FUZZ_GAMES=n` (default 6) sets how many games, `FUZZ_SEED=n` the first seed
 //! (default: from the clock), `FUZZ_TICKS=n` caps the length of each game,
-//! `FUZZ_MAP=id` keeps to one map. A failure names the seed; `FUZZ_SEED=<it>
-//! FUZZ_GAMES=1` plays the same game again.
+//! `FUZZ_MAP=id` keeps to one map, `FUZZ_LENGTH=n` plays each game for n ticks
+//! and `FUZZ_AI=1` prints every computer house's money, plan, miners and teams
+//! every 5000 ticks (`watch_one_computer` does that for one Brutal computer). A
+//! failure names the seed; `FUZZ_SEED=<it> FUZZ_GAMES=1` plays the same game
+//! again.
 //!
 //! Hard failures (the test fails): a panic in the simulation; credits below
 //! zero; a unit off the map or with more health than its type allows; a factory
@@ -99,6 +102,8 @@ fn draw(seed: u64, maps: &[(String, usize)], modes: &[String]) -> Setup {
     let others = 1 + rng.below(max.clamp(2, 8) as u64 - 1) as usize;
     let cap = std::env::var("FUZZ_TICKS").ok().and_then(|n| n.parse().ok()).unwrap_or(40_000u64);
     let ticks = (4_000 + rng.below(36_000)).min(cap);
+    // FUZZ_LENGTH=n plays every game for n ticks.
+    let ticks = std::env::var("FUZZ_LENGTH").ok().and_then(|n| n.parse().ok()).unwrap_or(ticks);
     Setup {
         seed,
         map,
@@ -116,11 +121,17 @@ fn draw(seed: u64, maps: &[(String, usize)], modes: &[String]) -> Setup {
 }
 
 fn build(files: &GameFiles, setup: &Setup) -> Option<World> {
+    build_named(files, setup).map(|(world, _)| world)
+}
+
+fn build_named(files: &GameFiles, setup: &Setup) -> Option<(World, Vec<String>)> {
     let parsed = files.get(&format!("{}.map", setup.map)).or_else(|| files.get(&format!("{}.mpr", setup.map))).and_then(ra2_formats::map::Map::parse)?;
     let opponents = setup.opponents.iter().map(|&level| terrain::Opponent { level, country: None, colour: None }).collect();
     let player = terrain::Player { opponents, mode_rules: setup.mode_rules.clone(), start: Some(setup.start), ..terrain::Player::default() };
     let mut scene = terrain::build(files, &parsed, &player)?;
-    let mut world = units::build_world(files, &mut scene).world;
+    let built = units::build_world(files, &mut scene);
+    let names = built.catalog.iter().map(|entry| entry.name.clone()).collect();
+    let mut world = built.world;
     world.map.shroud_on = false;
     world.short_game = setup.short_game;
     world.mcv_repacks = setup.mcv_repacks;
@@ -133,7 +144,7 @@ fn build(files: &GameFiles, setup: &Setup) -> Option<World> {
     if setup.crates {
         world.start_crates(0);
     }
-    Some(world)
+    Some((world, names))
 }
 
 /// What one game turned up.
@@ -201,7 +212,7 @@ fn check(world: &World, tick: u64, letting_out: &mut HashMap<u32, u64>, findings
 
 fn play(files: &GameFiles, setup: &Setup) -> Findings {
     let mut findings = Findings::default();
-    let Some(mut world) = build(files, setup) else {
+    let Some((mut world, names)) = build_named(files, setup) else {
         findings.soft.push(format!("map {} could not be set up", setup.map));
         return findings;
     };
@@ -229,6 +240,9 @@ fn play(files: &GameFiles, setup: &Setup) -> Findings {
             if let Err(why) = round_trip(files, setup, &mut world) {
                 findings.hard.push(format!("tick {tick}: {why}"));
             }
+        }
+        if tick % 5000 == 0 && std::env::var_os("FUZZ_AI").is_some() {
+            watch_ai(&world, &names, tick);
         }
         if tick % 250 == 0 {
             check(&world, tick, &mut letting_out, &mut findings);
@@ -358,4 +372,45 @@ fn fuzz_games() {
         println!("FUZZ   ({:.1} s)", started.elapsed().as_secs_f64());
     }
     assert!(failed.is_empty(), "seeds with hard failures: {failed:?} (FUZZ_SEED=<seed> FUZZ_GAMES=1 to replay)");
+}
+
+/// FUZZ_AI=1: each computer house's money, base plan, miners and teams.
+fn watch_ai(world: &World, names: &[String], tick: u64) {
+    for (h, house) in world.houses.iter().enumerate() {
+        let Some(brain) = &house.ai else { continue };
+        let mut have: Vec<&str> = world.buildings().iter().filter(|b| b.owner == h as u8).map(|b| names[b.kind as usize].as_str()).collect();
+        have.sort();
+        let plan: Vec<String> = brain.nodes.iter().filter(|n| n.cell.is_none()).map(|n| n.kind.map_or("?", |k| names[k as usize].as_str()).to_owned()).collect();
+        let miners: Vec<String> = world.units().iter().filter(|u| u.owner == h as u8 && u.stats.harvester).map(|u| format!("{:?}{:?}", u.work.job, u.cell())).collect();
+        let units = world.units().iter().filter(|u| u.owner == h as u8).count();
+        let teams: Vec<String> = world.teams.iter().filter(|t| t.house == h as u8).map(|t| format!("{}:{}/{}{}", world.team_data.team_types[t.kind].name, t.line, t.members.len(), if t.moving { "" } else { "f" })).collect();
+        println!("t{tick} house {h} enemy {:?} allies {:b} credits {} units {units} next {:?} mode {}\n  have {have:?}\n  plan left {plan:?}\n  miners {miners:?}\n  teams {teams:?}\n  slots {:?} {:?} {:?} {:?}", brain.enemy, house.allies, house.credits, brain.build_structure.map(|k| names[k as usize].clone()), brain.mode, house.production.map(|p| p.building), house.defence.map(|p| p.building), house.infantry.map(|p| p.building), house.vehicles.map(|p| p.building));
+    }
+}
+
+/// One Brutal computer of a country (`WATCH_COUNTRY`, default Russia) against
+/// an idle player on `FUZZ_MAP` (default mp03t4), printed as `FUZZ_AI` does,
+/// for `FUZZ_TICKS` ticks (default 40000).
+#[test]
+#[ignore]
+fn watch_one_computer() {
+    let Ok(files) = GameFiles::open() else { return };
+    let map = std::env::var("FUZZ_MAP").unwrap_or("mp03t4".into());
+    let Some(parsed) = files.get(&format!("{map}.map")).or_else(|| files.get(&format!("{map}.mpr"))).and_then(ra2_formats::map::Map::parse) else { return };
+    let country = std::env::var("WATCH_COUNTRY").ok().and_then(|n| n.parse().ok()).unwrap_or(8);
+    let player = terrain::Player { opponents: vec![terrain::Opponent { level: 0, country: Some(country), colour: None }], start: Some(0), ..terrain::Player::default() };
+    let mut scene = terrain::build(&files, &parsed, &player).unwrap();
+    let built = units::build_world(&files, &mut scene);
+    let names: Vec<String> = built.catalog.iter().map(|e| e.name.clone()).collect();
+    let mut world = built.world;
+    world.map.shroud_on = false;
+    world.end_checks = false;
+    let ticks: u64 = std::env::var("FUZZ_TICKS").ok().and_then(|n| n.parse().ok()).unwrap_or(40_000);
+    for _ in 0..ticks {
+        world.tick();
+        let _ = world.take_events();
+        if world.current_tick() % 5000 == 0 {
+            watch_ai(&world, &names, world.current_tick());
+        }
+    }
 }

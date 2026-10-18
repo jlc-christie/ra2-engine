@@ -65,6 +65,9 @@ pub struct TeamType {
     pub suicide: bool,
     pub only_target_house_enemy: bool,
     pub members_recruitable: bool,
+    /// `TransportsReturnOnUnload`: a transport goes back to where it loaded
+    /// once it has let its passengers out, and leaves the team.
+    pub transports_return: bool,
     pub script: usize,
     pub task_force: usize,
     pub autocreate: bool,
@@ -150,6 +153,36 @@ pub struct Team {
     pub moving: bool,
     pub(crate) next_mission: bool,
     success: bool,
+}
+
+impl Team {
+    fn new(id: u32, kind: usize, house: u8, created: u64) -> Self {
+        Self {
+            id,
+            kind,
+            house,
+            line: -1,
+            members: Vec::new(),
+            created,
+            zone: None,
+            target: None,
+            focus: None,
+            guard_until: 0,
+            has_been: false,
+            full: false,
+            under: true,
+            reforming: false,
+            dirty: true,
+            moving: false,
+            next_mission: true,
+            success: false,
+        }
+    }
+
+    /// Where the team is sent while it is not running its script.
+    pub fn focus(&self) -> Option<Aim> {
+        self.focus
+    }
 }
 
 fn distance(a: (i32, i32), b: (i32, i32)) -> i64 {
@@ -931,26 +964,7 @@ impl World {
             }
             let id = self.next_id;
             self.next_id += 1;
-            self.teams.push(Team {
-                id,
-                kind,
-                house,
-                line: -1,
-                members: Vec::new(),
-                created: self.tick,
-                zone: None,
-                target: None,
-                focus: None,
-                guard_until: 0,
-                has_been: false,
-                full: false,
-                under: true,
-                reforming: false,
-                dirty: true,
-                moving: false,
-                next_mission: true,
-                success: false,
-            });
+            self.teams.push(Team::new(id, kind, house, self.tick));
         }
     }
 
@@ -1157,6 +1171,16 @@ impl World {
         best.map(|(id, _)| id).or(team.members.first().copied())
     }
 
+    /// How many passengers a unit's type carries.
+    fn carries(&self, unit: &Unit) -> i32 {
+        self.unit_types.get((unit.stats.kind as usize).wrapping_sub(1)).map_or(0, |t| t.passengers)
+    }
+
+    /// Whether a task force has an aircraft that carries passengers.
+    fn air_transported(&self, force: &[(u32, u16)]) -> bool {
+        force.iter().any(|&(_, unit)| self.unit_types.get(unit as usize).is_some_and(|t| t.passengers > 0 && t.stats.plane.is_some()))
+    }
+
     fn has_destination(unit: &Unit) -> bool {
         unit.plane.map_or(unit.dest.is_some(), |plane| plane.is_moving())
     }
@@ -1226,6 +1250,10 @@ impl World {
         let close = self.team_data.close_enough as i64;
         let (mut arrived, mut any) = (true, false);
         for id in team.members.clone() {
+            // One riding in a transport is off the map and plays no part.
+            if self.unit(id).is_none() {
+                continue;
+            }
             if !self.initiate(team, id, stray) {
                 arrived = false;
                 continue;
@@ -1251,6 +1279,87 @@ impl World {
         if any && arrived && team.moving {
             team.next_mission = true;
         }
+    }
+
+    /// Takes a team off its script and back to forming, sent beside the
+    /// nearest of its house's unarmed buildings (a repair depot counting at
+    /// half its distance).
+    // Each building's distance is multiplied by one more than the threat at
+    // its cell, which is always nothing. With no building
+    // found, or no free cell round the one found, the team gathers on its
+    // own centre.
+    fn retreat(&mut self, team: &mut Team) {
+        team.moving = false;
+        team.line = -1;
+        if team.members.is_empty() {
+            team.zone = None;
+            return;
+        }
+        self.calc_centre(team);
+        let leader = self.leader(team);
+        if team.zone.is_none() {
+            team.zone = leader.and_then(|id| self.unit(id)).map(|unit| unit.cell());
+        }
+        let (Some(zone), Some(leader)) = (team.zone, leader) else {
+            return;
+        };
+        let height = |world: &World, (x, y): (i32, i32)| world.ground_z(x, y) as i64;
+        let from = centre_of(zone);
+        let mut best = (i64::MAX, zone);
+        for building in self.buildings.iter().filter(|b| b.owner == team.house) {
+            let Some(kind) = self.building_types.get(building.kind as usize) else {
+                continue;
+            };
+            if kind.fighter.primary.is_some() || building.occupants.iter().any(|o| o.stats.fighter.primary.is_some()) {
+                continue;
+            }
+            let middle = (building.cell.0 * LEPTONS_PER_CELL + building.size.0 * 128, building.cell.1 * LEPTONS_PER_CELL + building.size.1 * 128);
+            let (dx, dy, dz) = ((middle.0 - from.0) as f64, (middle.1 - from.1) as f64, (height(self, middle) - height(self, from)) as f64);
+            let d = (dx * dx + dy * dy + dz * dz).sqrt() as i64;
+            let score = if kind.unit_repair { d / 2 } else { d };
+            if score >= best.0 {
+                continue;
+            }
+            let cell = (middle.0.div_euclid(LEPTONS_PER_CELL), middle.1.div_euclid(LEPTONS_PER_CELL));
+            if let Some(near) = self.cell_toward(leader, zone, cell, 2, 4) {
+                best = (score, near);
+            }
+        }
+        team.focus = Some(Aim::Cell(best.1 .0, best.1 .1));
+        self.coordinate_move(team, self.team_data.stray);
+    }
+
+    /// A cell the unit could enter at `min` to `max - 1` cells from `to`, on
+    /// the side facing `from`.
+    // Ring by ring: from the corner or edge
+    // middle three eighths round from the direction `from` to `to`, along the
+    // part of the ring that faces `from` (two sides' worth from a corner, a
+    // side's half and the next side's half from an edge middle); the first
+    // cell that may be entered.
+    fn cell_toward(&self, unit: u32, from: (i32, i32), to: (i32, i32), min: i32, max: i32) -> Option<(i32, i32)> {
+        use crate::path::DIRECTIONS;
+        let unit = self.unit(unit)?;
+        let (dx, dy) = ((to.0 - from.0) as f64, (to.1 - from.1) as f64);
+        let facing = (dx.atan2(-dy) / std::f64::consts::TAU * 65536.0) as i32 & 0xffff;
+        let toward = (((facing >> 12) + 1) >> 1) as usize & 7;
+        let start = (toward + 3) & 7;
+        let others = self.others();
+        let open = |cell: (i32, i32)| {
+            self.map.in_playfield(cell.0, cell.1) && crate::entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, unit, cell, None, cell, -1) == crate::path::code::OK
+        };
+        for r in min..max {
+            let mut at = (to.0 + DIRECTIONS[start].0 * r, to.1 + DIRECTIONS[start].1 * r);
+            let legs: &[(usize, i32)] = if start & 1 == 1 { &[((start + 3) & 7, 2 * r)] } else { &[((start + 2) & 7, r), ((start + 4) & 7, r)] };
+            for &(dir, steps) in legs {
+                for _ in 0..steps {
+                    at = (at.0 + DIRECTIONS[dir].0, at.1 + DIRECTIONS[dir].1);
+                    if open(at) {
+                        return Some(at);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// A team's target is set to nothing.
@@ -1500,7 +1609,8 @@ impl World {
     }
 
     // The building of a type, of the enemy's (or with `own` of the
-    // house's own), by one of four rules.
+    // house's own), by one of four rules. The threat at a cell is always
+    // nothing, so the two threat rules take the first found.
     fn find_building(&self, leader: u32, kind: u16, mode: i32, own: bool, only_enemy: bool) -> Option<u32> {
         let me = self.unit(leader)?;
         let enemy = self.houses[me.owner as usize].ai.as_ref().and_then(|b| b.enemy);
@@ -1512,11 +1622,7 @@ impl World {
             }
             let at = (building.cell.0 * LEPTONS_PER_CELL + building.size.0 * 128, building.cell.1 * LEPTONS_PER_CELL + building.size.1 * 128);
             let d = distance((me.x, me.y), at);
-            let threat = self
-                .units
-                .iter()
-                .filter(|u| u.owner == building.owner && u.stats.fighter.primary.is_some() && distance((u.x, u.y), at) <= 8 * 256)
-                .count() as i64;
+            let threat = 0;
             let value = match mode {
                 0 => i64::MAX - threat,
                 1 => threat,
@@ -1608,6 +1714,12 @@ impl World {
                 team.reforming = true;
             }
         }
+        // 3: a team on its way that has fallen under strength (only a
+        // `Reinforce` team can) goes back to forming, near one of its house's
+        // buildings.
+        if team.moving && team.under {
+            self.retreat(team);
+        }
         // 4: it sets off.
         if !team.moving && team.full {
             team.moving = true;
@@ -1637,8 +1749,10 @@ impl World {
         if team.members.is_empty() {
             return !(team.has_been || self.tick.saturating_sub(team.created) > self.team_data.dissolve_delay as u64);
         }
-        // 8: while forming, members wait where they are.
+        // 8: while forming, members wait where they are (or, after a retreat,
+        // go where it sent them).
         if !team.moving {
+            self.coordinate_move(team, self.team_data.stray);
             return true;
         }
         let (action, argument) = script.get(team.line.max(0) as usize).copied().unwrap_or((-1, 0));
@@ -1655,6 +1769,14 @@ impl World {
             first = true;
             team.next_mission = false;
             team.line += 1;
+            // Every member forgets where it was to go back to, but a transport
+            // that is to return there.
+            for &id in &team.members {
+                let keeps = kind.transports_return && self.unit(id).is_some_and(|u| self.carries(u) > 0);
+                if let (false, Some(unit)) = (keeps, self.units.iter_mut().find(|u| u.id == id && !u.stats.harvester)) {
+                    unit.work.archive = None;
+                }
+            }
             if team.line as usize >= script.len() {
                 return false;
             }
@@ -1739,12 +1861,18 @@ impl World {
                 if (first || action != 46) && team.target.is_none() {
                     let seeker = if action == 58 { leader } else { team.members.first().copied() };
                     let found = seeker.and_then(|seeker| self.find_building(seeker, (argument & 0xffff) as u16, argument >> 16, action == 58, kind.only_target_house_enemy));
+                    // A move goes to a free cell in the seeker's zone nearest
+                    // the building's own cell, picked by frame.
                     team.target = match (action, found) {
                         (46, Some(id)) => Some(Aim::Building(id)),
-                        (_, Some(id)) => self.buildings.iter().find(|b| b.id == id).map(|b| {
-                            let near = self.near_ground((b.cell.0 + b.size.0, b.cell.1 + b.size.1));
-                            Aim::Cell(near.0, near.1)
-                        }),
+                        (_, Some(id)) => {
+                            let cell = self.buildings.iter().find(|b| b.id == id).map(|b| b.cell);
+                            let unit = seeker.and_then(|seeker| self.unit(seeker));
+                            match (cell, unit) {
+                                (Some(cell), Some(unit)) => crate::nearby(&self.map, &self.claims, &self.spots, unit, cell, crate::Near::new(false, false, None), self.tick).map(|near| Aim::Cell(near.0, near.1)),
+                                _ => None,
+                            }
+                        }
                         _ => None,
                     };
                     team.focus = team.target;
@@ -1799,10 +1927,11 @@ impl World {
             // first member that carries and is not full, an aircraft if the task
             // force has an aircraft that carries; one member a frame is sent
             // aboard; with nobody left to send the line is done.
+            // With `TransportsReturnOnUnload` the transport is to come back to
+            // the cell it loaded on.
             14 => {
-                let carries = |world: &World, unit: &Unit| world.unit_types.get((unit.stats.kind as usize).wrapping_sub(1)).map_or(0, |t| t.passengers);
-                let air = force.iter().any(|&(_, unit)| self.unit_types.get(unit as usize).is_some_and(|t| t.passengers > 0 && t.stats.plane.is_some()));
-                let transport = team.members.iter().filter_map(|&id| self.unit(id)).find(|u| carries(self, u) > 0 && (u.cargo.len() as i32) < carries(self, u) && u.plane.is_some() == air).map(|u| u.id);
+                let air = self.air_transported(&force);
+                let transport = team.members.iter().filter_map(|&id| self.unit(id)).find(|u| self.carries(u) > 0 && (u.cargo.len() as i32) < self.carries(u) && u.plane.is_some() == air).map(|u| u.id);
                 let Some(transport) = transport else {
                     team.next_mission = true;
                     return true;
@@ -1810,15 +1939,19 @@ impl World {
                 let next = team.members.iter().copied().find(|&id| id != transport && self.unit(id).is_some_and(|u| u.boarding != Some(transport)) && self.can_board(id, transport));
                 match next {
                     Some(unit) => self.order(Order::Board { unit, transport }),
-                    None => team.next_mission = true,
+                    None => {
+                        if kind.transports_return {
+                            if let Some(unit) = self.units.iter_mut().find(|u| u.id == transport) {
+                                unit.work.archive = Some(unit.cell());
+                            }
+                        }
+                        team.next_mission = true;
+                    }
                 }
             }
             // Wait until every transport is full.
             43 => {
-                let waiting = team.members.iter().filter_map(|&id| self.unit(id)).any(|u| {
-                    let room = self.unit_types.get((u.stats.kind as usize).wrapping_sub(1)).map_or(0, |t| t.passengers);
-                    (u.cargo.len() as i32) < room
-                });
+                let waiting = team.members.iter().filter_map(|&id| self.unit(id)).any(|u| (u.cargo.len() as i32) < self.carries(u));
                 if !waiting {
                     team.next_mission = true;
                 }
@@ -1839,14 +1972,23 @@ impl World {
                     }
                     return true;
                 }
+                // A transport that is to return leaves the team whatever the
+                // argument and drives back to where it loaded. (When the task
+                // force has a transport aircraft, only aircraft count as
+                // transports.)
+                let air = self.air_transported(&force);
                 for id in team.members.clone() {
-                    let carrier = self.unit(id).is_some_and(|u| self.unit_types.get((u.stats.kind as usize).wrapping_sub(1)).is_some_and(|t| t.passengers > 0));
-                    let goes = if carrier { matches!(argument, 2 | 3) } else { matches!(argument, 1 | 3) };
+                    let carrier = self.unit(id).is_some_and(|u| self.carries(u) > 0 && (!air || u.plane.is_some()));
+                    let back = if carrier && kind.transports_return { self.units.iter_mut().find(|u| u.id == id).map(|u| u.work.archive.take()) } else { None };
+                    let goes = back.is_some() || if carrier { matches!(argument, 2 | 3) } else { matches!(argument, 1 | 3) };
                     if goes {
                         team.members.retain(|&member| member != id);
                         if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
                             unit.team = None;
                         }
+                    }
+                    if let Some(Some(cell)) = back {
+                        self.order(Order::Move { unit: id, x: cell.0, y: cell.1 });
                     }
                 }
                 team.next_mission = true;
@@ -1903,6 +2045,21 @@ impl World {
 }
 
 impl World {
+    /// Starts a team of a type for a house, as an AI trigger would, for tests.
+    #[doc(hidden)]
+    pub fn start_team_for_tests(&mut self, house: u8, kind: usize) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.teams.push(Team::new(id, kind, house, self.tick));
+        id
+    }
+
+    /// Kills a unit, for tests.
+    #[doc(hidden)]
+    pub fn kill_unit_for_tests(&mut self, unit: u32) {
+        self.kill(Aim::Unit(unit));
+    }
+
     /// The factory a unit type comes from, for the computer's choice of what
     /// to build.
     pub(crate) fn factory_of_class(class: u8) -> Factory {

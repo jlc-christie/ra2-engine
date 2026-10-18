@@ -3653,3 +3653,118 @@ fn a_computer_soldier_told_to_move_while_dug_in_gets_up_and_goes() {
 
 
 
+
+/// A team type by its name in ai.ini.
+fn team_type(game: &Scenario, name: &str) -> usize {
+    game.world.team_data.team_types.iter().position(|t| t.name == name).unwrap_or_else(|| panic!("no team type {name}"))
+}
+
+#[test]
+fn a_reinforce_team_cut_down_goes_back_to_forming_beside_its_base() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let enemy = terrain::ENEMY;
+    let yard = game.deploy_base();
+    game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
+    // DATA: ai.ini, a Reinforce team of six GIs.
+    let kind = team_type(&game, "Allied Base Guard - Refine");
+    assert!(game.world.team_data.team_types[kind].reinforce);
+    let spot = game.find_spot("GAPOWR", (yard.0 + 4, yard.1 - 6), 6).unwrap();
+    let plant = game.world.add_map_building(enemy, game.building("GAPOWR"), spot, 256);
+    let mut soldiers = Vec::new();
+    for i in 0..6 {
+        soldiers.push(game.world.add_infantry((yard.0 + 6 + i % 3, yard.1 + 12 + i / 3), 0, 0, game.stats("E1"), enemy).unwrap());
+    }
+    let team = game.world.start_team_for_tests(enemy, kind);
+    let find = |game: &Scenario| game.world.teams.iter().find(|t| t.id == team).cloned();
+    game.run(20);
+    let formed = find(&game).unwrap();
+    assert!(formed.moving && formed.members.len() == 6, "the team did not set off: {formed:?}");
+    // Six wanted: two or fewer left is under strength.
+    for &id in &soldiers[..4] {
+        game.world.kill_unit_for_tests(id);
+    }
+    game.run(2);
+    let back = find(&game).expect("the team was dissolved");
+    assert!(!back.moving && back.line == -1, "the team kept to its script: {back:?}");
+    let building = game.world.buildings().iter().find(|b| b.id == plant).unwrap();
+    let middle = (building.cell.0 + building.size.0 / 2, building.cell.1 + building.size.1 / 2);
+    let Some(ra2_sim::combat::Aim::Cell(x, y)) = back.focus() else {
+        panic!("the team was sent nowhere: {back:?}");
+    };
+    let apart = (x - middle.0).abs().max((y - middle.1).abs());
+    assert!((2..4).contains(&apart), "sent to {:?}, {apart} cells from the power plant at {middle:?}", (x, y));
+    game.run(400);
+    for &id in &soldiers[4..] {
+        let cell = game.world.unit(id).unwrap().cell();
+        assert!((cell.0 - x).abs().max((cell.1 - y).abs()) <= 3, "soldier {id} is at {cell:?}, not by {:?}", (x, y));
+    }
+}
+
+#[test]
+fn a_transport_that_returns_on_unload_drives_back_where_it_loaded() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let enemy = terrain::ENEMY;
+    let yard = game.deploy_base();
+    game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
+    // DATA: ai.ini, an IFV and an engineer with TransportsReturnOnUnload.
+    let kind = team_type(&game, "Allied IFV Rush vs Sov");
+    assert!(game.world.team_data.team_types[kind].transports_return);
+    let load = (yard.0 + 8, yard.1 + 12);
+    let to = (yard.0 + 20, yard.1 + 12);
+    assert!(to.0 < 128, "the cell does not fit the script's argument");
+    // Load, wait to be full, drive off, let the passenger out keeping it in
+    // the team, then guard.
+    let script = game.world.team_data.scripts.len();
+    game.world.team_data.scripts.push(vec![(14, 0), (43, 0), (4, to.0 + to.1 * 128), (8, 2), (5, 100)]);
+    game.world.team_data.team_types[kind].script = script;
+    let ifv = game.world.add_unit(load, 0, game.stats("FV"), enemy);
+    let engineer = game.world.add_infantry((load.0, load.1 + 2), 0, 0, game.stats("ENGINEER"), enemy).unwrap();
+    let team = game.world.start_team_for_tests(enemy, kind);
+    let find = |game: &Scenario| game.world.teams.iter().find(|t| t.id == team).cloned();
+    let mut left = false;
+    for _ in 0..300 {
+        game.run(10);
+        if find(&game).is_some_and(|t| !t.members.contains(&ifv)) {
+            left = true;
+            break;
+        }
+    }
+    let team_now = find(&game);
+    assert!(left, "the transport never left the team: {team_now:?}, ifv at {:?}", game.world.unit(ifv).map(|u| u.cell()));
+    assert!(team_now.as_ref().is_some_and(|t| t.members.contains(&engineer)), "the passenger left the team too: {team_now:?}");
+    let unloaded_at = game.world.unit(engineer).unwrap().cell();
+    assert!((unloaded_at.0 - to.0).abs() <= 4, "the engineer got out at {unloaded_at:?}, not near {to:?}");
+    game.run(600);
+    let back = game.world.unit(ifv).unwrap().cell();
+    assert!((back.0 - load.0).abs().max((back.1 - load.1).abs()) <= 1, "the transport is at {back:?}, not back at {load:?}");
+}
+
+#[test]
+fn a_team_sent_to_its_own_refinery_waits_by_its_corner_not_its_dock() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let enemy = terrain::ENEMY;
+    let yard = game.deploy_base();
+    game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
+    let spot = game.find_spot("GAREFN", (yard.0 + 6, yard.1 - 6), 6).unwrap();
+    let refinery = game.world.add_map_building(enemy, game.building("GAREFN"), spot, 256);
+    // DATA: ai.ini, six GIs whose first line is a move to their refinery.
+    let kind = team_type(&game, "Allied Base Guard - Refine");
+    for i in 0..6 {
+        game.world.add_infantry((yard.0 + 6 + i % 3, yard.1 + 12 + i / 3), 0, 0, game.stats("E1"), enemy).unwrap();
+    }
+    let team = game.world.start_team_for_tests(enemy, kind);
+    game.run(20);
+    let now = game.world.teams.iter().find(|t| t.id == team).cloned().unwrap();
+    assert_eq!(now.line, 0, "{now:?}");
+    let Some(ra2_sim::combat::Aim::Cell(x, y)) = now.target else {
+        panic!("no cell to go to: {now:?}");
+    };
+    let corner = game.world.buildings().iter().find(|b| b.id == refinery).unwrap().cell;
+    assert!((x - corner.0).abs().max((y - corner.1).abs()) <= 2, "sent to {:?}, the refinery's corner is {corner:?}", (x, y));
+}

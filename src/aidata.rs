@@ -58,6 +58,7 @@ pub fn load(ai: &Ini, rules: &Ini, unit: &dyn Fn(&str) -> Option<u16>, building:
             suicide: yes(id, "Suicide"),
             only_target_house_enemy: yes(id, "OnlyTargetHouseEnemy"),
             members_recruitable: yes(id, "AreTeamMembersRecruitable"),
+            transports_return: yes(id, "TransportsReturnOnUnload"),
             script: ai.get(id, "Script").and_then(|v| find(&script_ids, clean(v))).unwrap_or(usize::MAX),
             task_force: ai.get(id, "TaskForce").and_then(|v| find(&force_ids, clean(v))).unwrap_or(usize::MAX),
             autocreate: yes(id, "Autocreate"),

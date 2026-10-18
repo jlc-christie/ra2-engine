@@ -897,16 +897,12 @@ impl World {
                             }
                             None => {
                                 // With nowhere to put it the building is abandoned
-                                // and what was paid handed back.
+                                // and what was paid handed back. Its place stays
+                                // first in the plan, so the same building is
+                                // started again, for as long as there is no room.
                                 let paid = self.building_types[kind as usize].cost - production.balance;
                                 self.houses[h].credits += paid;
                                 *self.houses[h].slot_mut(combat) = None;
-                                if let Some(at) = brain.nodes.iter().position(|node| node.kind == Some(kind) && node.cell.is_none()) {
-                                    brain.nodes[at].fails += 1;
-                                    if brain.nodes[at].fails > 3 {
-                                        brain.nodes.remove(at);
-                                    }
-                                }
                             }
                         }
                     }
