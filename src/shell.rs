@@ -81,6 +81,8 @@ pub(crate) enum Screen {
     Score,
     /// The Options screen: display, game, interface and audio settings.
     Options,
+    /// The list of saved games, to pick one to load.
+    LoadGame,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -98,7 +100,7 @@ enum MenuAction {
     LeaveLobby,
     /// Typing on the Network and Internet screens goes to this box.
     Focus(crate::net::Focus),
-    /// Load the newest saved game.
+    /// Load the save picked in the list.
     LoadSaved,
     /// Internet: create a game on the server, join the one picked, pick one
     /// from the list, ask for the list again.
@@ -289,6 +291,7 @@ impl Plugin for ShellPlugin {
             Ok("score") => Screen::Score,
             Ok("options") => Screen::Options,
             Ok("loading") => Screen::LoadScreen,
+            Ok("load-game") => Screen::LoadGame,
             _ => Screen::MainMenu,
         };
         let shell = Shell::load(app.world().resource::<GameFiles>().clone());
@@ -322,6 +325,7 @@ impl Plugin for ShellPlugin {
             .init_resource::<Redraw>()
             .add_systems(OnEnter(Screen::MainMenu), start_slide)
             .add_systems(OnEnter(Screen::SinglePlayer), start_slide)
+            .add_systems(OnEnter(Screen::LoadGame), (spawn_load_game, start_slide))
             .add_systems(OnEnter(Screen::Skirmish), start_slide)
             .add_systems(OnEnter(Screen::ChooseMap), start_slide)
             .add_systems(OnEnter(Screen::Options), (spawn_options, start_slide))
@@ -340,13 +344,15 @@ impl Plugin for ShellPlugin {
                     map_entry_colors,
                     mode_entry_colors,
                     follow_highlight.run_if(in_state(Screen::ChooseMap)),
+                    (save_entry_colors, save_list_scroll).run_if(in_state(Screen::LoadGame)),
                 ),
             )
             .add_observer(on_menu_action)
             .add_observer(on_check_box)
             .add_observer(on_option)
             .add_observer(on_map_entry)
-            .add_observer(on_mode_entry);
+            .add_observer(on_mode_entry)
+            .add_observer(on_save_entry);
     }
 }
 
@@ -1041,12 +1047,108 @@ fn spawn_single_player(
                 (0, "GUI:NewCampaign", MenuAction::Mock("New Campaign")),
                 // There to
                 // press only when a save exists.
-                (1, "GUI:LoadSavedGame", if crate::saves::newest().is_some() { MenuAction::LoadSaved } else { MenuAction::Tell("There are no saved games yet.") }),
+                (1, "GUI:LoadSavedGame", if !crate::saves::list().is_empty() { MenuAction::Goto(Screen::LoadGame) } else { MenuAction::Tell("There are no saved games yet.") }),
                 (2, "GUI:Skirmish", MenuAction::Goto(Screen::Skirmish)),
                 (LAST_BUTTON_SLOT, "GUI:MainMenu", MenuAction::Goto(Screen::MainMenu)),
             ],
         );
     });
+}
+
+/// The Load Saved Game screen: every save, newest first, the first picked.
+// The heading and list sit where
+// the in-game Load dialog has them; a double click loads.
+fn spawn_load_game(mut commands: Commands, mut shell: ResMut<Shell>, mut images: ResMut<Assets<Image>>, mut saves: ResMut<crate::saves::SaveLoad>) {
+    saves.entries = crate::saves::list();
+    saves.picked = 0;
+    saves.clicked = None;
+    let rows: Vec<(String, String)> = saves.entries.iter().map(|entry| (entry.description.chars().take(34).collect(), crate::saves::stamp(entry.modified))).collect();
+    spawn_screen(&mut commands, Screen::LoadGame, &mut shell, &mut images, |painter, p| {
+        painter.sidebar(
+            p,
+            "GUI:LoadSavedGame",
+            9.0,
+            0,
+            &[(0, "GUI:Load", MenuAction::LoadSaved), (LAST_BUTTON_SLOT, "GUI:Back", MenuAction::Goto(Screen::SinglePlayer))],
+        );
+        let heading = painter.shell.string("GUI:SelectMission");
+        painter.label_top(p, &heading, TEXT, dialog_rect(24.0, 16.0, 266.0, 24.0));
+        let area = dialog_rect(24.0, 50.0, 266.0, 187.0);
+        let texts: Vec<(Pic, Pic)> = rows.iter().map(|(name, when)| (painter.shell.text(painter.images, name, TEXT), painter.shell.text(painter.images, when, TEXT))).collect();
+        let inner_width = area.width() - 2.0;
+        p.spawn((
+            Node { border: UiRect::all(Val::Px(1.0)), overflow: Overflow::clip(), ..place(area.min.x, area.min.y, area.width(), area.height()) },
+            BackgroundColor(Color::BLACK),
+            BorderColor::all(EDGE),
+        ))
+        .with_children(|frame| {
+            frame
+                .spawn((
+                    place(0.0, 0.0, inner_width, LIST_ROW_HEIGHT * texts.len() as f32),
+                    SaveListContent { rows: texts.len(), visible_rows: ((area.height() - 2.0) / LIST_ROW_HEIGHT) as usize },
+                ))
+                .with_children(|content| {
+                    for (index, (name, when)) in texts.iter().enumerate() {
+                        let text_y = ((LIST_ROW_HEIGHT - name.size.y) / 2.0).round();
+                        content
+                            .spawn((place(0.0, LIST_ROW_HEIGHT * index as f32, inner_width, LIST_ROW_HEIGHT), Button, SaveEntry(index), BackgroundColor(Color::NONE)))
+                            .with_children(|row| {
+                                row.spawn(picture(name, 3.0, text_y));
+                                row.spawn(picture(when, (inner_width * 255.0 / 399.0).round(), text_y));
+                            });
+                    }
+                });
+        });
+    });
+}
+
+/// A row of the list of saves, by its place in `SaveLoad::entries`.
+#[derive(Component)]
+struct SaveEntry(usize);
+
+/// The rows of the list of saves, moved up as it scrolls.
+#[derive(Component)]
+struct SaveListContent {
+    rows: usize,
+    visible_rows: usize,
+}
+
+fn on_save_entry(activate: On<Activate>, entries: Query<&SaveEntry>, mut saves: ResMut<crate::saves::SaveLoad>, time: Res<Time<Real>>) {
+    let Ok(entry) = entries.get(activate.entity) else {
+        return;
+    };
+    let now = time.elapsed_secs_f64();
+    let again = saves.clicked.is_some_and(|(last, at)| last == entry.0 && now - at < 0.4);
+    saves.clicked = Some((entry.0, now));
+    saves.picked = entry.0;
+    if again {
+        saves.load = saves.entries.get(entry.0).map(|entry| entry.path.clone());
+    }
+}
+
+fn save_entry_colors(mut entries: Query<(&SaveEntry, &mut BackgroundColor)>, saves: Res<crate::saves::SaveLoad>) {
+    for (entry, mut background) in &mut entries {
+        let color = if saves.picked == entry.0 { SELECTED } else { Color::NONE };
+        if background.0 != color {
+            background.0 = color;
+        }
+    }
+}
+
+fn save_list_scroll(mut wheel: MessageReader<MouseWheel>, mut lists: Query<(Ref<SaveListContent>, &mut Node)>, mut scroll: Local<usize>) {
+    let lines: f32 = wheel.read().map(|event| event.y).sum();
+    let step = lines.signum() * lines.abs().ceil();
+    for (list, mut node) in &mut lists {
+        if list.is_added() {
+            *scroll = 0;
+        }
+        let max = list.rows.saturating_sub(list.visible_rows) as f32;
+        *scroll = (*scroll as f32 - step).clamp(0.0, max) as usize;
+        let top = Val::Px(-LIST_ROW_HEIGHT * *scroll as f32);
+        if node.top != top {
+            node.top = top;
+        }
+    }
 }
 
 /// A box to type in: its outline (yellow when typing goes to it), what it
@@ -2345,7 +2447,7 @@ fn finish_leaving(
             next_screen.set(if lobby.via_server { Screen::Internet } else { Screen::Network });
         }
         MenuAction::Focus(focus) => lobby.focus = focus,
-        MenuAction::LoadSaved => saves.load = crate::saves::newest(),
+        MenuAction::LoadSaved => saves.load = saves.entries.get(saves.picked).map(|entry| entry.path.clone()),
         MenuAction::HostInternet => {
             lobby.mode = crate::net::LobbyMode::Hosting;
             lobby.via_server = true;
@@ -2438,7 +2540,7 @@ fn on_menu_action(
             next_screen.set(if lobby.via_server { Screen::Internet } else { Screen::Network });
         }
         MenuAction::Focus(focus) => lobby.focus = focus,
-        MenuAction::LoadSaved => saves.load = crate::saves::newest(),
+        MenuAction::LoadSaved => saves.load = saves.entries.get(saves.picked).map(|entry| entry.path.clone()),
         MenuAction::HostInternet => {
             lobby.mode = crate::net::LobbyMode::Hosting;
             lobby.via_server = true;

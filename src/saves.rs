@@ -19,9 +19,10 @@ use crate::shell::Screen;
 use crate::units::Sim;
 
 const MAGIC: &[u8; 8] = b"RA2RSAV1";
-/// Bumped whenever the header or anything in it changes shape. (The
-/// snapshot carries its own number.)
-const FORMAT: u32 = 6;
+/// Bumped whenever the header or anything in it changes shape. The
+/// snapshot's own number is folded in, so a save the game can no longer
+/// load is left out of the lists.
+const FORMAT: u32 = 6 << 16 | ra2_sim::snapshot::FORMAT;
 
 /// Where saves are kept: never in the game's own folder (see `home`).
 pub fn folder() -> PathBuf {
@@ -94,20 +95,6 @@ pub fn read(path: &Path) -> Result<SaveFile, String> {
         return Err(format!("saved by another version (format {})", save.format));
     }
     Ok(save)
-}
-
-/// The newest save in the folder.
-// The list is ordered by
-// the files' modified times, newest first.
-pub fn newest() -> Option<PathBuf> {
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(folder())
-        .ok()?
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("sav")))
-        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
-        .collect();
-    found.sort();
-    found.pop().map(|(_, path)| path)
 }
 
 /// A save as the lists show it.
@@ -301,7 +288,7 @@ fn save(
     }
 }
 
-fn load(mut commands: Commands, mut asked: ResMut<SaveLoad>, mut setup: Option<ResMut<GameSetup>>, state: Res<State<Screen>>, mut next: ResMut<NextState<Screen>>, files: Res<crate::files::GameFiles>, mut status: MessageWriter<crate::bar::Status>) {
+fn load(mut commands: Commands, mut asked: ResMut<SaveLoad>, mut setup: Option<ResMut<GameSetup>>, state: Res<State<Screen>>, mut next: ResMut<NextState<Screen>>, files: Res<crate::files::GameFiles>, mut status: MessageWriter<crate::bar::Status>, mut notices: MessageWriter<crate::notice::Notice>) {
     let Some(setup) = setup.as_mut() else {
         return;
     };
@@ -314,6 +301,7 @@ fn load(mut commands: Commands, mut asked: ResMut<SaveLoad>, mut setup: Option<R
         Ok(file) if file.digest != digest(&files, &file.setup) => {
             error!("{} was saved with different game files", path.display());
             status.write(crate::bar::Status::Text("That game was saved with different game files".to_owned()));
+            notices.write(crate::notice::Notice("That game was saved with different game files.".to_owned()));
         }
         Ok(file) => {
             info!("loading {} (tick {})", path.display(), file.tick);
@@ -324,7 +312,10 @@ fn load(mut commands: Commands, mut asked: ResMut<SaveLoad>, mut setup: Option<R
             commands.insert_resource(PendingLoad(file));
             next.set(if *state.get() == Screen::InGame { Screen::Loading } else { Screen::InGame });
         }
-        Err(error) => error!("could not load {}: {error}", path.display()),
+        Err(error) => {
+            error!("could not load {}: {error}", path.display());
+            notices.write(crate::notice::Notice("That saved game could not be loaded.".to_owned()));
+        }
     }
 }
 
