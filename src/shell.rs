@@ -330,7 +330,7 @@ impl Plugin for ShellPlugin {
             .add_systems(OnEnter(Screen::ChooseMap), start_slide)
             .add_systems(OnEnter(Screen::Options), (spawn_options, start_slide))
             .add_systems(OnEnter(Screen::LoadScreen), spawn_load_screen)
-            .add_systems(Update, leave_load_screen.run_if(in_state(Screen::LoadScreen)))
+            .add_systems(Update, (fill_load_bar, leave_load_screen).run_if(in_state(Screen::LoadScreen)))
             .add_systems(
                 Update,
                 (
@@ -885,6 +885,7 @@ fn spawn_load_screen(
     mut images: ResMut<Assets<Image>>,
     setup: Res<GameSetup>,
     time: Res<Time<Real>>,
+    lobby: Res<crate::net::Lobby>,
 ) {
     let country = match setup.options.country {
         country @ 0..=8 => country as usize,
@@ -950,6 +951,31 @@ fn spawn_load_screen(
                     let pic = painter.shell.text(painter.images, &loading, colour);
                     darken(p, 20.0, 300.0, pic.size.x, line_height);
                     p.spawn(picture(&pic, 20.0, 300.0));
+
+                    // The player's row at (16, 321): a darkened box; the bar,
+                    // its inside filled with the player's colour and PROGBARM.SHP
+                    // over as much of it as is loaded; then the name, 21 pixels
+                    // past the bar. The row is the taller of the bar plus 6 and
+                    // the text, plus 4.
+                    let player_name = if lobby.name.is_empty() { painter.shell.string("GUI:Player") } else { lobby.name.clone() };
+                    let player_colour = rules
+                        .as_ref()
+                        .and_then(|rules| rules.get("Colors", crate::terrain::PLAYER_COLOURS[setup.options.colour.clamp(0, 7) as usize]))
+                        .and_then(|value| <[u8; 3]>::try_from(value.split(',').filter_map(|part| part.trim().parse().ok()).collect::<Vec<u8>>().get(..3)?).ok())
+                        .map_or([255, 255, 255], crate::colors::hsv_to_rgb);
+                    let bar = painter.shell.shp(painter.images, "progbarm.shp", "mpls.pal", 0);
+                    let name = painter.shell.text(painter.images, &player_name, player_colour);
+                    let row = (bar.size.y + 6.0).max(name.size.y) + 4.0;
+                    let (x, y) = (16.0, 321.0);
+                    p.spawn((place(x, y, bar.size.x + name.size.x + 36.0, row + 1.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
+                    let (bar_x, bar_y) = (x + 5.0, y + ((row - 6.0 - bar.size.y) / 2.0).floor());
+                    let [r, g, b] = player_colour;
+                    p.spawn((place(bar_x + 3.0, bar_y + 3.0, bar.size.x, bar.size.y), BackgroundColor(Color::srgb_u8(r, g, b))));
+                    // Not original behaviour: the map loads at once here, so
+                    // the bar fills over the time the screen is shown.
+                    p.spawn((Node { overflow: Overflow::clip(), ..place(bar_x + 3.0, bar_y + 3.0, 0.0, bar.size.y) }, LoadBar(bar.size.x)))
+                        .with_child(picture(&bar, 0.0, 0.0));
+                    p.spawn(picture(&name, x + 21.0 + bar.size.x, y + ((row - name.size.y) / 2.0).floor()));
                 });
         });
 }
@@ -973,6 +999,17 @@ fn wrap(font: &Font, text: &str, width: usize) -> Vec<String> {
         }
     }
     lines
+}
+
+/// The loading bar's filled part, and the bar's full width.
+#[derive(Component)]
+struct LoadBar(f32);
+
+fn fill_load_bar(shown: Option<Res<LoadScreenShown>>, time: Res<Time<Real>>, mut bars: Query<(&LoadBar, &mut Node)>) {
+    let done = shown.map_or(1.0, |shown| ((time.elapsed_secs_f64() - shown.0) / LOAD_SCREEN_SECONDS).clamp(0.0, 1.0)) as f32;
+    for (bar, mut node) in &mut bars {
+        node.width = Val::Px((bar.0 * done).round());
+    }
 }
 
 fn leave_load_screen(shown: Option<Res<LoadScreenShown>>, time: Res<Time<Real>>, mut next_screen: ResMut<NextState<Screen>>) {
