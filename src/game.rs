@@ -277,6 +277,8 @@ pub(crate) fn load_map(
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut next_screen: ResMut<NextState<Screen>>,
     drawn: Option<Res<DrawnCountry>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut ground: ResMut<Assets<crate::depth::GroundMaterial>>,
 ) {
     // A random country or colour is settled now, or for the country, on the
     // loading screen before.
@@ -381,7 +383,6 @@ pub(crate) fn load_map(
     let built_levels: std::collections::HashMap<(i32, i32), i32> =
         scene.placements.iter().map(|p| p.light_cell).map(|cell| (cell, built.world.map.level(cell.0, cell.1) as i32)).collect();
     commands.insert_resource(std::mem::take(&mut scene.radar_ground));
-    commands.insert_resource(std::mem::take(&mut scene.depth));
     commands.insert_resource(scene.armoury.clone());
     commands.insert_resource(crate::lighting::WorldLight::new(std::mem::take(&mut scene.light_setup)));
     commands.insert_resource(crate::lighting::StormLight::default());
@@ -469,11 +470,21 @@ pub(crate) fn load_map(
             page_layouts[entry.page].add_texture(URect::from_corners(min, max))
         })
         .collect();
+    let mut heights: Vec<Option<Handle<Image>>> = Vec::new();
     let pages: Vec<(Handle<Image>, Handle<TextureAtlasLayout>)> = scene
         .pages
         .into_iter()
         .zip(page_layouts)
         .map(|(page, layout)| {
+            heights.push((!page.z.is_empty()).then(|| {
+                images.add(Image::new(
+                    Extent3d { width: terrain::PAGE_SIZE, height: terrain::PAGE_SIZE, depth_or_array_layers: 1 },
+                    TextureDimension::D2,
+                    page.z,
+                    TextureFormat::R8Uint,
+                    RenderAssetUsages::RENDER_WORLD,
+                ))
+            }));
             let image = Image::new(
                 Extent3d {
                     width: terrain::PAGE_SIZE,
@@ -510,7 +521,35 @@ pub(crate) fn load_map(
             .map(|animation| animation.steps.iter().map(|(art, shadow)| (step(art), step(shadow))).collect())
             .collect(),
     ));
+    // The ground is drawn first, as one mesh for each atlas page.
+    let tiles: Vec<crate::depth::GroundTile> = scene
+        .placements
+        .iter()
+        .filter_map(|placement| {
+            let entry = scene.entries[placement.entry];
+            Some(crate::depth::GroundTile {
+                page: entry.page,
+                source: URect::new(entry.x, entry.y, entry.x + entry.width, entry.y + entry.height),
+                at: IVec2::new(placement.x, placement.y),
+                base: placement.ground?,
+            })
+        })
+        .collect();
+    for (page, mesh) in crate::depth::ground_meshes(&tiles, pages.len(), terrain::PAGE_SIZE).into_iter().enumerate() {
+        let Some(heights) = heights[page].clone() else {
+            continue;
+        };
+        commands.spawn((
+            DespawnOnExit(Screen::InGame),
+            Mesh2d(meshes.add(mesh)),
+            MeshMaterial2d(ground.add(crate::depth::GroundMaterial { colours: pages[page].0.clone(), heights })),
+            Transform::default(),
+        ));
+    }
     for (number, placement) in scene.placements.iter().enumerate() {
+        if placement.ground.is_some() {
+            continue;
+        }
         let animated = scene.animations.iter().enumerate().find_map(|(index, animation)| {
             if animation.art == number {
                 Some(Animated { animation: index, shadow: false })
@@ -524,13 +563,15 @@ pub(crate) fn load_map(
         let (image, layout) = &pages[entry.page];
         // Layers are a whole unit apart; within one, cells nearer the viewer (a
         // larger x + y) are in front.
-        let layer = match placement.layer {
-            Layer::Terrain => 0.0,
-            Layer::Shadow => 1.0,
-            Layer::Object => 2.0,
-        };
         let row = (placement.cell.0 + placement.cell.1) as f32;
         let raised = if placement.kind == PlacementKind::TileExtra { 0.5 } else { 0.0 };
+        // Overlays are drawn with the ground, before any object.
+        let (layer, row) = match placement.layer {
+            Layer::Terrain => (0.0, row),
+            Layer::Shadow => (1.0, row),
+            Layer::Object if placement.kind == PlacementKind::Overlay => (crate::depth::FIRST, row / 100.0),
+            Layer::Object => (2.0, row),
+        };
         let mut spawned = commands.spawn((
             DespawnOnExit(Screen::InGame),
             MapSprite {
@@ -556,6 +597,8 @@ pub(crate) fn load_map(
         if let Some(rule) = placement.light {
             let level = built_levels.get(&placement.light_cell).copied().unwrap_or(0);
             spawned.insert(crate::lighting::Lit { cell: placement.light_cell, level, rule });
+        if let Some(depth) = placement.depth.clone() {
+            spawned.insert(depth);
         }
     }
 

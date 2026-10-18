@@ -1,123 +1,252 @@
-//! Depth against the ground: which pixels of a unit's picture the terrain hides.
+//! The depth buffer: which pixels of the map's pictures hide which.
 //!
-//! Follows the original game
-//! The engine keeps a depth for every pixel on screen; terrain tiles write it and
-//! units are tested against it, so a unit behind a cliff is cut off exactly where
-//! the cliff's picture covers it. Here the same numbers are worked out on demand
-//! for the pixels of one unit's picture.
+//! Every picture drawn into the map has a depth for each of its pixels, worked
+//! out from where the pixel is on screen; smaller is nearer. The ground, the
+//! bodies of buildings, bridges, overlays and most terrain objects write their
+//! depths; a pixel of anything is drawn only where it is nearer than what is
+//! already there. So a unit behind a cliff or a building is cut off exactly
+//! where the picture in front covers it.
 //!
-//! Depths are in the engine's units with its scrolling constant taken as the
-//! scene's own row 0, so that a flat ground pixel on scene row r at level 0 has
-//! depth -r - 1. Smaller is nearer.
+//! Depths are counted with the scene's row 0 as the origin, so that a flat
+//! ground pixel on scene row r at level 0 has depth -r - 1. They go to the GPU
+//! as each fragment's depth, all of them behind every plain sprite, which so
+//! draws over them as before. The ground is drawn as meshes through
+//! [`GroundMaterial`]; everything else with a [`Depth`] is an ordinary sprite
+//! drawn through [`DepthMaterial`], in the usual order.
 //!
+//! `RA2_NODEPTH=1` leaves the sprites plain, for comparing.
 
 use std::collections::HashMap;
 
+use bevy::asset::{uuid_handle, RenderAssetUsages};
+use bevy::mesh::{MeshTag, MeshVertexBufferLayoutRef};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, CompareFunction, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError, TextureDimension, TextureFormat};
+use bevy::shader::ShaderRef;
+use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPipeline, Material2dPlugin, MaterialExtension2d, SpriteMaterial, SpriteMaterialPlugin};
 
-/// The depth data of one tile picture.
-pub struct DepthTile {
-    pub width: i32,
-    pub height: i32,
-    /// For each pixel, its depth byte, or `None` where the picture is empty.
-    pub z: Vec<Option<u8>>,
+const SHADER: Handle<Shader> = uuid_handle!("6b0e8f8e-3f5b-4b0e-9a55-1d6a5c2f0d17");
+const GROUND_SHADER: Handle<Shader> = uuid_handle!("0d6f3c55-8a51-4f6e-b1d4-2c7e9a4b6f21");
+
+/// Where in the drawing order the pictures go that are drawn before every
+/// object: bridges, overlays, and the bodies, bibs and floors of buildings.
+/// After the ground and the shadows, before everything else.
+pub const FIRST: f32 = 1.9;
+
+/// How the depth of a picture's pixels is worked out.
+#[derive(Component, Clone, PartialEq, Debug)]
+pub enum Depth {
+    /// Standing up from its bottom row: that row has the depth of the ground
+    /// under it, moved by `adjust` and rounded down to a multiple of three,
+    /// and every three rows up are one nearer.
+    Upright { adjust: i32, write: bool },
+    /// Lying on the ground: each row has the depth of flat ground there, moved
+    /// by `adjust`.
+    Flat { adjust: i32, write: bool },
+    /// A building's body: the depth of its bottom row, moved by `adjust`, less
+    /// the value of the building depth shape under the pixel, the shape's point
+    /// `at` pixels from the picture's top-left corner. Pixels off the shape are
+    /// not drawn.
+    Body { adjust: i32, at: IVec2 },
 }
 
-/// A tile picture placed on the map.
-struct Placed {
-    x: i32,
-    y: i32,
-    /// The scene row of the top of the cell's diamond were it at level 0.
-    flat_top: i32,
-    level: i32,
-    tile: usize,
-    raised: bool,
+#[derive(Asset, AsBindGroup, Reflect, Clone)]
+#[bind_group_data(DepthKey)]
+pub struct DepthMaterial {
+    /// Mode, the depth shape's offset, and nothing.
+    #[uniform(20)]
+    params: IVec4,
+    #[texture(21, sample_type = "s_int")]
+    shape: Handle<Image>,
+    #[reflect(ignore)]
+    key: DepthKey,
 }
 
-const BUCKET: i32 = 64;
-
-#[derive(Resource, Default)]
-pub struct TerrainDepth {
-    tiles: Vec<DepthTile>,
-    placed: Vec<Placed>,
-    buckets: HashMap<(i32, i32), Vec<u32>>,
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct DepthKey {
+    write: bool,
 }
 
-impl TerrainDepth {
-    pub fn add_tile(&mut self, tile: DepthTile) -> usize {
-        self.tiles.push(tile);
-        self.tiles.len() - 1
+impl From<&DepthMaterial> for DepthKey {
+    fn from(material: &DepthMaterial) -> Self {
+        material.key
+    }
+}
+
+impl MaterialExtension2d for DepthMaterial {
+    fn fragment_shader() -> Option<ShaderRef> {
+        Some(ShaderRef::Handle(SHADER))
     }
 
-    /// Records a tile picture drawn with its corner at a scene pixel. `flat_top`
-    /// is the scene row of the top of the cell's diamond at level 0; `raised`
-    /// marks the part of a tile that stands up out of its diamond.
-    pub fn place(&mut self, tile: usize, x: i32, y: i32, flat_top: i32, level: i32, raised: bool) {
-        let Some(shape) = self.tiles.get(tile) else {
+    fn specialize(_: &Material2dPipeline, descriptor: &mut RenderPipelineDescriptor, _: &MeshVertexBufferLayoutRef, key: Material2dKey<Self>) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = Some(key.bind_group_data.write);
+            depth.depth_compare = Some(CompareFunction::Greater);
+        }
+        Ok(())
+    }
+}
+
+/// The ground of one atlas page: its tiles' colours and depth bytes. The tiles
+/// are drawn as one mesh whose vertex colour's red holds each tile's base depth.
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct GroundMaterial {
+    #[texture(0)]
+    pub colours: Handle<Image>,
+    #[texture(1, sample_type = "u_int")]
+    pub heights: Handle<Image>,
+}
+
+impl Material2d for GroundMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(GROUND_SHADER)
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn specialize(_: &Material2dPipeline, descriptor: &mut RenderPipelineDescriptor, _: &MeshVertexBufferLayoutRef, _: Material2dKey<Self>) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = Some(true);
+            depth.depth_compare = Some(CompareFunction::GreaterEqual);
+        }
+        Ok(())
+    }
+}
+
+/// One tile picture on the ground: its atlas page and place in it, where it is
+/// drawn in the scene, and its base depth.
+pub struct GroundTile {
+    pub page: usize,
+    pub source: URect,
+    pub at: IVec2,
+    pub base: i32,
+}
+
+/// Builds the meshes that draw the ground, one for each atlas page, in the
+/// order the tiles are given.
+pub fn ground_meshes(tiles: &[GroundTile], pages: usize, page_size: u32) -> Vec<Mesh> {
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let mut meshes = Vec::new();
+    for page in 0..pages {
+        let (mut positions, mut uvs, mut colours, mut indices): (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 4]>, Vec<u32>) = Default::default();
+        for tile in tiles.iter().filter(|tile| tile.page == page) {
+            let first = positions.len() as u32;
+            let size = tile.source.size().as_ivec2();
+            for (dx, dy) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
+                let (x, y) = (tile.at.x + dx * size.x, tile.at.y + dy * size.y);
+                positions.push([x as f32, -y as f32, 0.0]);
+                let (u, v) = (tile.source.min.x + dx as u32 * size.x as u32, tile.source.min.y + dy as u32 * size.y as u32);
+                uvs.push([u as f32 / page_size as f32, v as f32 / page_size as f32]);
+                colours.push([tile.base as f32, 0.0, 0.0, 1.0]);
+            }
+            indices.extend([first, first + 2, first + 1, first, first + 3, first + 2]);
+        }
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
+        mesh.insert_indices(Indices::U32(indices));
+        meshes.push(mesh);
+    }
+    meshes
+}
+
+/// The materials made so far, one for each mode and set of textures, and the
+/// building depth shape.
+#[derive(Resource)]
+pub struct DepthMaterials {
+    made: HashMap<(i32, bool, IVec2), Handle<DepthMaterial>>,
+    shape: Handle<Image>,
+}
+
+impl FromWorld for DepthMaterials {
+    fn from_world(world: &mut World) -> Self {
+        let (width, height, data) = world.get_resource::<crate::files::GameFiles>().and_then(building_shape).unwrap_or((1, 1, vec![0]));
+        let image = Image::new(Extent3d { width, height, depth_or_array_layers: 1 }, TextureDimension::D2, data, TextureFormat::R8Sint, RenderAssetUsages::RENDER_WORLD);
+        let shape = world.resource_mut::<Assets<Image>>().add(image);
+        DepthMaterials { made: HashMap::new(), shape }
+    }
+}
+
+/// The building depth shape: its size and its values as signed bytes.
+// The file's single frame, with 65 taken from every value that is not 0 as it
+// is loaded.
+fn building_shape(files: &crate::files::GameFiles) -> Option<(u32, u32, Vec<u8>)> {
+    let shp = ra2_formats::shp::Shp::parse(files.get("buildngz.shp")?)?;
+    let frame = shp.frames.first()?;
+    let (width, height) = (shp.width as usize, shp.height as usize);
+    let mut data = vec![0u8; width * height];
+    for row in 0..frame.height as usize {
+        for col in 0..frame.width as usize {
+            let (x, y) = (frame.x as usize + col, frame.y as usize + row);
+            if x < width && y < height {
+                let raw = frame.pixels[row * frame.width as usize + col];
+                data[y * width + x] = if raw == 0 { 0 } else { raw.wrapping_sub(65) };
+            }
+        }
+    }
+    Some((width as u32, height as u32, data))
+}
+
+/// Gives each picture with a [`Depth`] the material and tag that draw it so.
+fn apply_depth(
+    mut commands: Commands,
+    mut made: ResMut<DepthMaterials>,
+    mut materials: ResMut<Assets<DepthMaterial>>,
+    changed: Query<(Entity, &Depth, Option<&SpriteMaterial<DepthMaterial>>), Changed<Depth>>,
+) {
+    let made = &mut *made;
+    if std::env::var_os("RA2_NODEPTH").is_some() {
+        return;
+    }
+    for (entity, depth, current) in &changed {
+        let (mode, value, write, at) = match depth {
+            Depth::Upright { adjust, write } => (1, *adjust, *write, IVec2::ZERO),
+            Depth::Flat { adjust, write } => (2, *adjust, *write, IVec2::ZERO),
+            Depth::Body { adjust, at } => (3, *adjust, true, *at),
+        };
+        let shape = made.shape.clone();
+        let handle = made
+            .made
+            .entry((mode, write, at))
+            .or_insert_with(|| materials.add(DepthMaterial { params: IVec4::new(mode, at.x, at.y, 0), shape, key: DepthKey { write } }))
+            .clone();
+        let mut entity = commands.entity(entity);
+        entity.insert(MeshTag::new(value as u32));
+        if current.is_none_or(|current| current.0 != handle) {
+            entity.insert(SpriteMaterial(handle));
+        }
+    }
+}
+
+pub struct DepthPlugin;
+
+impl Plugin for DepthPlugin {
+    fn build(&self, app: &mut App) {
+        let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
+        shaders.insert(SHADER.id(), Shader::from_wesl(include_str!("depth.wesl"), "ra2/depth.wesl")).ok();
+        shaders.insert(GROUND_SHADER.id(), Shader::from_wesl(include_str!("ground.wesl"), "ra2/ground.wesl")).ok();
+        app.add_plugins((SpriteMaterialPlugin::<DepthMaterial>::default(), Material2dPlugin::<GroundMaterial>::default()))
+            .init_resource::<DepthMaterials>()
+            .add_systems(PostUpdate, apply_depth);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_building_depth_shape_is_nearest_up_its_middle() {
+        let Ok(files) = crate::files::GameFiles::open() else {
             return;
         };
-        let id = self.placed.len() as u32;
-        for by in y.div_euclid(BUCKET)..=(y + shape.height - 1).div_euclid(BUCKET) {
-            for bx in x.div_euclid(BUCKET)..=(x + shape.width - 1).div_euclid(BUCKET) {
-                self.buckets.entry((bx, by)).or_default().push(id);
-            }
-        }
-        self.placed.push(Placed { x, y, flat_top, level, tile, raised });
+        let (width, height, data) = building_shape(&files).expect("buildngz.shp");
+        assert_eq!((width, height), (396, 477));
+        let at = |x: usize, y: usize| data[y * width as usize + x] as i8;
+        assert_eq!(at(198, 446), 9);
+        assert!(at(150, 446) < at(198, 446) && at(198, 446) < at(198, 400));
     }
-
-    /// Which pixels of a picture the ground hides: the picture's corner and size
-    /// in scene pixels, the level its owner stands on, and its depth on each
-    /// scene row. Returns `None` when nothing is hidden.
-    // A tile pixel's depth is that of the top of its cell's box at level 0, less
-    // 30, plus the pixel's depth byte; it is written where it is no further than
-    // what is there. A tested pixel is drawn only where its depth is less than
-    // the one stored.
-    pub fn hidden(&self, x: i32, y: i32, width: i32, height: i32, level: i32, depth: impl Fn(i32) -> i32) -> Option<Vec<bool>> {
-        let mut seen: Vec<u32> = Vec::new();
-        for by in y.div_euclid(BUCKET)..=(y + height - 1).div_euclid(BUCKET) {
-            for bx in x.div_euclid(BUCKET)..=(x + width - 1).div_euclid(BUCKET) {
-                for &id in self.buckets.get(&(bx, by)).map_or(&[][..], Vec::as_slice) {
-                    // Flat ground at or below the owner's own level cannot be
-                    // nearer than something standing on it.
-                    let placed = &self.placed[id as usize];
-                    if (placed.raised || placed.level > level) && !seen.contains(&id) {
-                        seen.push(id);
-                    }
-                }
-            }
-        }
-        if seen.is_empty() {
-            return None;
-        }
-        let mut mask = vec![false; (width * height) as usize];
-        let mut any = false;
-        for id in seen {
-            let placed = &self.placed[id as usize];
-            let tile = &self.tiles[placed.tile];
-            let base = -placed.flat_top - 30;
-            let (x0, x1) = (x.max(placed.x), (x + width).min(placed.x + tile.width));
-            let (y0, y1) = (y.max(placed.y), (y + height).min(placed.y + tile.height));
-            for row in y0..y1 {
-                let mine = depth(row);
-                for col in x0..x1 {
-                    let Some(z) = tile.z[((row - placed.y) * tile.width + (col - placed.x)) as usize] else {
-                        continue;
-                    };
-                    if base + z as i32 <= mine {
-                        mask[((row - y) * width + (col - x)) as usize] = true;
-                        any = true;
-                    }
-                }
-            }
-        }
-        any.then_some(mask)
-    }
-}
-
-/// The depth of an upright picture (a unit, a soldier) on a scene row.
-// From the bottom row of the picture's own
-// rectangle and its adjustment, rounded down to a multiple of three, getting
-// nearer by one for every three rows up.
-pub fn upright(bottom: i32, adjust: i32, row: i32) -> i32 {
-    3 * (-bottom + adjust).div_euclid(3) - (bottom - row).div_euclid(3)
 }

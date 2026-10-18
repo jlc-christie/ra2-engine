@@ -70,7 +70,7 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugins((shell::ShellPlugin, game::GamePlugin, hud::HudPlugin, units::UnitsPlugin, debug::DebugPlugin, audio::AudioPlugin, cursor::CursorPlugin, control::ControlPlugin, pause::PausePlugin, radar::RadarPlugin, shroud::ShroudPlugin, beams::BeamsPlugin))
-        .add_plugins((video::VideoPlugin, bar::BarPlugin, endgame::EndGamePlugin, saves::SavesPlugin, net::NetPlugin, notice::NoticePlugin))
+        .add_plugins((video::VideoPlugin, bar::BarPlugin, endgame::EndGamePlugin, saves::SavesPlugin, net::NetPlugin, notice::NoticePlugin, depth::DepthPlugin))
         .run();
 }
 

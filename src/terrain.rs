@@ -166,6 +166,9 @@ pub struct AtlasEntry {
 pub struct AtlasPage {
     /// `PAGE_SIZE * PAGE_SIZE` RGBA pixels.
     pub rgba: Vec<u8>,
+    /// The depth byte of each pixel of the tiles on the page, laid out as
+    /// `rgba`; empty while the page has no tiles.
+    pub z: Vec<u8>,
 }
 
 /// Packs images into pages in rows, left to right.
@@ -189,6 +192,7 @@ impl Atlas {
         if self.pages.is_empty() || self.cursor.1 + padded_h > PAGE_SIZE {
             self.pages.push(AtlasPage {
                 rgba: vec![0; (PAGE_SIZE * PAGE_SIZE * 4) as usize],
+                z: Vec::new(),
             });
             self.cursor = (0, 0);
             self.row_height = 0;
@@ -212,6 +216,21 @@ impl Atlas {
             height,
         });
         self.entries.len() - 1
+    }
+
+    /// Adds an RGBA image with a depth byte for each pixel.
+    fn add_with_depth(&mut self, width: u32, height: u32, rgba: &[u8], z: &[u8]) -> usize {
+        let entry = self.add(width, height, rgba);
+        let AtlasEntry { page, x, y, .. } = self.entries[entry];
+        let page = &mut self.pages[page];
+        if page.z.is_empty() {
+            page.z = vec![0; (PAGE_SIZE * PAGE_SIZE) as usize];
+        }
+        for row in 0..height {
+            let to = ((y + row) * PAGE_SIZE + x) as usize;
+            page.z[to..to + width as usize].copy_from_slice(&z[(row * width) as usize..((row + 1) * width) as usize]);
+        }
+        entry
     }
 }
 
@@ -275,6 +294,11 @@ pub struct Placement {
     /// How it takes the light of `light_cell`, if at all.
     pub light: Option<crate::lighting::LightRule>,
     pub light_cell: (i32, i32),
+    /// How its pixels' depths are worked out.
+    pub depth: Option<crate::depth::Depth>,
+    /// For a tile, its base depth: that of the top of its cell's box at level
+    /// 0, less 30; its pixels add their depth bytes.
+    pub ground: Option<i32>,
 }
 
 /// One cell of the map as the simulation sees it.
@@ -1041,8 +1065,6 @@ pub struct Scene {
     pub house_palettes: Vec<Option<usize>>,
     /// The player's start cell and each house's base unit type, by owner.
     pub base_units: Vec<Option<u16>>,
-    /// The depth of the ground's pictures, for hiding units behind cliffs.
-    pub depth: crate::depth::TerrainDepth,
     pub building_types: Vec<BuildingInfo>,
     pub unit_types: Vec<UnitInfo>,
     pub infantry_spawns: Vec<InfantrySpawn>,
@@ -1177,6 +1199,9 @@ struct OverlayArt {
     frame: usize,
     lift: i32,
     light_levels: i32,
+    /// `DrawFlat` (default yes) and `IsARock`.
+    flat: bool,
+    rock: bool,
 }
 
 // DATA: positions of these types in rules.ini `[OverlayTypes]`.
@@ -1270,7 +1295,12 @@ impl ObjectRules {
         }
         // DATA: `Image=` names the art when it differs from the type name.
         let image = rules.get(name, "Image").unwrap_or(name).to_lowercase();
+        let truth = |key: &str, default: bool| {
+            rules.get(name, key).map_or(default, |value| matches!(value.trim().chars().next(), Some('y' | 'Y' | 't' | 'T' | '1')))
+        };
         let mut art = OverlayArt {
+            flat: truth("DrawFlat", true),
+            rock: truth("IsARock", false),
             image,
             // The cell's lit palette. Low bridges need no special case. And DATA (stock maps): a low bridge
             // is three adjacent cells across, with states 0, 1 and 2, and the art's only image is frame 1,
@@ -1444,8 +1474,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     let mut atlas = Atlas::default();
     let mut art: HashMap<ArtKey, usize> = HashMap::new();
     let mut placements = Vec::new();
-    let mut depth = crate::depth::TerrainDepth::default();
-    let mut depth_tiles: HashMap<(i32, usize, u8, bool), usize> = HashMap::new();
 
     let mut ramp_types: Vec<((i32, i32), u8)> = Vec::new();
     let mut tile_anims: Vec<(String, (i32, i32), (i32, i32))> = Vec::new();
@@ -1534,16 +1562,20 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             .entry(ArtKey::Tile(index, variant, tile.sub_tile, light))
             .or_insert_with(|| {
                 let mut rgba = vec![0u8; (CELL_WIDTH * CELL_HEIGHT * 4) as usize];
+                // DATA: a tile without depth data is taken as flat (29 less the row).
+                let mut z = vec![0u8; (CELL_WIDTH * CELL_HEIGHT) as usize];
                 for row in 0..CELL_HEIGHT as u32 {
                     let (start, length) = diamond_row(row, CELL_WIDTH as u32, CELL_HEIGHT as u32);
                     for col in start..start + length {
                         let at = (row * CELL_WIDTH as u32 + col) as usize;
                         rgba[at * 4..at * 4 + 4]
                             .copy_from_slice(&lit(colors[cell.pixels[at] as usize], light));
+                        z[at] = cell.z.as_ref().map_or((29 - row as i32).max(0) as u8, |z| z[at]);
                     }
                 }
-                atlas.add(CELL_WIDTH as u32, CELL_HEIGHT as u32, &rgba)
+                atlas.add_with_depth(CELL_WIDTH as u32, CELL_HEIGHT as u32, &rgba, &z)
             });
+        let base = Some(-(y + 15 * level) - 30);
         placements.push(Placement {
             entry,
             x,
@@ -1576,6 +1608,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             depth.add_tile(crate::depth::DepthTile { width: CELL_WIDTH, height: CELL_HEIGHT, z })
         });
         depth.place(shape, x, y, flat_top, level, false);
+            depth: None,
+            ground: base,
+        });
 
         if let Some(extra) = &cell.extra {
             // The tile is drawn in one call with one
@@ -1588,7 +1623,13 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         .iter()
                         .flat_map(|&c| if c == 0 { [0; 4] } else { lit(colors[c as usize], light) })
                         .collect();
-                    atlas.add(extra.width, extra.height, &rgba)
+                    let z: Vec<u8> = match &extra.z {
+                        Some(z) => z.clone(),
+                        None => (0..extra.height as i32)
+                            .flat_map(|row| std::iter::repeat_n((29 - extra.y - row).clamp(0, 255) as u8, extra.width as usize))
+                            .collect(),
+                    };
+                    atlas.add_with_depth(extra.width, extra.height, &rgba, &z)
                 });
             placements.push(Placement {
                 entry,
@@ -1599,14 +1640,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 kind: PlacementKind::TileExtra,
                 light: Some(crate::lighting::LightRule::Ground { raise: 0 }),
                 light_cell: cell_xy,
+                depth: None,
+                ground: base,
             });
-            if let Some(extra_z) = &extra.z {
-                let shape = *depth_tiles.entry((index, variant, tile.sub_tile, true)).or_insert_with(|| {
-                    let z = extra.pixels.iter().zip(extra_z).map(|(&c, &z)| (c != 0).then_some(z)).collect();
-                    depth.add_tile(crate::depth::DepthTile { width: extra.width as i32, height: extra.height as i32, z })
-                });
-                depth.place(shape, x + extra.x, y + extra.y, flat_top, level, true);
-            }
         }
     }
 
@@ -1634,6 +1670,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         remap: Option<usize>,
         /// `AnimationRate` and `AnimationProbability`, for `IsAnimated` objects.
         animation: Option<(u32, f32)>,
+        /// Whether it lies flat, its depth adjustment above the height's, and
+        /// whether it writes depth.
+        stand: (bool, i32, bool),
     }
     let ramps: HashMap<(i32, i32), u8> = ramp_types.into_iter().collect();
     let levels: HashMap<(i32, i32), i32> = map
@@ -1684,6 +1723,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 nudge: (0, 0),
                 remap: None,
                 animation: None,
+                // A flat overlay is moved 2 nearer than the
+                // ground, an upright one 17, a rock 2.
+                stand: (overlay.flat, if overlay.flat || overlay.rock { -2 } else { -17 }, true),
             });
         }
     }
@@ -1706,6 +1748,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 yes.then_some((rate, probability))
             }),
             palette,
+            // Upright, 12 nearer; an animated one only tests.
+            stand: (false, -12, !object_rules.rules.as_ref().and_then(|rules| rules.get(&object.name, "IsAnimated")).is_some_and(|v| v.trim().eq_ignore_ascii_case("yes"))),
             art: object.name.to_lowercase(),
             frame: 0,
             kind: PlacementKind::TerrainObject,
@@ -1850,6 +1894,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     kind: PlacementKind::Shadow,
                     light: None,
                     light_cell: object.cell,
+                    depth: None,
+                    ground: None,
                 });
             }
         }
@@ -1885,6 +1931,11 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             kind: object.kind,
             light: light_rule,
             light_cell: object.cell,
+            depth: Some(match object.stand {
+                (true, adjust, write) => crate::depth::Depth::Flat { adjust: adjust - 15 * level, write },
+                (false, adjust, write) => crate::depth::Depth::Upright { adjust: adjust - 15 * level, write },
+            }),
+            ground: None,
         });
 
         // An animated object's image is its stage, and
@@ -3623,7 +3674,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         pages: atlas.pages,
         entries: atlas.entries,
         placements,
-        depth,
         animations,
         missing_tiles,
         ore_cells,
