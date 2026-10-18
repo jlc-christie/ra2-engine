@@ -474,6 +474,15 @@ pub struct UnitInfo {
     pub roll_angle: f32,
     /// For a vehicle drawn from a sheet of pictures instead of a model.
     pub sheet: Option<Sheet>,
+    /// art.ini `ShadowIndex`: the section of the model that casts the shadow;
+    /// rules.ini `NoShadow`.
+    pub shadow_index: usize,
+    pub no_shadow: bool,
+    /// rules.ini `Weight`, which damps the rocking a blast gives it.
+    pub weight: f64,
+    /// `IsChargeTurret` with its `TurretCount`: the turret shown counts down
+    /// through the models as the weapon recharges.
+    pub charge_turrets: u8,
     pub sim: ra2_sim::UnitType,
 }
 
@@ -850,6 +859,11 @@ impl UnitArt {
             (Some(slope), Some(rock)) => Some(std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| slope[i][k] * rock[k][j]).sum()))),
             (slope, rock) => slope.or(rock),
         };
+        // standing on a cell with that ramp; "@b<old>_<thirds>" with it is
+        // the model that many thirds of the way there from another ramp's tilt;
+        // "@k<roll>_<pitch>_<half width>_<half length>" is the model rocked
+        // (angles in thousandths of a radian).
+        let (image, pose) = marks(image);
         let model = self.models.entry(image.to_owned()).or_insert_with(|| {
             let vxl = Vxl::parse(files.get(&format!("{image}.vxl"))?)?;
             let hva = files.get(&format!("{image}.hva")).and_then(Hva::parse);
@@ -861,6 +875,18 @@ impl UnitArt {
             .and_then(|index| self.owner_palettes.get(index))
             .unwrap_or(&self.base_palette);
         voxel::render(vxl, hva.as_ref(), self.vpl.as_ref(), &self.normals, palette, facing, light, self.hva_frame, pitch, roll, tilt)
+        voxel::render(vxl, hva.as_ref(), self.vpl.as_ref(), &self.normals, palette, facing, light, self.hva_frame, pose)
+    }
+
+    /// Half the width and half the length of a model's first section, in the
+    /// model's units.
+    pub fn half_extents(&mut self, files: &GameFiles, image: &str) -> (f32, f32) {
+        let model = self.models.entry(image.to_owned()).or_insert_with(|| {
+            let vxl = Vxl::parse(files.get(&format!("{image}.vxl"))?)?;
+            let hva = files.get(&format!("{image}.hva")).and_then(Hva::parse);
+            Some((vxl, hva))
+        });
+        model.as_ref().and_then(|(vxl, _)| vxl.limbs.first()).map_or((0.0, 0.0), |limb| ((limb.max[1] - limb.min[1]) / 2.0, (limb.max[0] - limb.min[0]) / 2.0))
     }
 
     /// How many animation frames a model has.
@@ -875,16 +901,39 @@ impl UnitArt {
     }
 }
 
+/// A model's name without its marks (see `UnitArt::sprite`), and the pose
+/// they give it.
+fn marks(image: &str) -> (&str, voxel::Pose) {
+    let (image, marks) = image.split_once('@').unwrap_or((image, ""));
+    let (mut pitch, mut ramp, mut from, mut rock) = (0.0, 0u8, None, None);
+    for mark in marks.split('@') {
+        match mark.split_at_checked(1) {
+            Some(("p", steps)) => pitch = steps.parse::<i32>().unwrap_or(0) as f32 * std::f32::consts::FRAC_PI_2 / 16.0,
+            Some(("r", number)) => ramp = number.parse().unwrap_or(0),
+            Some(("b", blend)) => from = blend.split_once('_').and_then(|(old, thirds)| Some((old.parse().ok()?, thirds.parse().ok()?))),
+            Some(("k", angles)) => {
+                let numbers: Vec<f32> = angles.split('_').filter_map(|n| n.parse().ok()).collect();
+                if let [roll, pitch, half_width, half_length] = numbers[..] {
+                    rock = Some(voxel::Rock { roll: roll / 1000.0, pitch: pitch / 1000.0, half_width, half_length });
+                }
+            }
+            _ => {}
+        }
+    }
+    (image, voxel::Pose { pitch, tilt: voxel::slope_matrix(ramp, from), rock })
+}
+
 impl UnitArt {
-    /// The shadow a flying vehicle casts on the ground under it.
-    pub fn flyer_shadow(&mut self, files: &GameFiles, image: &str, facing: u8, half: bool) -> Option<voxel::VoxelSprite> {
+    /// The shadow a vehicle casts from a section of its model, on ground with a
+    /// ramp.
+    pub fn voxel_shadow(&mut self, files: &GameFiles, image: &str, facing: u8, half: bool, section: usize, ramp: u8) -> Option<voxel::VoxelSprite> {
         let model = self.models.entry(image.to_owned()).or_insert_with(|| {
             let vxl = Vxl::parse(files.get(&format!("{image}.vxl"))?)?;
             let hva = files.get(&format!("{image}.hva")).and_then(Hva::parse);
             Some((vxl, hva))
         });
         let (vxl, hva) = model.as_ref()?;
-        voxel::shadow(vxl, hva.as_ref(), facing, half)
+        voxel::shadow(vxl, hva.as_ref(), facing, half, section, voxel::slope_matrix(ramp, None))
     }
 
     /// The shadow of a soldier in the air: frame 1 of INFSHDW.SHP.
@@ -955,9 +1004,11 @@ impl UnitArt {
         let Some((turret_facing, offset, which)) = turret else {
             return Some(body);
         };
-        let angle = (64.0 - facing as f32) * std::f32::consts::PI / 128.0;
-        let (wx, wy) = (angle.cos() * offset as f32, -angle.sin() * offset as f32);
-        let shift = (((wx - wy) * 30.0 / 256.0).round() as i32, ((wx + wy) * 15.0 / 256.0).round() as i32);
+        // The turret's place is `TurretOffset` along the body, tipped with it
+        // on a slope.
+        const MODEL_PER_LEPTON: f32 = 30.0 / 256.0 / std::f32::consts::FRAC_1_SQRT_2;
+        let place = marks(image).1.place([offset as f32 * MODEL_PER_LEPTON, 0.0, 0.0], facing);
+        let shift = (place[0].round() as i32, (-place[1]).round() as i32);
         let parts: Vec<(voxel::VoxelSprite, (i32, i32))> = [Some((body, (0, 0)))]
             .into_iter()
             // A type with several turrets names the
@@ -1085,6 +1136,8 @@ pub struct Scene {
     pub map_structures: Vec<MapStructure>,
     pub condition_yellow: f32,
     pub condition_red: f32,
+    /// `[General] IdleActionFrequency`.
+    pub idle_frequency: f64,
     /// `[General] TrackedUphill`, `TrackedDownhill`, `WheeledUphill`, `WheeledDownhill`.
     pub slope_speed: [f64; 4],
     /// The player's country (its place in `[Countries]`) and side (0 Allied, 1
@@ -2379,6 +2432,13 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         .and_then(|v| v.trim().trim_end_matches('%').parse::<f32>().ok())
         .map_or(0.25, |v| if v > 1.0 { v / 100.0 } else { v });
 
+    let idle_frequency = object_rules
+        .rules
+        .as_ref()
+        .and_then(|rules| rules.get("General", "IdleActionFrequency"))
+        .and_then(|v| v.split(';').next()?.trim().parse::<f64>().ok())
+        .unwrap_or(0.15);
+
     // DATA: the `[General]` keys that set production time.
     let build_rules = {
         let general = |key: &str, default: f64| {
@@ -2737,6 +2797,11 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 },
                 ui_name,
                 considered_aircraft: yes("ConsideredAircraft"),
+                // DATA: `ShadowIndex` 0 and `Weight` 1 unless given.
+                shadow_index: art_rules.as_ref().and_then(|art| art.get(&made.image, "ShadowIndex")).and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(0),
+                no_shadow: yes("NoShadow"),
+                weight: get("Weight").and_then(|v| v.split(';').next()?.trim().parse::<f64>().ok()).filter(|w| *w > 0.0).unwrap_or(1.0),
+                charge_turrets: if yes("IsChargeTurret") { number("TurretCount").unwrap_or(0).clamp(0, 15) as u8 } else { 0 },
                 transport_sounds: (
                     get("EnterTransportSound").map(|v| v.trim().to_owned()),
                     get("LeaveTransportSound").map(|v| v.trim().to_owned()),
@@ -3524,6 +3589,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         map_structures,
         condition_yellow,
         condition_red,
+        idle_frequency,
         slope_speed: ["TrackedUphill", "TrackedDownhill", "WheeledUphill", "WheeledDownhill"].map(|key| object_rules.rules.as_ref().and_then(|rules| rules.get("General", key)).and_then(|v| v.trim().parse().ok()).unwrap_or(1.0)),
         enemies,
         house_palettes,

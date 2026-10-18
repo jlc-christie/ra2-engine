@@ -4001,6 +4001,50 @@ fn open_water() -> Option<(Scenario, (i32, i32))> {
 
 #[test]
 fn crews_get_out_of_destroyed_vehicles_and_buildings() {
+#[test]
+fn soldiers_under_fire_lie_down_crawl_and_get_up_when_calm() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    let gi = game.stats("E1");
+    let spot = (yard.0 + 6, yard.1 + 8);
+    let ours = game.world.add_unit(spot, 0, gi, PLAYER);
+    let theirs = game.world.add_unit((spot.0 + 3, spot.1), 0, gi, 2);
+    let mut down_at = None;
+    for tick in 0..600 {
+        game.run(1);
+        let Some(unit) = game.world.unit(ours) else { break };
+        if unit.prone && down_at.is_none() {
+            assert!(unit.fear >= 50, "down with fear {}", unit.fear);
+            down_at = Some(tick);
+        }
+        if down_at.is_some() {
+            break;
+        }
+    }
+    assert!(down_at.is_some(), "never went down under fire");
+    // Lying down it is hurt by the warhead's `ProneDamage` share and crawls.
+    game.world.remove_unit(theirs);
+    game.world.order(Order::Move { unit: ours, x: spot.0 - 3, y: spot.1 });
+    let from = game.world.unit(ours).map(|u| (u.x, u.y)).unwrap();
+    game.run(30);
+    let unit = game.world.unit(ours).unwrap();
+    let moved = (unit.x - from.0).abs() + (unit.y - from.1).abs();
+    assert!(moved > 0, "did not crawl");
+    // Fear wears off a point a tick; below 50 it gets up.
+    for _ in 0..400 {
+        game.run(1);
+        if game.world.unit(ours).is_some_and(|u| !u.prone) {
+            break;
+        }
+    }
+    let unit = game.world.unit(ours).unwrap();
+    assert!(!unit.prone && unit.fear < 50, "still down with fear {}", unit.fear);
+}
+
+#[test]
+fn soldiers_at_rest_fidget_now_and_then() {
     let Some(mut game) = Scenario::load("mp03t4") else {
         return;
     };
@@ -4123,4 +4167,21 @@ fn a_chrono_miner_jumping_leaves_its_terror_drone_behind() {
     assert!(dx.abs() <= 1 && dy.abs() <= 1, "the drone came out at {:?}, the miner left {left_from:?}", drone_now.cell());
     // It waits three times its weapon's rate of fire before doing anything.
     assert!(drone_now.paralysed_until > game.world.current_tick());
+    let ours = game.world.add_unit((yard.0 + 6, yard.1 + 8), 0, game.stats("E1"), PLAYER);
+    let mut fidgets = 0;
+    let mut last = None;
+    for _ in 0..3000 {
+        game.run(1);
+        let unit = game.world.unit(ours).unwrap();
+        if unit.fidget.is_some() && unit.fidget != last {
+            fidgets += 1;
+        }
+        last = unit.fidget;
+    }
+    // A wait of 67 to 270 frames between looks, and a fidget for six numbers
+    // out of eleven.
+    assert!((4..=40).contains(&fidgets), "{fidgets} fidgets in 3000 ticks");
+    game.world.order(Order::Cheer { house: PLAYER });
+    game.run(1);
+    assert_eq!(game.world.unit(ours).unwrap().fidget.map(|f| f.0), Some(3), "no cheer");
 }

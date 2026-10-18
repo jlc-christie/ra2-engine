@@ -343,6 +343,7 @@ impl Armoury {
         warhead.wall = yes(get("Wall"), false);
         warhead.wood = yes(get("Wood"), false);
         warhead.conventional = yes(get("Conventional"), false);
+        warhead.rocker = yes(get("Rocker"), false);
         warhead.temporal = yes(get("Temporal"), false);
         warhead.ivan_bomb = yes(get("IvanBomb"), false);
         warhead.bomb_disarm = yes(get("BombDisarm"), false);
@@ -551,6 +552,7 @@ impl Armoury {
                 .unwrap_or(0)
         };
         let fire_frames = frames("FireUp");
+        let flag = |key: &str, default: bool| yes(get(key), default);
         Fighter {
             armour,
             primary,
@@ -570,6 +572,14 @@ impl Armoury {
             immune: yes(get("Immune"), false),
             fire_up: art_get("FireUp").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
             fire_frames,
+            fire_prone: art_get("FireProne").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+            fire_prone_frames: frames("FireProne"),
+            down_frames: frames("Down"),
+            up_frames: frames("Up"),
+            fearless: flag("Fearless", false),
+            fraidycat: flag("Fraidycat", false),
+            // DATA: on unless the type says no.
+            crawls: flag("Crawls", true),
             engineer: yes(get("Engineer"), false),
             occupier: yes(get("Occupier"), false),
             c4: yes(get("C4"), false),

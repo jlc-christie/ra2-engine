@@ -429,6 +429,8 @@ struct Shortcuts {
     groups: [Vec<Target>; 10],
     bookmarks: [Option<Vec2>; 4],
     last_group: Option<(usize, u64)>,
+    /// When the player's soldiers last cheered.
+    cheered_at: Option<u64>,
     /// When the type-select key went down, and whether the last selection
     /// command was a type select that should next take in the whole map.
     type_key_down: Option<f64>,
@@ -659,6 +661,18 @@ fn shortcuts(
             if let Target::Building(building) = target {
                 sim.give(Order::Halt { building });
             }
+        }
+    }
+    // C has every soldier of the player's cheer, at most once
+    // every `MaximumCheerRate` frames, with `CheerSound`.
+    if keys.just_pressed(KeyCode::KeyC) && !ctrl {
+        let rules = files.get("rules.ini").map(Ini::parse);
+        let rate = rules.as_ref().and_then(|rules| rules.get("General", "MaximumCheerRate")).and_then(|v| v.split(';').next()?.trim().parse::<u64>().ok()).unwrap_or(300);
+        let now = sim.0.current_tick();
+        if state.cheered_at.is_none_or(|at| now < at || now >= at + rate) {
+            sim.give(Order::Cheer { house: crate::terrain::local() });
+            cues.write_batch(crate::audio::rules_sound(&files, "CheerSound").map(Cue::Sound));
+            state.cheered_at = Some(now);
         }
     }
     let units: Vec<u32> = selection.units().collect();

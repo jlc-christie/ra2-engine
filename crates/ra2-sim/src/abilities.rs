@@ -18,6 +18,7 @@ pub mod ability {
     pub const ROF: u32 = 1 << 4;
     pub const SIGHT: u32 = 1 << 5;
     pub const SELF_HEAL: u32 = 1 << 9;
+    pub const FEARLESS: u32 = 1 << 13;
     pub const NAMES: [&str; 18] = [
         "FASTER", "STRONGER", "FIREPOWER", "SCATTER", "ROF", "SIGHT", "CLOAK", "TIBERIUM_PROOF", "VEIN_PROOF", "SELF_HEAL", "EXPLODES", "RADAR_INVISIBLE", "SENSORS", "FEARLESS", "C4",
         "TIBERIUM_HEAL", "GUARD_AREA", "CRUSHER",

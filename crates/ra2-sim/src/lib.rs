@@ -15,6 +15,7 @@ pub mod ore;
 pub mod smudge;
 pub mod snapshot;
 pub mod spawns;
+mod soldiers;
 pub mod endgame;
 pub mod supers;
 pub mod powerups;
@@ -1430,6 +1431,16 @@ pub struct Unit {
     /// stepping (which is when its walking animation plays).
     head_to: Option<(i32, i32)>,
     pub stepping: bool,
+    /// A foot soldier's fear: raised when it is hurt, worn off a point a tick.
+    pub fear: u16,
+    /// Lying down (crawling when it moves), and the tick it last went down or
+    /// got up.
+    pub prone: bool,
+    pub prone_at: u64,
+    /// A soldier's fidget at rest (1 for `Idle1`, 2 for `Idle2`) and the tick it
+    /// began; and the tick from which it may fidget again.
+    pub fidget: Option<(u8, u64)>,
+    pub fidget_at: u64,
 }
 
 /// Where in a cell each foot-soldier spot is, from the cell's corner.
@@ -1530,6 +1541,11 @@ impl Unit {
             deploying: false,
             head_to: None,
             stepping: false,
+            fear: 0,
+            prone: false,
+            prone_at: 0,
+            fidget: None,
+            fidget_at: 0,
         }
     }
 
@@ -2191,6 +2207,8 @@ pub enum Order {
     CancelBuild { house: u8, building: u16 },
     /// Put a finished building on the map with its foundation's top cell at a cell.
     Place { house: u8, building: u16, x: i32, y: i32 },
+    /// Have all of a house's soldiers cheer.
+    Cheer { house: u8 },
 }
 
 impl Order {
@@ -2235,7 +2253,8 @@ impl Order {
             | Order::CancelUnit { house, .. }
             | Order::Suspend { house, .. }
             | Order::CancelBuild { house, .. }
-            | Order::Place { house, .. } => Some(house),
+            | Order::Place { house, .. }
+            | Order::Cheer { house } => Some(house),
             _ => None,
         }
     }
@@ -2321,6 +2340,8 @@ pub struct World {
     /// `ConditionRed`: the share of its strength at or below which a thing is
     /// badly damaged.
     pub condition_red: f64,
+    /// `IdleActionFrequency`: sets how often a soldier at rest fidgets.
+    pub idle_frequency: f64,
     /// `C4Delay` in frames.
     pub c4_delay: u32,
     /// The lists a computer house plans from.
@@ -2380,6 +2401,11 @@ pub struct World {
     ore_queues: Vec<ore::Queues>,
     ore_ready: bool,
     random: u64,
+    /// The stream soldiers' fidgets are drawn from.
+    // Not original behaviour: the engine draws them from its one stream; kept
+    // apart here so that soldiers standing about do not change every other
+    // draw.
+    idle_random: u64,
     tick: u64,
     next_id: u32,
 }
@@ -2441,6 +2467,7 @@ impl World {
             missile_rot_var: 0.25,
             targeting_delay: 27,
             condition_red: 0.25,
+            idle_frequency: 0.15,
             c4_delay: 27,
             reload_delay: 270,
             ai_rules: ai::Rules::default(),
@@ -2492,6 +2519,7 @@ impl World {
             ore_queues: vec![Default::default(); 2],
             ore_ready: false,
             random: 0x2545_f491_4f6c_dd1d,
+            idle_random: 0x9e37_79b9_7f4a_7c15,
             tick: 0,
             next_id: 0,
         }
@@ -4975,6 +5003,16 @@ impl World {
                     self.scatter(cell);
                 }
             }
+            // Every soldier of the house that is
+            // not busy with something it cannot break off starts its `Cheer`.
+            Order::Cheer { house } => {
+                let tick = self.tick;
+                for unit in self.units.iter_mut().filter(|u| u.owner == house && u.stats.infantry && u.health > 0) {
+                    if unit.falling.is_none() && unit.stance == combat::Stance::Standing && unit.prone_at + 2 <= tick {
+                        unit.fidget = Some((3, tick));
+                    }
+                }
+            }
             Order::Build { house, building } => {
                 // A held production of the same type
                 // is resumed; otherwise a new one starts, unless the factory has
@@ -5351,6 +5389,7 @@ impl World {
         }
         self.fly_planes();
         self.fight();
+        self.run_soldiers();
         // A flyer shot down is gone when
         // it reaches the ground, with its explosion.
         let fallen: Vec<u32> =
@@ -6561,7 +6600,7 @@ impl World {
 }
 
 /// A step of the random stream, for code that holds only its state.
-fn random_step(state: &mut u64) -> u32 {
+pub(crate) fn random_step(state: &mut u64) -> u32 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;
@@ -6638,7 +6677,13 @@ fn walk(unit: &mut Unit, ground: &mut Ground) {
         unit.facing = (facing >> 8) as u8;
         unit.turn = Turn::facing(unit.facing);
         let angle = (facing as i16 as f64 - 16383.0) * -(std::f64::consts::TAU / 65536.0);
-        let speed = unit.speed as f64;
+        // Lying down a `Crawls` soldier goes at
+        // two thirds of its speed, any other at half as much again.
+        let speed = match (unit.prone, unit.stats.fighter.crawls) {
+            (false, _) => unit.speed,
+            (true, true) => unit.speed * 2 / 3,
+            (true, false) => unit.speed + unit.speed / 2,
+        } as f64;
         unit.fraction = UNIT_FRACTION;
         unit.x = (unit.x as f64 + angle.cos() * speed) as i32;
         unit.y = (unit.y as f64 - angle.sin() * speed) as i32;

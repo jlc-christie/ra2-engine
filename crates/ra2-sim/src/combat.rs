@@ -30,6 +30,8 @@ pub struct Warhead {
     pub wall: bool,
     pub wood: bool,
     pub conventional: bool,
+    /// `Rocker`: it rocks the vehicles round where it goes off.
+    pub rocker: bool,
     /// `Temporal`: it freezes its target and wears it out of existence.
     pub temporal: bool,
     /// `IvanBomb`, `BombDisarm`, `MindControl`, `Parasite`, `MakesDisguise`.
@@ -59,6 +61,7 @@ impl Default for Warhead {
             wall: false,
             wood: false,
             conventional: false,
+            rocker: false,
             temporal: false,
             ivan_bomb: false,
             bomb_disarm: false,
@@ -238,6 +241,17 @@ pub struct Fighter {
     /// leaves, and how many frames the sequence has.
     pub fire_up: u16,
     pub fire_frames: u16,
+    /// The same lying down: `FireProne` and the `FireProne` sequence.
+    pub fire_prone: u16,
+    pub fire_prone_frames: u16,
+    /// Frames of its `Down` and `Up` sequences: a type without one cannot lie
+    /// down or get up.
+    pub down_frames: u16,
+    pub up_frames: u16,
+    /// `Fearless`, `Fraidycat` and `Crawls`: how a soldier takes fire.
+    pub fearless: bool,
+    pub fraidycat: bool,
+    pub crawls: bool,
     /// `Engineer`: it takes or mends buildings by walking into them.
     pub engineer: bool,
     /// `Occupier`: a soldier that can go into civilian buildings and fire from
@@ -303,6 +317,13 @@ impl Default for Fighter {
             immune: false,
             fire_up: 0,
             fire_frames: 0,
+            fire_prone: 0,
+            fire_prone_frames: 0,
+            down_frames: 0,
+            up_frames: 0,
+            fearless: false,
+            fraidycat: false,
+            crawls: true,
             engineer: false,
             occupier: false,
             c4: false,
@@ -345,8 +366,9 @@ pub struct Arms {
     passive: bool,
     /// Ordered to attack: it closes with the target and keeps at it.
     pub attacking: bool,
-    /// The tick the weapon is ready again.
+    /// The tick the weapon is ready again, and the wait it was given.
     rearm_at: u64,
+    rearm_for: u64,
     burst: u32,
     /// The tick of the next look for targets.
     scan_at: u64,
@@ -393,6 +415,16 @@ pub enum Entry {
 }
 
 impl Arms {
+    /// Which of `count` turrets an `IsChargeTurret` type shows: the last just
+    /// after a shot, stepping back to the first as the weapon recharges.
+    pub fn charge_turret(&self, now: u64, count: u8) -> u8 {
+        let left = self.rearm_at.saturating_sub(now);
+        if self.rearm_for == 0 || count == 0 {
+            return 0;
+        }
+        (count as u64 * left / self.rearm_for).min(count as u64 - 1) as u8
+    }
+
     /// The turret's facing, 0 to 255.
     pub fn turret_facing(&self) -> u8 {
         (self.turret.current() >> 8) as u8
@@ -538,6 +570,8 @@ pub enum Event {
     /// A building began to be sold, and one finished.
     SaleBegan { owner: u8 },
     Sold { owner: u8 },
+    /// A blast rocks a unit: from where, and how hard.
+    Rocked { unit: u32, from: (i32, i32, i32), strength: f32 },
     /// A house's unit or building was hit.
     /// Something was hurt: whose, where, whether a building, and whether a
     /// miner that lived through it.
@@ -1111,6 +1145,7 @@ impl World {
         };
         arms.burst %= weapon.burst.max(1) as u32;
         arms.rearm_at = self.tick + delay as u64;
+        arms.rearm_for = delay as u64;
         arms.fired_at = self.tick;
         self.events.push(Event::Fired { weapon: mount.weapon, at: from, to: aim, facing: (firing >> 8) as u8, by });
         if let Aim::Unit(id) = by {
@@ -1258,6 +1293,13 @@ impl World {
             return false;
         }
         let mut damage = damage;
+        // A soldier lying down takes the
+        // warhead's `ProneDamage` share of it, at least 1.
+        if let Aim::Unit(id) = victim {
+            if damage > 0 && self.unit(id).is_some_and(|unit| unit.prone) {
+                damage = ((damage as f64 * warhead.prone_damage) as i32).max(1);
+            }
+        }
         // A rank with STRONGER divides what
         // reaches it by `VeteranArmor`.
         if let Aim::Unit(id) = victim {
@@ -1365,6 +1407,9 @@ impl World {
                     }
                 }
             }
+        }
+        if let Aim::Unit(id) = victim {
+            self.frighten(id, source.is_some());
         }
         // Something on foot or
         // wheels that was hit and lived, did not turn on its attacker, and is
@@ -1518,6 +1563,33 @@ impl World {
             if distance <= spread && self.alive(who) {
                 self.receive_damage(who, damage, distance, warhead_index, source);
             }
+        }
+        // A `Rocker` warhead carrying more than 30
+        // damage rocks everything in the seven by seven cells round it, by a
+        // hundredth of the damage (at most 4): away from the blast, or for what
+        // stands in the blast's own cell, away from a point ten leptons towards
+        // whoever fired.
+        let rock = (damage as f64 * 0.01).min(4.0);
+        if warhead.rocker && rock > 0.3 {
+            let firer = source.and_then(|source| self.aim_point(source));
+            let rocked: Vec<Event> = self
+                .units
+                .iter()
+                .filter(|u| u.health > 0 && (u.cell().0 - centre.0).abs() <= 3 && (u.cell().1 - centre.1).abs() <= 3)
+                .map(|u| {
+                    let z = self.ground_z(u.x, u.y) + self.altitude(u);
+                    let from = match firer {
+                        Some(f) if u.cell() == centre => {
+                            let d = ((f.0 - u.x) as f64, (f.1 - u.y) as f64, (f.2 - z) as f64);
+                            let length = length3(d).max(f64::EPSILON);
+                            (u.x + (10.0 * d.0 / length) as i32, u.y + (10.0 * d.1 / length) as i32, z + (10.0 * d.2 / length) as i32)
+                        }
+                        _ => at,
+                    };
+                    Event::Rocked { unit: u.id, from, strength: rock as f32 }
+                })
+                .collect();
+            self.events.extend(rocked);
         }
     }
 
@@ -2779,7 +2851,10 @@ impl World {
                     }
                     // The soldier's firing sequence.
                     if infantry && arms.firing > 0 {
-                        if arms.firing - 1 == fighter.fire_up {
+                        // Lying down it fires from the
+                        // `FireProne` sequence instead.
+                        let (fire_up, fire_frames) = if self.units[index].prone { (fighter.fire_prone, fighter.fire_prone_frames) } else { (fighter.fire_up, fighter.fire_frames) };
+                        if arms.firing - 1 == fire_up {
                             let ready = self.fire_error(at, &fighter, &arms, target, which) == FireError::Ok;
                             if ready && weapon.limbo_launch {
                                 let id = self.units[index].id;
@@ -2804,7 +2879,7 @@ impl World {
                         }
                         if arms.firing > 0 {
                             arms.firing += 1;
-                            if arms.firing > fighter.fire_frames.max(fighter.fire_up + 1) {
+                            if arms.firing > fire_frames.max(fire_up + 1) {
                                 arms.firing = 0;
                             }
                         }

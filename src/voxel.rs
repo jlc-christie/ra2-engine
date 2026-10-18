@@ -142,15 +142,25 @@ pub fn rock_matrix(roll: f32, pitch: f32, facing: u8) -> [[f32; 3]; 3] {
 // The model is turned to its
 // facing and the slope's matrix applied to that, before the view's.
 pub fn to_view_on(v: [f32; 3], facing: u8, tilt: Option<&[[f32; 3]; 3]>) -> [f32; 3] {
+    world_to_view(to_world(v, facing, tilt))
+}
+
+fn rotate_z(v: [f32; 3], turn: f32) -> [f32; 3] {
+    let (sin, cos) = turn.sin_cos();
+    [v[0] * cos - v[1] * sin, v[0] * sin + v[1] * cos, v[2]]
+}
+
+/// A model-space vector turned to a facing and tipped by a slope.
+fn to_world(v: [f32; 3], facing: u8, tilt: Option<&[[f32; 3]; 3]>) -> [f32; 3] {
     let direction = (((facing as i32 >> 2) + 1) >> 1) & 31;
-    let rotate_z = |v: [f32; 3], turn: f32| {
-        let (sin, cos) = turn.sin_cos();
-        [v[0] * cos - v[1] * sin, v[0] * sin + v[1] * cos, v[2]]
-    };
-    let mut v = rotate_z(v, -(direction - 8) as f32 * std::f32::consts::PI / 16.0);
-    if let Some(m) = tilt {
-        v = std::array::from_fn(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]);
+    let v = rotate_z(v, -(direction - 8) as f32 * std::f32::consts::PI / 16.0);
+    match tilt {
+        Some(m) => std::array::from_fn(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]),
+        None => v,
     }
+}
+
+fn world_to_view(v: [f32; 3]) -> [f32; 3] {
     let [x, y, z] = rotate_z(v, -std::f32::consts::FRAC_PI_4);
     // Tilt: cos(-60 degrees) = 0.5, sin(-60 degrees) = -0.866.
     [x, 0.5 * y + 0.866_025_4 * z, -0.866_025_4 * y + 0.5 * z]
@@ -187,8 +197,84 @@ fn shade_section(normal: [f32; 3], light: [f32; 3]) -> usize {
     (16.0 * (diffuse + highlight)) as usize
 }
 
+/// How a vehicle is rocked by a blast: angles about its length (roll) and
+/// its width (pitch), in radians, and the half-extents of its body that keep
+/// the rocked hull clear of the ground.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rock {
+    pub roll: f32,
+    pub pitch: f32,
+    pub half_width: f32,
+    pub half_length: f32,
+}
+
+impl Rock {
+    /// The model turned about its own axes, then moved back so that the edge
+    /// it rocks onto stays where it was.
+    // The roll turns about x,
+    // the pitch about y; the move along x is the length less the length times
+    // the pitch's cosine, against the pitch's sign, and along y the same for
+    // the width and the roll, with the roll's sign; each truncated.
+    fn turn(&self, v: [f32; 3]) -> [f32; 3] {
+        let (sy, cy) = self.pitch.sin_cos();
+        let v = [v[0] * cy + v[2] * sy, v[1], -v[0] * sy + v[2] * cy];
+        let (sx, cx) = self.roll.sin_cos();
+        [v[0], v[1] * cx - v[2] * sx, v[1] * sx + v[2] * cx]
+    }
+
+    fn shift(&self) -> [f32; 3] {
+        let (a, b) = (self.half_width, self.half_length);
+        let dx = (b - (b * self.pitch.cos()).trunc()).trunc();
+        let dy = (a - (a * self.roll.cos()).trunc()).trunc();
+        [if self.pitch < 0.0 { -dx } else { dx }, if self.roll > 0.0 { -dy } else { dy }, 0.0]
+    }
+
+    /// How far it is lifted, after the slope.
+    fn lift(&self) -> f32 {
+        (self.roll.sin().abs() * self.half_width + self.pitch.sin().abs() * self.half_length).trunc()
+    }
+}
+
+/// Everything that places a model besides its facing: the nose raised by a
+/// pitch (a rocket), the slope it stands on, and its rocking.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Pose {
+    pub pitch: f32,
+    pub tilt: Option<[[f32; 3]; 3]>,
+    pub rock: Option<Rock>,
+}
+
+impl Pose {
+    /// A model-space direction in view space.
+    fn turn(&self, v: [f32; 3], facing: u8) -> [f32; 3] {
+        let (ps, pc) = self.pitch.sin_cos();
+        let mut v = [v[0] * pc - v[2] * ps, v[1], v[0] * ps + v[2] * pc];
+        if let Some(rock) = &self.rock {
+            v = rock.turn(v);
+        }
+        to_view_on(v, facing, self.tilt.as_ref())
+    }
+
+    /// A model-space point in view space.
+    pub fn place(&self, v: [f32; 3], facing: u8) -> [f32; 3] {
+        let (ps, pc) = self.pitch.sin_cos();
+        let mut v = [v[0] * pc - v[2] * ps, v[1], v[0] * ps + v[2] * pc];
+        let mut lift = 0.0;
+        if let Some(rock) = &self.rock {
+            let shift = rock.shift();
+            v = rock.turn(v);
+            v = std::array::from_fn(|i| v[i] + shift[i]);
+            lift = rock.lift();
+        }
+        let mut world = to_world(v, facing, self.tilt.as_ref());
+        world[2] += lift;
+        world_to_view(world)
+    }
+}
+
 /// Draws a model facing a compass direction (0 to 255, clockwise from north).
 /// `light` is the brightness multiplier per channel in thousandths.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     vxl: &Vxl,
     hva: Option<&Hva>,
@@ -210,6 +296,8 @@ pub fn render(
         let v = [v[0], v[1] * roll_cos - v[2] * roll_sin, v[1] * roll_sin + v[2] * roll_cos];
         to_view_on([v[0] * pitch_cos - v[2] * pitch_sin, v[1], v[0] * pitch_sin + v[2] * pitch_cos], facing, tilt.as_ref())
     };
+    pose: Pose,
+) -> Option<VoxelSprite> {
     // Every voxel as (screen x, screen y, nearness, colour).
     let mut points: Vec<(f32, f32, f32, [u8; 3])> = Vec::new();
     for (index, limb) in vxl.limbs.iter().enumerate() {
@@ -224,7 +312,7 @@ pub fn render(
         };
         // The light in the limb's space: its components along the limb's axes.
         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let limb_light = axes.map(|axis| dot(to_view(limb_to_model(axis), facing), LIGHT));
+        let limb_light = axes.map(|axis| dot(pose.turn(limb_to_model(axis), facing), LIGHT));
 
         let table = normals.0.get(&limb.normals_type);
         for voxel in &limb.voxels {
@@ -250,7 +338,7 @@ pub fn render(
             let rgb = palette.0[color as usize];
             let rgb = std::array::from_fn(|i| (rgb[i] as u32 * light[i] / 1000).min(255) as u8);
 
-            let view = to_view(position, facing);
+            let view = pose.place(position, facing);
             points.push((view[0], -view[1], view[2], rgb));
         }
     }
@@ -285,25 +373,30 @@ pub fn render(
     })
 }
 
-/// A model's shadow on flat ground: its footprint seen from above, turned to a
-/// compass direction, as translucent black.
-// The model is turned by its facing only, flattened to no height, and drawn at
-// half size for a `ConsideredAircraft` type.
-pub fn shadow(vxl: &Vxl, hva: Option<&Hva>, facing: u8, half: bool) -> Option<VoxelSprite> {
+/// A model's shadow on the ground: the footprint of one of its sections seen
+/// from above, turned to a compass direction and laid on the slope under it, as
+/// translucent black.
+// The section is turned by its facing and the slope, flattened to no height, and drawn
+// at half size for a `ConsideredAircraft` type. Its place in the model is that
+// of the animation's first frame. A section the model does not have leaves the
+// whole model to cast it.
+pub fn shadow(vxl: &Vxl, hva: Option<&Hva>, facing: u8, half: bool, section: usize, tilt: Option<[[f32; 3]; 3]>) -> Option<VoxelSprite> {
     let scale = if half { 0.5 } else { 1.0 };
     let mut points: Vec<(f32, f32)> = Vec::new();
-    for (index, limb) in vxl.limbs.iter().enumerate() {
+    let only = (section < vxl.limbs.len()).then_some(section);
+    for (index, limb) in vxl.limbs.iter().enumerate().filter(|(index, _)| only.is_none_or(|only| only == *index)) {
         let extent: [f32; 3] = std::array::from_fn(|i| (limb.max[i] - limb.min[i]) / limb.size[i].max(1) as f32);
         let matrix = hva.and_then(|hva| hva.frames.first()?.get(index)).copied();
         for voxel in &limb.voxels {
             let cell = [voxel.x as f32, voxel.y as f32, voxel.z as f32];
             let local: [f32; 3] = std::array::from_fn(|i| limb.min[i] + (cell[i] + 0.5) * extent[i]);
-            let mut position = match matrix {
+            let position: [f32; 3] = match matrix {
                 Some(m) => std::array::from_fn(|i| m[i][0] * local[0] + m[i][1] * local[1] + m[i][2] * local[2] + m[i][3] * limb.scale * extent[i]),
                 None => local,
             };
-            position[2] = 0.0;
-            let view = to_view(position.map(|c: f32| c * scale), facing);
+            let mut ground = to_world(position.map(|c: f32| c * scale), facing, tilt.as_ref());
+            ground[2] = 0.0;
+            let view = world_to_view(ground);
             points.push((view[0], -view[1]));
         }
     }
