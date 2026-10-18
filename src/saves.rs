@@ -19,10 +19,9 @@ use crate::shell::Screen;
 use crate::units::Sim;
 
 const MAGIC: &[u8; 8] = b"RA2RSAV1";
-/// Bumped whenever the header or anything in it changes shape. The
-/// snapshot's own number is folded in, so a save the game can no longer
-/// load is left out of the lists.
-const FORMAT: u32 = 6 << 16 | ra2_sim::snapshot::FORMAT;
+/// Bumped whenever the header or anything in it changes shape. (The
+/// snapshot carries its own number.)
+const FORMAT: u32 = 6;
 
 /// Where saves are kept: never in the game's own folder (see `home`).
 pub fn folder() -> PathBuf {
@@ -122,7 +121,10 @@ pub fn list() -> Vec<Entry> {
             let mut magic = [0u8; 8];
             reader.read_exact(&mut magic).ok()?;
             let (format, description): (u32, String) = bincode::deserialize_from(&mut reader).ok()?;
-            (&magic == MAGIC && format == FORMAT).then(|| Entry { path: entry.path(), description, modified: entry.metadata().and_then(|data| data.modified()).unwrap_or(std::time::UNIX_EPOCH) })
+            // A save whose simulation is of another shape cannot be loaded;
+            // it is left out. Its number is the first four bytes of the state.
+            let current = (&magic == MAGIC && format == FORMAT) && read(&entry.path()).ok().is_some_and(|save| save.state.get(..4) == Some(&ra2_sim::snapshot::FORMAT.to_le_bytes()[..]));
+            current.then(|| Entry { path: entry.path(), description, modified: entry.metadata().and_then(|data| data.modified()).unwrap_or(std::time::UNIX_EPOCH) })
         })
         .collect();
     found.sort_by(|a, b| b.modified.cmp(&a.modified));
@@ -368,3 +370,4 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 }
+
