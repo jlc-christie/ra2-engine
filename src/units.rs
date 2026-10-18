@@ -197,6 +197,7 @@ struct BuildingArt {
     deploying: Option<String>,
     under_door: Option<String>,
     turret: Option<(String, i32, i32)>,
+    turret_z_adjust: i32,
     zshape_move: (i32, i32),
     normal_z_adjust: i32,
     anims: Vec<crate::terrain::AnimSlot>,
@@ -571,6 +572,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
             bib: info.bib.take(),
             deploying: info.deploying.take(),
             turret: info.turret.take(),
+            turret_z_adjust: info.turret_z_adjust,
             zshape_move: info.zshape_move,
             normal_z_adjust: info.normal_z_adjust,
             under_door: info.under_door.take(),
@@ -1692,7 +1694,7 @@ fn show_buildings(
                     } else {
                         0.0
                     };
-                    parts.push((format!("vxl:{model}:{x}:{y}:{}", (recoil * 2.0).round() as i32), facing as usize, false, body_z + step * 30.0, PartDepth::Upright(-height)));
+                    parts.push((format!("vxl:{model}:{x}:{y}:{}", (recoil * 2.0).round() as i32), facing as usize, false, body_z + step * 30.0, PartDepth::Upright(art.turret_z_adjust - height)));
                 }
             }
         }

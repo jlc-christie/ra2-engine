@@ -569,6 +569,8 @@ pub struct BuildingInfo {
     /// A voxel turret (`TurretAnim` with `TurretAnimIsVoxel`): the model's name
     /// and where it sits from the building's draw point, in pixels.
     pub turret: Option<(String, i32, i32)>,
+    /// `TurretAnimZAdjust`: how much nearer than its place the turret is drawn.
+    pub turret_z_adjust: i32,
     /// The animations it shows at rest: the active ones, the idle one, and a super
     /// weapon's.
     pub anims: Vec<AnimSlot>,
@@ -2098,6 +2100,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 turret: (yes("Turret") && yes("TurretAnimIsVoxel"))
                     .then(|| get("TurretAnim").map(|name| (name.trim().to_lowercase(), number("TurretAnimX").unwrap_or(0), number("TurretAnimY").unwrap_or(0))))
                     .flatten(),
+                turret_z_adjust: number("TurretAnimZAdjust").unwrap_or(0),
                 deploying: art_key("DeployingAnim"),
                 under_door: art_key("UnderDoorAnim"),
                 anims,
