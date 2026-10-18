@@ -2234,7 +2234,7 @@ fn light_units(
         } else {
             light.setup.extra_unit
         };
-        let wanted = light.colour(&Lit { cell, level, rule: LightRule::Object { extra } }, picture.color.alpha());
+        let wanted = curtained(light.colour(&Lit { cell, level, rule: LightRule::Object { extra } }, picture.color.alpha()), &sim.0, unit.curtain_until);
         if picture.color != wanted {
             picture.color = wanted;
         }
@@ -2249,11 +2249,73 @@ fn light_units(
         let level = sim.0.map.level(building.cell.0, building.cell.1) as i32;
         // Plus the type's `ExtraLight`.
         let extra = light.setup.buildings.get(building.kind as usize).map_or(0, |b| b.1);
-        let wanted = light.colour(&Lit { cell: building.cell, level, rule: LightRule::Object { extra } }, picture.color.alpha());
+        let wanted = curtained(light.colour(&Lit { cell: building.cell, level, rule: LightRule::Object { extra } }, picture.color.alpha()), &sim.0, building.curtain_until);
         if picture.color != wanted {
             picture.color = wanted;
         }
     }
+}
+
+/// An object's colour under the iron curtain.
+fn curtained(colour: Color, world: &ra2_sim::World, until: u64) -> Color {
+    let now = world.current_tick();
+    if until <= now {
+        return colour;
+    }
+    let total = world.super_rules.curtain_duration as u64;
+    let scale = curtain_intensity(total.saturating_sub(until - now), total);
+    let linear = colour.to_linear();
+    Color::LinearRgba(LinearRgba::new(linear.red * scale, linear.green * scale, linear.blue * scale, linear.alpha))
+}
+
+/// How bright a curtained object is drawn, `frames` into a curtain of `total`
+/// frames (1 is as usual).
+// A flash up to twice as bright over 6 frames, held 4, falling to a fifth
+// over 20; then a pulse between a fifth and a half (8 frames up, 16 down)
+// until fewer than 54 frames are left; a fifth until fewer than 31; then the
+// flash in reverse: up over 6, held 4, down to as usual over 20.
+fn curtain_intensity(frames: u64, total: u64) -> f32 {
+    let (mut stage, mut began, mut length) = (0u8, 0u64, 0u64);
+    for frame in 0..=frames {
+        let left = total.saturating_sub(frame);
+        let over = frame - began >= length;
+        let next = match stage {
+            0 => Some((1, 6)),
+            1 if over => Some((2, 4)),
+            2 if over => Some((3, 20)),
+            3 if over => Some((4, 8)),
+            4 if over => Some((5, 16)),
+            5 if over && left < 54 => {
+                stage = 6;
+                None
+            }
+            5 if over => Some((4, 8)),
+            6 if left < 31 => Some((7, 6)),
+            7 if over => Some((8, 4)),
+            8 if over => Some((9, 20)),
+            9 if over => {
+                stage = 10;
+                None
+            }
+            _ => None,
+        };
+        if let Some((to, frames)) = next {
+            (stage, began, length) = (to, frame, frames);
+        }
+    }
+    let remaining = length.saturating_sub(frames - began) as i64;
+    let scale = match stage {
+        1 => (12 - remaining) * 256 / 6,
+        2 | 8 => 512,
+        3 => (remaining * 461 + 1020) / 20,
+        4 => (1024 - remaining * 77) / 8,
+        5 => (remaining * 77 + 816) / 16,
+        6 => 51,
+        7 => (3072 - remaining * 461) / 6,
+        9 => (remaining + 20) * 256 / 20,
+        _ => 256,
+    };
+    scale as f32 / 256.0
 }
 
 /// The image of one part of a building, and where its middle goes relative to the
