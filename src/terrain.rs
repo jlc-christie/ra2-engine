@@ -459,6 +459,11 @@ pub struct UnitInfo {
     pub unloading: Option<String>,
     /// `ChronoOutSound` and `ChronoInSound`, the type's own or the rules'.
     pub chrono_sounds: (Option<String>, Option<String>),
+    /// `AuxSound1` and `AuxSound2`: an aircraft's take-off and landing.
+    pub aux_sounds: (Option<String>, Option<String>),
+    /// `RollAngle` in radians (30 degrees unless given): how far an aircraft
+    /// leans into a turn.
+    pub roll_angle: f32,
     /// For a vehicle drawn from a sheet of pictures instead of a model.
     pub sheet: Option<Sheet>,
     pub sim: ra2_sim::UnitType,
@@ -809,13 +814,16 @@ impl UnitArt {
     ) -> Option<voxel::VoxelSprite> {
         // A name ending "@p<n>" is the model with its nose raised n sixteenths
         // of a right angle (a rocket climbing or diving); "@r<n>" is the model
-        // standing on a cell with that ramp; "@b<old>_<thirds>" with it is
+        // standing on a cell with that ramp; "@k<n>" the model rolled n
+        // thousandths of a radian about its length (an aircraft banking);
+        // "@b<old>_<thirds>" with a ramp is
         // the model that many thirds of the way there from another ramp's tilt.
         let (image, marks) = image.split_once('@').unwrap_or((image, ""));
-        let (mut pitch, mut ramp, mut from) = (0.0, 0u8, None);
+        let (mut pitch, mut roll, mut ramp, mut from) = (0.0, 0.0, 0u8, None);
         for mark in marks.split('@') {
             match mark.split_at_checked(1) {
                 Some(("p", steps)) => pitch = steps.parse::<i32>().unwrap_or(0) as f32 * std::f32::consts::FRAC_PI_2 / 16.0,
+                Some(("k", thousandths)) => roll = thousandths.parse::<i32>().unwrap_or(0) as f32 / 1000.0,
                 Some(("r", number)) => ramp = number.parse().unwrap_or(0),
                 Some(("b", blend)) => from = blend.split_once('_').and_then(|(old, thirds)| Some((old.parse().ok()?, thirds.parse().ok()?))),
                 _ => {}
@@ -832,7 +840,7 @@ impl UnitArt {
         let palette = palette
             .and_then(|index| self.owner_palettes.get(index))
             .unwrap_or(&self.base_palette);
-        voxel::render(vxl, hva.as_ref(), self.vpl.as_ref(), &self.normals, palette, facing, light, self.hva_frame, pitch, tilt)
+        voxel::render(vxl, hva.as_ref(), self.vpl.as_ref(), &self.normals, palette, facing, light, self.hva_frame, pitch, roll, tilt)
     }
 
     /// How many animation frames a model has.
@@ -2458,6 +2466,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                                 landable: yes("Landable"),
                                 ammo: whole("Ammo").unwrap_or(-1),
                                 slowdown: whole("SlowdownDistance").unwrap_or(500),
+                                pitch_speed: get("PitchSpeed").and_then(|v| v.parse::<f64>().ok()).map_or(250, |v| (v * 1000.0).round() as i32),
                             }
                         }),
                         // The jumpjet
@@ -2567,6 +2576,15 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         Some("blue") => 5,
                         _ => 1,
                     },
+                    // An unknown word is 0.
+                    pip_scale: match get("PipScale").map(|v| v.split(';').next().unwrap_or("").trim().to_lowercase()).as_deref() {
+                        Some("ammo") => 1,
+                        Some("tiberium") => 2,
+                        Some("passengers") => 3,
+                        Some("power") => 4,
+                        _ => 0,
+                    },
+                    pip_wrap: number("PipWrap").unwrap_or(0),
                     stats: ra2_sim::UnitStats {
                         // `Spawns`
                         // with its numbers, `MissileSpawn`, and the Rocket
@@ -2644,6 +2662,11 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     let pick = |key: &str| get(key).or_else(|| rules.and_then(|rules| rules.get("General", key))).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
                     (pick("ChronoOutSound"), pick("ChronoInSound"))
                 },
+                aux_sounds: {
+                    let pick = |key: &str| get(key).map(|v| v.split(';').next().unwrap_or("").trim().to_owned()).filter(|v| !v.is_empty());
+                    (pick("AuxSound1"), pick("AuxSound2"))
+                },
+                roll_angle: get("RollAngle").and_then(|v| v.split(';').next()?.trim().parse::<f32>().ok()).map_or(std::f32::consts::FRAC_PI_6, f32::to_radians),
                 // A type named by
                 // `UnloadingClass`, drawn in the miner's place as it dumps.
                 unloading: get("UnloadingClass").map(str::trim).filter(|v| !v.is_empty()).map(|class| rules.and_then(|rules| rules.get(class, "Image")).unwrap_or(class).trim().to_lowercase()),

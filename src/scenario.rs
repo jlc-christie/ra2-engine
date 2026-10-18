@@ -928,10 +928,12 @@ fn a_harrier_is_built_on_a_pad_flies_out_fires_and_comes_home_to_reload() {
     let start = game.world.buildings().iter().find(|b| b.id == target).unwrap().health;
     let flyer = planes[0];
     game.world.order(Order::Attack { unit: flyer, target: ra2_sim::combat::Aim::Building(target) });
-    let (mut top, mut fired, mut log) = (0, 0, Vec::new());
+    let (mut top, mut fired, mut log, mut landing_sounds) = (0, 0, Vec::new(), 0);
     for tick in 0..2500 {
         game.run(1);
-        fired += game.world.take_events().iter().filter(|e| matches!(e, ra2_sim::combat::Event::Fired { by: ra2_sim::combat::Aim::Unit(id), .. } if *id == flyer)).count();
+        let events = game.world.take_events();
+        fired += events.iter().filter(|e| matches!(e, ra2_sim::combat::Event::Fired { by: ra2_sim::combat::Aim::Unit(id), .. } if *id == flyer)).count();
+        landing_sounds += events.iter().filter(|e| matches!(e, ra2_sim::combat::Event::Landing { unit } if *unit == flyer)).count();
         let Some(unit) = game.world.unit(flyer) else { break };
         top = top.max(game.world.altitude(unit));
         if tick % 100 == 0 {
@@ -941,12 +943,82 @@ fn a_harrier_is_built_on_a_pad_flies_out_fires_and_comes_home_to_reload() {
     }
     assert!(top >= 1400, "never climbed: {top}; {log:?}");
     assert!(fired >= 1, "never fired: {log:?}");
+    assert_eq!(landing_sounds, 1, "one landing sound coming home");
     let unit = game.world.unit(flyer).expect("the Harrier was lost");
     let plane = unit.plane.unwrap();
     assert_eq!((plane.z, plane.ammo), (0, 1), "not home and loaded: {log:?}");
     assert!(plane.contact.is_some());
     let left = game.world.buildings().iter().find(|b| b.id == target).map(|b| b.health);
     assert!(left.is_none_or(|health| health < start), "the shot did nothing: {start} -> {left:?}");
+}
+
+#[test]
+fn a_pad_repairs_its_aircraft_a_step_at_a_time_and_selling_it_sends_them_off() {
+    use ra2_sim::combat::Event;
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    for name in ["GAPOWR", "GAREFN", "GAPILE", "GAAIRC"] {
+        let name = if name == "GAAIRC" && !game.options().contains(&"GAAIRC") { "AMRADR" } else { name };
+        let spot = game.find_spot(name, yard, 12).unwrap_or_else(|| panic!("nowhere for {name}"));
+        assert!(game.build_at(name, spot), "{name}");
+        game.run(30);
+    }
+    game.run(100);
+    let harrier = game.units.iter().position(|n| n == "ORCA").expect("no ORCA type") as u16;
+    game.world.houses[PLAYER as usize].credits = 50_000;
+    let known: Vec<u32> = game.world.units().iter().map(|u| u.id).collect();
+    for _ in 0..2 {
+        game.world.order(Order::BuildUnit { house: PLAYER, unit: harrier });
+    }
+    game.run(4000);
+    let planes: Vec<u32> = game.world.units().iter().filter(|u| u.owner == PLAYER && !known.contains(&u.id) && u.plane.is_some()).map(|u| u.id).collect();
+    assert_eq!(planes.len(), 2);
+    let pad = game.world.buildings().iter().find(|b| !b.docks.is_empty()).map(|b| b.id).unwrap();
+
+    // Hurt on the pad, it is mended `RepairStep` (8) points every
+    // `ReloadRate` (270 frames), for a little money each time.
+    let hurt = planes[0];
+    let strength = game.world.unit(hurt).unwrap().stats.strength;
+    game.world.units_mut_for_tests(hurt, strength - 20);
+    let cost = game.world.unit_types[harrier as usize].cost;
+    let price = (((cost / (strength / 8)) as f64 * 0.15) as i32).max(1);
+    let mut seen = vec![strength - 20];
+    let mut paid = Vec::new();
+    let mut ticks = Vec::new();
+    for tick in 0..1000 {
+        let credits = game.world.houses[PLAYER as usize].credits;
+        game.run(1);
+        let health = game.world.unit(hurt).unwrap().health;
+        if seen.last() != Some(&health) {
+            seen.push(health);
+            paid.push(credits - game.world.houses[PLAYER as usize].credits);
+            ticks.push(tick);
+        }
+    }
+    assert_eq!(seen, vec![strength - 20, strength - 12, strength - 4, strength], "steps: {seen:?}");
+    assert_eq!(paid, vec![price; 3], "paid {paid:?}");
+    assert!(ticks.windows(2).all(|w| w[1] - w[0] == 270), "at {ticks:?}");
+    let plane = game.world.unit(hurt).unwrap().plane.unwrap();
+    assert_eq!((plane.z, plane.contact), (0, Some(pad)), "it left the pad");
+
+    // Sold, the pad sends its aircraft up; with no other pad to go to they fall.
+    game.world.take_events();
+    game.world.order(Order::Sell { building: pad });
+    let (mut up, mut top) = (0, 0);
+    for _ in 0..1500 {
+        game.run(1);
+        up += game.world.take_events().iter().filter(|e| matches!(e, Event::TookOff { unit } if planes.contains(unit))).count();
+        for &id in &planes {
+            if let Some(unit) = game.world.unit(id) {
+                top = top.max(game.world.altitude(unit));
+            }
+        }
+    }
+    assert_eq!(up, 2, "both should take off");
+    assert!(top > 0);
+    assert!(planes.iter().all(|&id| game.world.unit(id).is_none()), "aircraft without a pad should come down: {:?}", planes.iter().filter_map(|&id| game.world.unit(id).map(|u| (u.plane.unwrap().mission, u.plane.unwrap().z))).collect::<Vec<_>>());
 }
 
 #[test]
@@ -1186,7 +1258,13 @@ fn a_carrier_sends_its_hornets_and_takes_them_back() {
     game.run(120);
     let out = game.world.units().iter().filter(|u| u.spawn_owner == Some(carrier)).count();
     assert_eq!(out, 3, "hornets out");
-    game.run(900);
+    // Above their `PitchSpeed` (0.9) they lean into their turns.
+    let mut banked = false;
+    for _ in 0..900 {
+        game.run(1);
+        banked |= game.world.units().iter().any(|u| u.spawn_owner == Some(carrier) && u.plane.is_some_and(|p| p.bank != 0));
+    }
+    assert!(banked, "no hornet ever banked");
     assert!(game.world.unit(target).is_none_or(|u| u.health < full), "the hornets did no harm");
     // With the target gone they come home.
     if let Some(id) = game.world.unit(target).map(|u| u.id) {

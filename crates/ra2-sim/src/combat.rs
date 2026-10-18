@@ -500,6 +500,8 @@ pub enum Event {
     /// An aircraft has left the ground, or come down.
     TookOff { unit: u32 },
     Landed { unit: u32 },
+    /// An aircraft coming down is near the ground (its landing sound).
+    Landing { unit: u32 },
     /// Someone has got into a transport, or out of it.
     Boarded { transport: u32 },
     Alighted { transport: u32 },

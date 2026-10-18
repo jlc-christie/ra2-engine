@@ -177,6 +177,8 @@ struct OverlayArt {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum OverlayKey {
     Cargo { gems: i32, ore: i32 },
+    /// Frames of PIPS2.SHP and where each goes.
+    Pips(Vec<(usize, IVec2)>),
     Wrench(usize),
     UnitBar { lit: i32, frame: usize, border: bool },
     Group(usize, bool),
@@ -1998,6 +2000,54 @@ fn draw_overlays(
                     }
                     let image = canvas.into_image(&mut images);
                     spawn_overlay(&mut commands, at, &image, FRONT);
+                }
+
+                // A unit that sends out spawns has a pip for
+                // each, lit (frame 1) for those aboard, ready or reloading; an
+                // aircraft with `PipScale=Ammo` and no passengers a bar (frame 12)
+                // three pixels higher for each point of ammunition, or with
+                // `PipWrap` that many bars coloured by how many rounds of them are
+                // full (frames 14 up, 13 empty). Both from the same corner as the
+                // other rows, four pixels apart.
+                if let (Some(pips), true) = (&art.cargo_pips, unit.owner == local()) {
+                    let mut marks: Vec<(usize, IVec2)> = Vec::new();
+                    if let Some(spawns) = unit.stats.spawns.filter(|spawns| spawns.number > 0) {
+                        let docked = unit.spawner.as_ref().map_or(spawns.number as usize, |spawner| spawner.docked());
+                        for i in 0..spawns.number.min(16) as usize {
+                            marks.push((usize::from(i < docked), IVec2::new(-15 + 4 * i as i32, 10)));
+                        }
+                    }
+                    let kind = (unit.stats.kind as usize).checked_sub(1).and_then(|k| world.unit_types.get(k));
+                    if let (Some(kind), Some(plane), Some(stats)) = (kind.filter(|k| k.pip_scale == 1 && k.passengers <= 0), unit.plane, unit.stats.plane) {
+                        let (most, ammo) = (stats.ammo.clamp(0, 16), plane.ammo);
+                        if kind.pip_wrap == 0 {
+                            let mut lit = if most > 0 { (most as f32 * ammo as f32 / most as f32 + 0.5) as i32 } else { 0 };
+                            if lit == 0 && ammo > 0 {
+                                lit = 1;
+                            }
+                            for i in 0..most.min(lit) {
+                                marks.push((12, IVec2::new(-15 + 4 * i, 7)));
+                            }
+                        } else {
+                            let wrap = kind.pip_wrap.clamp(1, 16);
+                            let levels = stats.ammo / wrap;
+                            for i in 0..wrap {
+                                let frame = (0..levels).rev().find(|k| k * wrap + i < ammo).map_or(13, |k| 14 + k as usize);
+                                marks.push((frame, IVec2::new(-15 + 4 * i, 7)));
+                            }
+                        }
+                    }
+                    if !marks.is_empty() {
+                        let image = art.images.entry(OverlayKey::Pips(marks.clone())).or_insert_with(|| {
+                            let far = marks.iter().map(|(_, at)| at.x).max().unwrap_or(0);
+                            let mut canvas = Canvas::new(IVec2::new(-24, 0), IVec2::new(far + 12, 20));
+                            for (frame, at) in &marks {
+                                canvas.shape(pips, *frame, &art.palette, *at);
+                            }
+                            canvas.into_image(&mut images)
+                        });
+                        spawn_overlay(&mut commands, at, image, FRONT);
+                    }
                 }
 
                 // The line to where it is going, for a moment after the order.

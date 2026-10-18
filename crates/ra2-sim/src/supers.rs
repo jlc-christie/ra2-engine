@@ -545,6 +545,12 @@ impl World {
             let wanted = (dx.atan2(-dy) / std::f64::consts::TAU * 256.0).rem_euclid(256.0) as i32;
             let turn = ((wanted - unit.facing as i32 + 128).rem_euclid(256)) - 128;
             unit.facing = ((unit.facing as i32 + turn.clamp(-2, 2)).rem_euclid(256)) as u8;
+            // At full speed, so above any `PitchSpeed` under 1, it leans into
+            // the turn.
+            let fast = unit.stats.plane.is_some_and(|stats| stats.pitch_speed < 1000);
+            plane.bank = if fast { turn.signum() as i8 } else { 0 };
+        } else {
+            plane.bank = 0;
         }
         let angle = unit.facing as f64 / 256.0 * std::f64::consts::TAU;
         unit.x += (angle.sin() * 38.0).round() as i32;

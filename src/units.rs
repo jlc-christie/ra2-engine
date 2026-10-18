@@ -174,6 +174,8 @@ struct Kind {
     considered_aircraft: bool,
     transport_sounds: (Option<String>, Option<String>),
     chrono_sounds: (Option<String>, Option<String>),
+    aux_sounds: (Option<String>, Option<String>),
+    roll_angle: f32,
     deploy_sounds: (Option<String>, Option<String>),
     unloading: Option<String>,
     sheet: Option<crate::terrain::Sheet>,
@@ -444,6 +446,8 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
             considered_aircraft: info.considered_aircraft,
             transport_sounds: info.transport_sounds,
             chrono_sounds: info.chrono_sounds,
+            aux_sounds: info.aux_sounds,
+            roll_angle: info.roll_angle,
             deploy_sounds: info.deploy_sounds,
             unloading: info.unloading,
             sheet: info.sheet,
@@ -1137,8 +1141,15 @@ fn show_units(
         // A rocket is drawn with its nose at its pitch. DATA: `NoSpawnAlt`: a
         // launcher with no rocket aboard is drawn as the model named with WO
         // after its own.
+        // An aircraft leaning into a turn is rolled about its length by its
+        // type's `RollAngle`, one way turning clockwise and the other way back.
+        let bank = unit.plane.map_or(0, |plane| plane.bank);
         let altered = match (&unit.rocket, &unit.spawner) {
             (Some(rocket), _) => Some(format!("{model}@p{}", (rocket.pitch / (std::f32::consts::FRAC_PI_2 / 16.0)).round() as i32)),
+            _ if bank != 0 => {
+                let roll = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map_or(0.0, |k| k.roll_angle);
+                Some(format!("{model}@k{}", (roll * 1000.0 * bank as f32).round() as i32))
+            }
             (None, Some(spawner)) if unit.stats.no_spawn_alt && spawner.docked() == 0 => Some(format!("{model}wo")),
             _ => None,
         };
@@ -2589,7 +2600,17 @@ fn show_effects(
                     crate::beams::laser(&mut commands, scene_point_3d(view.origin, from), scene_point_3d(view.origin, to), look.laser_inner, look.laser_outer, style, tick, look.laser_duration.max(1));
                 }
             }
-            Event::TookOff { .. } | Event::Landed { .. } => {}
+            // The type's `AuxSound1` where it
+            // leaves the ground, and `AuxSound2` where it nears it coming down.
+            Event::TookOff { unit } | Event::Landing { unit } => {
+                let up = matches!(event, Event::TookOff { .. });
+                if let Some(unit) = sim.0.unit(unit) {
+                    let sound = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).and_then(|k| if up { k.aux_sounds.0.clone() } else { k.aux_sounds.1.clone() });
+                    let at = (unit.x, unit.y, sim.0.ground_z(unit.x, unit.y));
+                    cues.write_batch(sound.map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
+                }
+            }
+            Event::Landed { .. } => {}
             // `BombAttachSound` for the planter's
             // side. `YuriMindControlSound` at the
             // victim.

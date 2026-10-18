@@ -1762,6 +1762,10 @@ pub struct UnitType {
     pub ifv_mode: usize,
     /// `Pip`: the pip frame it shows as aboard something.
     pub pip: u8,
+    /// `PipScale`: 0 none, 1 `Ammo`, 2 `Tiberium`, 3 `Passengers`, 4 `Power`;
+    /// and `PipWrap`.
+    pub pip_scale: u8,
+    pub pip_wrap: i32,
     /// `Dock`: the building types it unloads at.
     pub dock: Vec<u16>,
     /// `Cost`.
@@ -4785,6 +4789,7 @@ impl World {
                     return;
                 };
                 self.buildings[index].repairing = false;
+                self.pad_sold(building);
                 self.sale_crew(index);
                 let owner = self.buildings[index].owner;
                 self.events.push(combat::Event::SaleBegan { owner });

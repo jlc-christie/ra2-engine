@@ -182,11 +182,17 @@ pub fn render(
     light: [u32; 3],
     frame: usize,
     pitch: f32,
+    roll: f32,
     tilt: Option<[[f32; 3]; 3]>,
 ) -> Option<VoxelSprite> {
-    // The nose raised by `pitch` radians before the model is turned to its facing.
+    // Rolled by `roll` radians about its length, then the nose raised by
+    // `pitch` radians, before the model is turned to its facing.
     let (pitch_sin, pitch_cos) = pitch.sin_cos();
-    let to_view = |v: [f32; 3], facing: u8| to_view_on([v[0] * pitch_cos - v[2] * pitch_sin, v[1], v[0] * pitch_sin + v[2] * pitch_cos], facing, tilt.as_ref());
+    let (roll_sin, roll_cos) = roll.sin_cos();
+    let to_view = |v: [f32; 3], facing: u8| {
+        let v = [v[0], v[1] * roll_cos - v[2] * roll_sin, v[1] * roll_sin + v[2] * roll_cos];
+        to_view_on([v[0] * pitch_cos - v[2] * pitch_sin, v[1], v[0] * pitch_sin + v[2] * pitch_cos], facing, tilt.as_ref())
+    };
     // Every voxel as (screen x, screen y, nearness, colour).
     let mut points: Vec<(f32, f32, f32, [u8; 3])> = Vec::new();
     for (index, limb) in vxl.limbs.iter().enumerate() {

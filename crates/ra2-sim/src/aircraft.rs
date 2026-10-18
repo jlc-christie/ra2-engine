@@ -19,6 +19,9 @@ pub struct PlaneStats {
     pub ammo: i32,
     /// `SlowdownDistance` (500 unless given).
     pub slowdown: i32,
+    /// `PitchSpeed` in thousandths of full speed (250 unless given): above it
+    /// the model leans into its turns.
+    pub pitch_speed: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -80,6 +83,10 @@ pub struct Plane {
     pub(crate) passes: u8,
     pub(crate) drops: u8,
     pub(crate) retreat: Option<(i32, i32)>,
+    /// The landing sound has been heard on this way down.
+    landing_heard: bool,
+    /// Leaning into a turn: 1 turning clockwise, -1 the other way, 0 level.
+    pub bank: i8,
 }
 
 impl Plane {
@@ -110,6 +117,8 @@ impl Plane {
             passes: 5,
             drops: 0,
             retreat: None,
+            landing_heard: false,
+            bank: 0,
         }
     }
 
@@ -327,6 +336,7 @@ impl World {
         }
         plane.taking_off = false;
         plane.landing = true;
+        plane.landing_heard = false;
         plane.flight_level = 0;
     }
 
@@ -456,6 +466,13 @@ impl World {
                         self.units[index].arms.target = None;
                         return 1;
                     }
+                }
+                // Settled on its pad short of
+                // ammunition or health, the pad puts it to sleep to see to it.
+                let unit = &self.units[index];
+                if plane.z == 0 && plane.contact.is_some() && !plane.is_moving() && unit.arms.target.is_none() && (plane.ammo < stats.ammo || unit.health < unit.stats.strength) {
+                    plane.mission = Mission::Sleep;
+                    return self.reload_delay as u64;
                 }
                 if plane.ammo < stats.ammo / 2 && plane.contact.is_some() {
                     return 1;
@@ -622,19 +639,114 @@ impl World {
                 }
                 3
             }
-            // A point of ammunition every
-            // `ReloadRate`; full, it is let go and stands guard.
+            // Every `ReloadRate` the pad gives it a point
+            // of ammunition or, full, one step of repair; full and whole, or with
+            // a repair refused or just finished, it is let go and stands guard.
             Mission::Sleep => {
-                if plane.ammo < stats.ammo {
-                    plane.ammo += 1;
-                }
-                if plane.ammo >= stats.ammo {
+                let unit = &self.units[index];
+                let whole = unit.health >= unit.stats.strength;
+                if plane.ammo >= stats.ammo && unit.arms.target.is_none() && whole {
                     plane.mission = Mission::Guard;
                     plane.state = 0;
                     return 1;
                 }
-                self.reload_delay as u64
+                if plane.ammo < stats.ammo {
+                    plane.ammo += 1;
+                    return self.reload_delay as u64;
+                }
+                if self.pad_repair(index) {
+                    return self.reload_delay as u64;
+                }
+                plane.mission = Mission::Guard;
+                plane.state = 0;
+                1
             }
+        }
+    }
+
+    /// One step of repair for an aircraft on a pad, paid by its owner. Whether
+    /// it is still short of full health after it.
+    // `RepairStep` points for the type's cost over its
+    // strength in steps (both whole numbers) times `RepairPercent`, at least 1.
+    // Already whole, or with too little money, nothing is done.
+    fn pad_repair(&mut self, index: usize) -> bool {
+        let unit = &self.units[index];
+        let (health, strength, owner) = (unit.health, unit.stats.strength, unit.owner as usize);
+        if health >= strength {
+            return false;
+        }
+        let cost = (unit.stats.kind as usize).checked_sub(1).and_then(|k| self.unit_types.get(k)).map_or(0, |t| t.cost);
+        let steps = (strength / self.repair_step.max(1)).max(1);
+        let price = (((cost / steps) as f64 * self.repair_percent) as i32).max(1);
+        let Some(house) = self.houses.get_mut(owner).filter(|house| house.credits >= price) else {
+            return false;
+        };
+        house.credits -= price;
+        let unit = &mut self.units[index];
+        unit.health = (health + self.repair_step.max(1)).min(strength);
+        unit.health < strength
+    }
+
+    /// Where an aircraft with nowhere to set down makes for.
+    // Near the nearest of its owner's buildings
+    // (a building of the first type it docks at counted four times nearer),
+    // or near itself when that is within a cell; a type that docks nowhere goes
+    // near the nearest other unit of its side; failing all, its own cell.
+    fn landing_zone(&self, index: usize, height: i32) -> (i32, i32) {
+        let unit = &self.units[index];
+        let here = unit.cell();
+        let at = (unit.x as i64, unit.y as i64, (self.floor(unit.x, unit.y) + height) as i64);
+        let length = |x: i32, y: i32, z: i32| {
+            let (dx, dy, dz) = (x as i64 - at.0, y as i64 - at.1, z as i64 - at.2);
+            ((dx * dx + dy * dy + dz * dz) as f64).sqrt() as i64
+        };
+        let near = |cell: (i32, i32)| crate::nearby(&self.map, &self.claims, &self.spots, unit, cell, crate::Near::new(true, false, None), self.tick).unwrap_or(cell);
+        let docks = self.unit_types.get((unit.stats.kind as usize).wrapping_sub(1)).map(|kind| kind.dock.clone()).unwrap_or_default();
+        if let Some(&first) = docks.first() {
+            let best = self
+                .buildings
+                .iter()
+                .filter(|b| b.owner == unit.owner)
+                .map(|b| {
+                    let (x, y) = (b.cell.0 * LEPTONS_PER_CELL + b.size.0 * 128, b.cell.1 * LEPTONS_PER_CELL + b.size.1 * 128);
+                    let d = length(x, y, self.floor(x, y));
+                    (if b.kind == first { d / 4 } else { d }, b.cell)
+                })
+                .min_by_key(|(d, _)| *d);
+            if let Some((d, cell)) = best {
+                return near(if d < 0x100 { here } else { cell });
+            }
+        }
+        let friend = self
+            .units
+            .iter()
+            .filter(|u| u.owner == unit.owner && u.id != unit.id && u.health > 0)
+            .map(|u| (length(u.x, u.y, self.floor(u.x, u.y)), u.cell()))
+            .min_by_key(|(d, _)| *d);
+        match friend {
+            Some((_, cell)) => near(cell),
+            None => here,
+        }
+    }
+
+    /// A pad building being sold sends away every aircraft linked with it: each
+    /// takes off for somewhere to set down, and from there looks for another pad.
+    pub(crate) fn pad_sold(&mut self, building: u32) {
+        for index in 0..self.units.len() {
+            let Some(mut plane) = self.units[index].plane.filter(|plane| plane.contact == Some(building)) else {
+                continue;
+            };
+            if matches!(plane.mission, Mission::ParadropApproach | Mission::ParadropOverfly | Mission::Retreat) {
+                continue;
+            }
+            let id = self.units[index].id;
+            self.unlink(&mut plane, id);
+            let cell = self.landing_zone(index, plane.z);
+            plane.goal = Some(Goal::Cell(cell.0, cell.1));
+            plane.mission = Mission::Move;
+            plane.state = 0;
+            plane.wake = self.tick;
+            self.units[index].plane = Some(plane);
         }
     }
 
@@ -729,6 +841,7 @@ impl World {
             }
         }
         if !alive {
+            plane.bank = 0;
             return;
         }
 
@@ -763,6 +876,10 @@ impl World {
             unit.turn.remaining -= 1;
         }
         unit.facing = (unit.turn.current() >> 8) as u8;
+        // In the air and faster than `PitchSpeed`, it leans
+        // the way it is still turning.
+        let turning = unit.turn.steps > 0 && unit.turn.remaining > 0;
+        plane.bank = if plane.z > 0 && turning && plane.cur_speed * 1000.0 > stats.pitch_speed as f64 { unit.turn.difference.signum() as i8 } else { 0 };
 
         // Taking off and landing.
         if plane.taking_off {
@@ -775,6 +892,11 @@ impl World {
             let unit = &self.units[index];
             let over = plane.moving_to.and_then(|to| self.building_on(cell_of(to.0, to.1))).map(|i| self.buildings[i].id);
             let allowed = if stats.airport_bound { over.is_some() && over == plane.contact } else { true };
+            // Once a landing, under 300 leptons up.
+            if allowed && !plane.landing_heard && plane.z < 300 {
+                plane.landing_heard = true;
+                self.events.push(crate::combat::Event::Landing { unit: unit.id });
+            }
             if !allowed {
                 self.begin_takeoff(index, plane);
                 self.plane_idle(index, plane);
