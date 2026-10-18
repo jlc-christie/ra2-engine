@@ -1211,6 +1211,14 @@ impl World {
         Some((from, (from.0 + ((to.0 - from.0) as f64 * done) as i32, from.1 + ((to.1 - from.1) as f64 * done) as i32, from.2 + ((to.2 - from.2) as f64 * done) as i32)))
     }
 
+    /// How far along its line a wave's tail is (0 to 1), and how many frames
+    /// it has run. The tail sets off once the head is more than a tenth of
+    /// the way out, and follows a twentieth of the way a frame.
+    pub fn wave_tail(&self, wave: &Wave) -> (f64, u64) {
+        let frames = self.tick.saturating_sub(wave.born);
+        ((frames as f64 - 3.0).max(0.0) * 0.05, frames)
+    }
+
     /// Sonic waves go out and hurt what they cross.
     // The head
     // goes a twentieth of the way a frame; every frame everything on the cells

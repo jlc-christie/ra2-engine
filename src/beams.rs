@@ -10,6 +10,12 @@ use bevy::render::render_resource::{AsBindGroup, BlendComponent, BlendFactor, Bl
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin, Material2dPipeline};
 
+use bevy::core_pipeline::fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin};
+use bevy::render::extract_component::ExtractComponent;
+use bevy::render::render_resource::ShaderType;
+use bevy::render::RenderApp;
+use bevy::shader::ShaderRef;
+
 use crate::files::GameFiles;
 use crate::shell::Screen;
 use crate::units::Sim;
@@ -85,8 +91,14 @@ pub struct BeamsPlugin;
 
 impl Plugin for BeamsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(Material2dPlugin::<Additive>::default())
+        app.world_mut().resource_mut::<Assets<Shader>>().insert(SONIC_SHADER.id(), Shader::from_wgsl(include_str!("sonic.wgsl"), "ra2/sonic.wgsl")).ok();
+        app.add_plugins((Material2dPlugin::<Additive>::default(), FullscreenMaterialPlugin::<SonicWarp>::default()))
             .add_systems(OnEnter(Screen::InGame), setup)
+            .add_systems(OnExit(Screen::InGame), |mut commands: Commands, cameras: Query<Entity, With<SonicWarp>>| {
+                for camera in &cameras {
+                    commands.entity(camera).remove::<SonicWarp>();
+                }
+            })
             .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>), wave_rad_beams, show_sonic_waves.run_if(resource_exists::<Sim>)).run_if(in_state(Screen::InGame)));
     }
 }
@@ -380,45 +392,110 @@ fn wave_rad_beams(mut commands: Commands, mut beams: Query<(Entity, &mut RadBeam
     }
 }
 
-/// A stripe of a sonic wave's ripple.
-#[derive(Component)]
-struct SonicStripe;
+const SONIC_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("3c1f7a52-9e4d-4b8a-a6f0-5d2e8c71b934");
 
-/// The dolphin's sonic wave between the firer and the wave's head.
-// The engine bends the picture under the wave: each pixel within the wave's
-// band takes a neighbour's colour by a sine of its distance from the middle
-// line, its green and blue raised by a level table. Not original behaviour:
-// here stripes across the band, brightest where that sine peaks, move along
-// the wave in a pale blue-green.
-fn show_sonic_waves(mut commands: Commands, sim: Res<Sim>, view: Option<Res<crate::units::UnitView>>, old: Query<Entity, With<SonicStripe>>, mut drawn: Local<u64>) {
-    let Some(view) = view else {
-        return;
+/// One sonic wave as the warp shader sees it.
+#[derive(Clone, Copy, Default, ShaderType)]
+struct WaveBand {
+    ab: Vec4,
+    cd: Vec4,
+    centre_step: Vec4,
+    misc: Vec4,
+}
+
+/// The sonic waves on screen, on the camera for the warp pass.
+#[derive(Component, ExtractComponent, Clone, Copy, Default, ShaderType)]
+#[extract_app(RenderApp)]
+pub struct SonicWarp {
+    waves: [WaveBand; 4],
+    clip: Vec4,
+    scale: Vec4,
+}
+
+impl FullscreenMaterial for SonicWarp {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(SONIC_SHADER)
+    }
+
+    fn schedule() -> impl bevy::ecs::schedule::ScheduleLabel + Clone {
+        bevy::core_pipeline::Core2d
+    }
+
+    fn schedule_configs(system: bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::BoxedSystem>) -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::BoxedSystem> {
+        system.in_set(bevy::core_pipeline::Core2dSystems::PostProcess).before(bevy::core_pipeline::tonemapping::tonemapping)
+    }
+}
+
+/// The dolphin's sonic wave bends the picture already drawn under it.
+// The band runs from the wave's tail to its head, 100 leptons
+// to each side of the line and 30 past each end, the head 50 leptons up. In it
+// each pixel takes the colour of the pixel 0 to 3 steps on in the wave's
+// direction (of eight), by the size of a sine of its distance from the firer
+// plus the frames of life the wave has left, so the ripples run outward; its
+// green and blue are raised by 110 to 206 parts in 256 by the same size.
+fn show_sonic_waves(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    view: Option<Res<crate::units::UnitView>>,
+    camera: Single<(Entity, &Camera, &GlobalTransform), With<Camera2d>>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let (entity, camera, transform) = *camera;
+    // Screen pixels per window point: a camera drawing into a picture (the
+    // screenshot runs) has its own.
+    let ratio = camera.target_scaling_factor().unwrap_or(window.scale_factor());
+    let mut warp = SonicWarp {
+        clip: Vec4::new(0.0, 0.0, (window.width() - crate::hud::SIDEBAR_WIDTH) * ratio, (window.height() - crate::hud::BOTTOM_BAR_HEIGHT) * ratio),
+        ..default()
     };
-    *drawn += 1;
-    for entity in &old {
-        commands.entity(entity).despawn();
-    }
-    let origin = view.origin();
-    for wave in sim.0.waves() {
-        let Some((from, head)) = sim.0.wave_span(wave) else {
-            continue;
-        };
-        let (a, b) = (crate::units::scene_point_3d(origin, from), crate::units::scene_point_3d(origin, head));
-        let along = b - a;
-        let length = along.length();
-        if length < 1.0 {
-            continue;
+    // Scene points run downward; the world runs up.
+    let screen = |point: Vec2| camera.world_to_viewport(transform, Vec3::new(point.x, -point.y, 0.0)).ok().map(|at| at * ratio);
+    let scale = screen(Vec2::ZERO).zip(screen(Vec2::X)).map_or(ratio, |(a, b)| (b - a).length().max(0.01));
+    warp.scale = Vec4::splat(scale);
+    if let Some(view) = view {
+        let origin = view.origin();
+        let mut slot = 0;
+        for wave in sim.0.waves() {
+            if slot == warp.waves.len() {
+                break;
+            }
+            let Some((from, head)) = sim.0.wave_span(wave) else {
+                continue;
+            };
+            let (tail_fraction, frames) = sim.0.wave_tail(wave);
+            let head = (head.0, head.1, head.2 + 50);
+            let at = |t: f64| (from.0 + ((head.0 - from.0) as f64 * t) as i32, from.1 + ((head.1 - from.1) as f64 * t) as i32, from.2 + ((head.2 - from.2) as f64 * t) as i32);
+            let length = (((head.0 - from.0) as f64).hypot((head.1 - from.1) as f64)).max(1.0);
+            let (along, across) = (((head.0 - from.0) as f64 / length, (head.1 - from.1) as f64 / length), ((from.1 - head.1) as f64 / length, (head.0 - from.0) as f64 / length));
+            let (tail, front) = (at(tail_fraction), head);
+            let corner = |base: (i32, i32, i32), out: f64, side: f64| {
+                let point = (base.0 + (along.0 * out + across.0 * side) as i32, base.1 + (along.1 * out + across.1 * side) as i32, base.2);
+                screen(crate::units::scene_point_3d(origin, point))
+            };
+            let (Some(a), Some(b), Some(c), Some(d), Some(centre), Some(tip)) = (
+                corner(tail, -30.0, -100.0),
+                corner(front, 30.0, -100.0),
+                corner(front, 30.0, 100.0),
+                corner(tail, -30.0, 100.0),
+                screen(crate::units::scene_point_3d(origin, from)),
+                screen(crate::units::scene_point_3d(origin, head)),
+            ) else {
+                continue;
+            };
+            // The step is one of the eight pixel neighbours, the one nearest
+            // the way from the firer to the head.
+            let way = tip - centre;
+            let eighth = ((way.x.atan2(-way.y) / std::f32::consts::FRAC_PI_4).round() as i32).rem_euclid(8);
+            let step = [Vec2::new(0.0, -1.0), Vec2::new(1.0, -1.0), Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(-1.0, 1.0), Vec2::new(-1.0, 0.0), Vec2::new(-1.0, -1.0)][eighth as usize];
+            let centre = centre / scale;
+            warp.waves[slot] = WaveBand {
+                ab: Vec4::new(a.x, a.y, b.x, b.y),
+                cd: Vec4::new(c.x, c.y, d.x, d.y),
+                centre_step: Vec4::new(centre.x, centre.y, step.x, step.y),
+                misc: Vec4::new(100.0 - frames as f32, 1.0, 0.0, 0.0),
+            };
+            slot += 1;
         }
-        let dir = along / length;
-        let across = Vec2::new(-dir.y, dir.x);
-        let mut at = (*drawn % 8) as f32;
-        while at < length {
-            let middle = a + dir * at;
-            let swell = (at / length * std::f32::consts::PI).sin();
-            let half = 6.0 + 10.0 * swell;
-            let (sprite, transform) = line(middle - across * half, middle + across * half, 0.0, [120, 220, 255], 0.25 + 0.35 * swell);
-            commands.spawn((DespawnOnExit(Screen::InGame), SonicStripe, sprite, transform));
-            at += 8.0;
-        }
     }
+    commands.entity(entity).insert(warp);
 }
