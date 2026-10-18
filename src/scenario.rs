@@ -1859,6 +1859,7 @@ fn the_other_super_weapons_do_their_work() {
     game.world.order(Order::Super { house: PLAYER, index: kind(&game, 3) as u16, cell: game.world.unit(tank).unwrap().cell() });
     assert!(game.world.houses[PLAYER as usize].supers[kind(&game, 3)].ready, "spent by the first click");
     game.world.order(Order::Super { house: PLAYER, index: kind(&game, 4) as u16, cell: far });
+    game.run(61);
     assert_eq!(game.world.unit(tank).unwrap().cell(), far);
     assert!(!game.world.houses[PLAYER as usize].supers[kind(&game, 3)].ready);
     // The storm and the missile hurt what is under them.
@@ -1874,6 +1875,139 @@ fn the_other_super_weapons_do_their_work() {
             game.world.remove_unit(unit);
         }
     }
+}
+
+/// A base with every super weapon building of the stock rules, all charged.
+fn charged_supers(game: &mut Scenario) -> (i32, i32) {
+    let yard = game.deploy_base();
+    let mut spot = (yard.0 + 6, yard.1 + 6);
+    for name in ["NAMISL", "NAIRON", "GAWEAT", "GACSPH", "NANRCT"] {
+        game.world.add_map_building(PLAYER, game.building(name), spot, 10_000);
+        spot.0 += 5;
+    }
+    game.run(2);
+    for state in game.world.houses[PLAYER as usize].supers.iter_mut().filter(|state| state.granted) {
+        state.left = 1;
+    }
+    game.run(3);
+    yard
+}
+
+fn super_of(game: &Scenario, kind: i32) -> u16 {
+    game.world.super_types.iter().position(|t| t.kind == kind).unwrap_or_else(|| panic!("no super of kind {kind}")) as u16
+}
+
+#[test]
+fn the_missile_climbs_falls_and_burns_out_before_it_goes_off() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    use ra2_sim::supers::NukeStage;
+    let yard = charged_supers(&mut game);
+    let at = (yard.0 + 4, yard.1 + 24);
+    let victim = game.world.add_unit(at, 0, game.stats("HTNK"), 2);
+    game.world.take_events();
+    game.world.order(Order::Super { house: PLAYER, index: super_of(&game, 0), cell: at });
+    assert!(game.world.take_events().iter().any(|e| matches!(e, ra2_sim::combat::Event::NukeLaunched { .. })), "no launch");
+    let stage = |game: &Scenario| game.world.nukes().first().map(|nuke| nuke.stage);
+    // Up at 11, 12, ... leptons a frame to 20000; down from 20000 above the
+    // target at 2, 3, ... to the ground; then the fireball.
+    let mut climb = 0;
+    while stage(&game) == Some(NukeStage::Up) {
+        game.run(1);
+        climb += 1;
+    }
+    assert!((185..=195).contains(&climb), "climbed for {climb} frames");
+    let mut fall = 0;
+    while stage(&game) == Some(NukeStage::Down) {
+        game.run(1);
+        fall += 1;
+    }
+    assert!((195..=202).contains(&fall), "fell for {fall} frames");
+    let ball = game.world.super_rules.nuke_ball.0;
+    assert!(ball > 10, "no fireball length ({ball})");
+    let full = game.world.unit(victim).unwrap().stats.strength;
+    game.run(ball - 2);
+    assert_eq!(game.world.unit(victim).map(|u| u.health), Some(full), "hurt before the fireball was out");
+    game.run(3);
+    assert!(game.world.nukes().is_empty());
+    assert!(game.world.unit(victim).is_none_or(|u| u.health < full), "the missile did no harm");
+}
+
+#[test]
+fn the_chronosphere_waits_then_moves_and_drowns_what_it_drops_in_water() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = charged_supers(&mut game);
+    let field = (yard.0 + 4, yard.1 + 22);
+    let tank = game.world.add_unit(field, 0, game.stats("MTNK"), PLAYER);
+    let far = (field.0 + 12, field.1);
+    let squashed = game.world.add_unit(far, 0, game.stats("HTNK"), 2);
+    game.world.order(Order::Super { house: PLAYER, index: super_of(&game, 3), cell: field });
+    game.world.order(Order::Super { house: PLAYER, index: super_of(&game, 4), cell: far });
+    // Sixty frames waiting where it stands, out of action.
+    game.run(59);
+    assert_eq!(game.world.unit(tank).unwrap().cell(), field, "went before its time");
+    game.run(2);
+    assert_eq!(game.world.unit(tank).unwrap().cell(), far, "did not go");
+    assert!(game.world.unit(squashed).is_none(), "what stood there lived");
+    let delay = game.world.super_rules.chrono_delay as u64;
+    let unit = game.world.unit(tank).unwrap();
+    assert!(unit.warp_until > game.world.current_tick() && unit.warp_until <= game.world.current_tick() + delay, "not out of action for ChronoDelay");
+    // A tank put on open water sinks and is gone.
+    let water = (0..game.world.map.size().1)
+        .flat_map(|y| (0..game.world.map.size().0).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            game.world.map.in_playfield(x, y)
+                && (-1..=1).all(|dy| (-1..=1).all(|dx| game.world.map.describe(x + dx, y + dy).3 == ra2_sim::Land::Water as u8 && !game.world.map.bridged(x + dx, y + dy)))
+        });
+    let Some(water) = water else {
+        return;
+    };
+    for state in game.world.houses[PLAYER as usize].supers.iter_mut().filter(|state| state.granted) {
+        state.ready = true;
+    }
+    let field = (field.0, field.1 + 4);
+    let doomed = game.world.add_unit(field, 0, game.stats("MTNK"), PLAYER);
+    game.world.order(Order::Super { house: PLAYER, index: super_of(&game, 3), cell: field });
+    game.world.order(Order::Super { house: PLAYER, index: super_of(&game, 4), cell: water });
+    game.run(62);
+    assert_eq!(game.world.unit(doomed).map(|u| u.cell()), Some(water));
+    assert!(game.world.altitude(game.world.unit(doomed).unwrap()) < 0, "not sinking");
+    game.run(82);
+    assert!(game.world.unit(doomed).is_none(), "still afloat");
+}
+
+#[test]
+fn a_lightning_storm_jams_the_radar_of_its_callers_enemies() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = charged_supers(&mut game);
+    let enemy = terrain::ENEMY;
+    let at = (yard.0 + 4, yard.1 + 24);
+    let storm = super_of(&game, 2);
+    game.world.order(Order::Super { house: PLAYER, index: storm, cell: at });
+    assert!(!game.world.houses[PLAYER as usize].supers[storm as usize].ready);
+    let deferment = game.world.super_rules.storm.deferment;
+    let duration = game.world.super_rules.storm.duration as u64;
+    game.run(deferment - 1);
+    assert!(!game.world.storm_active() && !game.world.radar_jammed(enemy), "came early");
+    // A second storm is refused while one is coming or raging.
+    game.world.houses[PLAYER as usize].supers[storm as usize].ready = true;
+    game.world.order(Order::Super { house: PLAYER, index: storm, cell: at });
+    assert!(game.world.houses[PLAYER as usize].supers[storm as usize].ready, "a second storm was called");
+    game.run(1);
+    assert!(game.world.storm_active());
+    assert!(game.world.radar_jammed(enemy) && !game.world.radar_jammed(PLAYER));
+    // Back a frame before the storm's length is up.
+    game.run(duration as u32 - 2);
+    assert!(game.world.radar_jammed(enemy), "radar back too soon");
+    game.run(1);
+    assert!(!game.world.radar_jammed(enemy), "jammed past the storm");
+    game.run(200);
+    assert!(!game.world.storm_active(), "the storm never ended");
 }
 
 #[test]

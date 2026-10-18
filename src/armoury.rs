@@ -300,6 +300,8 @@ impl Armoury {
             course_lock: number("CourseLockDuration").unwrap_or(0),
             subject_to_elevation: yes(get("SubjectToElevation"), false),
             flak_scatter: yes(get("FlakScatter"), false),
+            vertical: yes(get("Vertical"), false),
+            detonation_altitude: get("DetonationAltitude").and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(0),
             ..defaults
         });
         self.projectile_names.push(name.to_owned());

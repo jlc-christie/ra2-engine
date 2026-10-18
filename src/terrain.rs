@@ -417,6 +417,11 @@ pub struct AnimType {
     pub size: (i32, i32),
     /// `StartSound`, else `Report`: what is heard as it starts.
     pub report: Option<String>,
+    /// `Translucent` and `Translucency`: how much of it is drawn (1 is solid).
+    pub opacity: f32,
+    /// `AltPalette`: drawn with the unit palette in the first colour scheme,
+    /// not the animation palette.
+    pub alt_palette: bool,
 }
 
 /// A list of ability names as bits by the engine's ability numbers.
@@ -995,6 +1000,8 @@ pub struct Scene {
     /// number of its `Action`, and the paradrops' rules.
     pub super_types: Vec<SuperInfo>,
     pub super_rules: ra2_sim::supers::Rules,
+    /// `WeatherConBoltExplosion`, the storm's explosion.
+    pub bolt_explosion: Option<String>,
     pub crate_rules: ra2_sim::powerups::Rules,
     /// The computer player's triggers, teams and scripts.
     pub team_data: ra2_sim::teams::Data,
@@ -1937,6 +1944,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                             powered: yes("IsPowered", true),
                             show_timer: yes("ShowTimer", false),
                             disableable: yes("DisableableFromShell", false),
+                            weapon: get("WeaponType").and_then(|weapon| armoury.borrow_mut().weapon_named(rules, &weapon)),
                         },
                     }
                 })
@@ -2077,6 +2085,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     soylent: number("Soylent").unwrap_or(0),
                     crewed: yes("Crewed"),
                     radar: yes("Radar"),
+                    reveal_to_all: yes("RevealToAll"),
                     refinery: yes("Refinery"),
                     can_be_occupied: yes("CanBeOccupied"),
                     max_occupants: number("MaxNumberOccupants").unwrap_or(0).max(0) as usize,
@@ -2211,6 +2220,18 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     // DATA: art.ini. The keys, their defaults, and that
     // the delay between images is 900 / `Rate`, rounded down (1 with no `Rate`).
     wanted_anims.borrow_mut().extend(armoury.borrow().animations());
+    // And those the super weapons show.
+    // DATA: rules.ini `[AudioVisual]` keys.
+    if let Some(rules) = object_rules.rules.as_ref() {
+        for key in [
+            "NukeTakeOff", "IronCurtainInvokeAnim", "ChronoPlacement", "ChronoBlast", "ChronoBlastDest", "WarpOut", "ChronoSparkle1", "Wake",
+            "WeatherConClouds", "WeatherConBolts", "WeatherConBoltExplosion", "WeaponNullifyAnim",
+        ] {
+            let names = ["AudioVisual", "General"].iter().find_map(|section| rules.get(section, key)).unwrap_or("");
+            wanted_anims.borrow_mut().extend(names.split(',').map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()));
+        }
+        wanted_anims.borrow_mut().extend(["NUKEBALL".to_owned(), "PSIWARN".to_owned()]);
+    }
     // And those the crates show (`[Powerups]`, the second value).
     if let Some(rules) = object_rules.rules.as_ref() {
         for name in ra2_sim::powerups::NAMES {
@@ -2259,6 +2280,15 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 force_big_craters: yes("ForceBigCraters"),
                 size: (0, 0),
                 report: art.get(&name, "StartSound").or(art.get(&name, "Report")).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()),
+                // `Translucent` alone is half see-through.
+                opacity: match number("Translucency") {
+                    Some(25) => 0.75,
+                    Some(50) => 0.5,
+                    Some(75) => 0.25,
+                    _ if yes("Translucent") => 0.5,
+                    _ => 1.0,
+                },
+                alt_palette: yes("AltPalette"),
             };
             // Only the ones that mark the ground need their picture's size.
             let size = if anim.scorch || anim.crater {
@@ -3305,6 +3335,20 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     };
     let super_rules = {
         let rules = object_rules.rules.as_ref();
+        let visual_list = |key: &str| -> Vec<String> {
+            rules.and_then(|rules| rules.get("AudioVisual", key)).map(|v| v.split(',').map(|n| n.trim().to_uppercase()).filter(|n| !n.is_empty()).collect()).unwrap_or_default()
+        };
+        // How many frames an animation runs once through, and after how many
+        // it is past half its pictures.
+        let anim_life = |name: &str| -> (u32, u32) {
+            let Some(anim) = anim_types.get(&name.to_uppercase()) else {
+                return (0, 0);
+            };
+            let images = find_shape(files, &anim.image, theater.extension, theater.letter).map_or(0, |shp| shp.frames.len());
+            let images = if anim.shadow { images / 2 } else { images };
+            let end = anim.end.unwrap_or(images).saturating_sub(anim.start) as u32;
+            (end * anim.delay, (end / 2 + 1) * anim.delay)
+        };
         let get = |key: &str| rules.and_then(|rules| rules.get("General", key)).map(|v| v.split(';').next().unwrap_or("").trim().to_owned());
         let unit = |name: &str| vehicle_names.iter().position(|n| n.eq_ignore_ascii_case(name.trim())).map(|i| i as u16);
         let list = |types: &str, counts: &str| -> Vec<(u16, u32)> {
@@ -3335,9 +3379,14 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     scatter_delay: number("LightningScatterDelay", 5) as u32,
                     spread: number("LightningCellSpread", 10),
                     separation: number("LightningSeparation", 3),
+                    clouds: visual_list("WeatherConClouds").iter().map(|name| anim_life(name)).map(|(life, half)| (half, life)).collect(),
+                    bolts: visual_list("WeatherConBolts").len() as u32,
+                    bolt_explosion: None,
                 }
             },
             nuke_weapon: rules.and_then(|rules| armoury.borrow_mut().weapon_named(rules, "NukePayload")),
+            nuke_ball: (anim_life("NUKEBALL").0, None),
+            chrono_delay: get("ChronoDelay").and_then(|v| v.parse().ok()).unwrap_or(60),
         }
     };
     // DATA: ai.ini, the computer player's triggers, teams and scripts.
@@ -3421,6 +3470,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         rad_rules,
         super_types,
         super_rules,
+        bolt_explosion: object_rules.rules.as_ref().and_then(|rules| rules.get("AudioVisual", "WeatherConBoltExplosion")).map(|v| v.trim().to_uppercase()).filter(|v| !v.is_empty()),
         crate_rules,
         smudge_types,
         ai_rules,

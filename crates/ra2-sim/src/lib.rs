@@ -1350,6 +1350,8 @@ pub struct Unit {
     pub falling: Option<i32>,
     /// Until when the iron curtain keeps it from harm.
     pub curtain_until: u64,
+    /// Being moved by the chronosphere.
+    pub chrono: Option<supers::Warp>,
     /// What crates have done for it: damage taken is divided by the first,
     /// damage done multiplied by the second, speed by the third.
     pub crate_armour: f32,
@@ -1478,6 +1480,7 @@ impl Unit {
             undeploy_at: None,
             falling: None,
             curtain_until: 0,
+            chrono: None,
             crate_armour: 1.0,
             crate_firepower: 1.0,
             crate_speed: 1.0,
@@ -1655,6 +1658,8 @@ pub struct BuildingType {
     pub crewed: bool,
     /// `Radar`: gives its owner the radar while it has power.
     pub radar: bool,
+    /// `RevealToAll`: the others see it when it is finished.
+    pub reveal_to_all: bool,
     /// `Refinery`: miners unload here.
     pub refinery: bool,
     /// `CanBeOccupied`, `MaxNumberOccupants`, and art `MuzzleFlash0..`: soldiers
@@ -1940,6 +1945,8 @@ pub struct House {
     pub base_centre: (i32, i32),
     /// The cell its chronosphere's first click chose.
     pub chrono_source: Option<(i32, i32)>,
+    /// Until when a lightning storm jams its radar.
+    pub jammed_until: u64,
     /// Beaten and out of the game; and its figures for the score screen.
     pub defeated: bool,
     pub score: endgame::Score,
@@ -3598,6 +3605,25 @@ impl World {
         let Some(building) = self.buildings.iter().find(|b| b.id == id) else {
             return;
         };
+        // A `RevealToAll` building shows itself to
+        // the houses of people other than its owner, out to its `Sight` and
+        // three more; and they are told which super weapon it holds.
+        if let Some(kind) = self.building_types.get(building.kind as usize).filter(|kind| kind.reveal_to_all) {
+            let (owner, cell, size, sight, index) = (building.owner, building.cell, building.size, kind.fighter.sight, kind.super_weapon);
+            let centre = (cell.0 + size.0 / 2, cell.1 + size.1 / 2);
+            let level = self.map.level(centre.0, centre.1) as i32;
+            for house in 0..self.houses.len() as u8 {
+                if house != owner && self.human(house) {
+                    self.map.reveal(house, centre, level, sight + 3);
+                }
+            }
+            if let Some(index) = index {
+                self.events.push(combat::Event::SuperDetected { owner, index, cell: centre });
+            }
+        }
+        let Some(building) = self.buildings.iter().find(|b| b.id == id) else {
+            return;
+        };
         let Some(free) = self.building_types.get(building.kind as usize).and_then(|kind| kind.free_unit) else {
             return;
         };
@@ -4216,10 +4242,12 @@ impl World {
     }
 
     /// Whether a house has its radar.
-    // Not while short of power; otherwise with any
-    // `Radar` building that is standing and not being sold.
+    // Not while short of power or jammed by a
+    // storm; otherwise with any `Radar` building that is standing and not
+    // being sold.
     pub fn radar_available(&self, house: u8) -> bool {
         !self.low_power(house)
+            && !self.radar_jammed(house)
             && self.buildings.iter().any(|b| {
                 b.owner == house && b.buildup.is_none() && self.building_types.get(b.kind as usize).is_some_and(|kind| kind.radar)
             })

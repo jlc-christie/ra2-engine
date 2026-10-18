@@ -20,6 +20,8 @@ pub struct SuperType {
     /// `DisableableFromShell`: its building cannot be built with the
     /// skirmish screen's super weapons option off.
     pub disableable: bool,
+    /// `WeaponType`: what the nuclear silo launches.
+    pub weapon: Option<u16>,
 }
 
 /// One house's hold on one type.
@@ -52,9 +54,14 @@ pub struct Rules {
     pub storm: StormRules,
     /// The `NukePayload` weapon.
     pub nuke_weapon: Option<u16>,
+    /// The frames the `NUKEBALL` animation lasts, and its number among the
+    /// animation types (for the crater it leaves).
+    pub nuke_ball: (u32, Option<u16>),
+    /// `ChronoDelay`: frames a unit the chronosphere moved is out of action.
+    pub chrono_delay: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct StormRules {
     pub deferment: u32,
     pub duration: u32,
@@ -64,6 +71,13 @@ pub struct StormRules {
     pub scatter_delay: u32,
     pub spread: i32,
     pub separation: i32,
+    /// For each of `WeatherConClouds`: the frames until it is past half its
+    /// pictures (when its bolt comes down), and the frames it lasts.
+    pub clouds: Vec<(u32, u32)>,
+    /// How many `WeatherConBolts` there are.
+    pub bolts: u32,
+    /// `WeatherConBoltExplosion`, by its number among the animation types.
+    pub bolt_explosion: Option<u16>,
 }
 
 /// A lightning storm on its way or raging.
@@ -76,18 +90,104 @@ pub struct Storm {
     pub started: Option<u64>,
     /// Clouds that have yet to strike: where, and when.
     clouds: Vec<((i32, i32), u64)>,
+    /// The frame the last cloud formed so far is gone.
+    clouds_until: u64,
 }
 
-/// A nuclear missile on its way: whose, where, and when it lands.
+/// A nuclear missile: climbing from the silo, coming down on its target, or
+/// down and waiting for its fireball to burn out.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Nuke {
+    pub id: u32,
     pub house: u8,
     pub cell: (i32, i32),
-    pub lands: u64,
+    pub stage: NukeStage,
+    /// Where it is, in leptons.
+    pub at: (i32, i32, i32),
+    speed: i32,
+    /// When the fireball is out.
+    until: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NukeStage {
+    Up,
+    Down,
+    Ball,
+}
+
+/// A unit the chronosphere is moving: where to, and from when; then, for a
+/// vehicle put down in water, how deep it has sunk.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Warp {
+    pub to: (i32, i32),
+    pub at: u64,
+    pub sink: Option<i32>,
 }
 
 /// The cells an iron curtain or a chronosphere covers, from its middle.
 const AROUND: [(i32, i32); 9] = [(0, 0), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1)];
+
+/// Frames a unit waits under the chronosphere before it goes.
+const WARP_WAIT: u64 = 60;
+
+/// How bright something under the iron curtain is drawn, as a share of its
+/// usual brightness, `elapsed` frames after the curtain came down on it.
+// It flares to double brightness
+// in 6 frames, holds 4, dims to a fifth over 20, then pulses between a fifth
+// and a half (8 frames up, 16 down) until fewer than 54 frames are left; it
+// stays dim until 30 are left, then flares again (6 up, 4 held) and fades back
+// to normal over the last 20.
+pub fn curtain_brightness(elapsed: u64, duration: u64) -> f32 {
+    let e = elapsed as i64;
+    let d = duration as i64;
+    if e < 1 || e >= d {
+        return 1.0;
+    }
+    let left = |begin: i64, length: i64| (length - (e - begin)).max(0);
+    let value = |stage: u8, left: i64| -> i64 {
+        match stage {
+            1 => (12 - left) * 256 / 6,
+            2 | 8 => 512,
+            3 => (left * 461 + 1020) / 20,
+            4 => (1024 - 77 * left) / 8,
+            5 => (77 * left + 816) / 16,
+            6 => 51,
+            7 => (3072 - 461 * left) / 6,
+            9 => (left + 20) * 256 / 20,
+            _ => 256,
+        }
+    };
+    // The pulse ends at the first turn of it that finishes with fewer than 54
+    // frames left; the last flare starts once fewer than 31 are left.
+    let mut dim = 55;
+    while d - dim >= 54 {
+        dim += 24;
+    }
+    let flare = (d - 30).max(dim + 1);
+    let shade = if e < 7 {
+        value(1, left(1, 6))
+    } else if e < 11 {
+        value(2, 0)
+    } else if e < 31 {
+        value(3, left(11, 20))
+    } else if e < dim {
+        let into = (e - 31) % 24;
+        let turn = e - into;
+        if into < 8 { value(4, left(turn, 8)) } else { value(5, left(turn + 8, 16)) }
+    } else if e < flare {
+        value(6, 0)
+    } else if e < flare + 6 {
+        value(7, left(flare, 6))
+    } else if e < flare + 10 {
+        value(8, 0)
+    } else if e < flare + 30 {
+        value(9, left(flare + 10, 20))
+    } else {
+        256
+    };
+    shade.min(2000) as f32 / 256.0
+}
 
 impl Super {
     pub fn can_fire(&self) -> bool {
@@ -202,7 +302,7 @@ impl World {
             let Some(from) = self.houses.get_mut(house as usize).and_then(|h| h.chrono_source.take()) else {
                 return;
             };
-            self.chrono_shift(house, from, cell);
+            self.chrono_shift(from, cell);
             if let Some(first) = self.super_types.iter().position(|t| t.kind == 3) {
                 let recharge = self.super_types[first].recharge;
                 let state = &mut self.houses[house as usize].supers[first];
@@ -215,31 +315,30 @@ impl World {
         if !self.houses.get(house as usize).and_then(|h| h.supers.get(index)).is_some_and(Super::can_fire) {
             return;
         }
+        // While a storm is on its way or raging
+        // another cannot be called: the weapon stays ready.
+        if kind.kind == 2 && self.storm.is_some() {
+            self.events.push(Event::StormRefused { house });
+            return;
+        }
         match kind.kind {
             5 | 6 => self.launch_paradrop(house, kind.kind == 6, cell),
             // With no silo nothing is launched but
             // the charge starts again all the same.
             0 => {
-                let silo = self.buildings.iter().any(|b| b.owner == house && self.building_types.get(b.kind as usize).is_some_and(|t| t.super_weapon == Some(index as u16) || t.super_weapon2 == Some(index as u16)));
-                if silo {
-                    self.nukes.push(Nuke { house, cell, lands: self.tick + 150 + 200 });
+                let silo = self.buildings.iter().find(|b| {
+                    b.owner == house && b.buildup.is_none() && self.building_types.get(b.kind as usize).is_some_and(|t| t.super_weapon == Some(index as u16) || t.super_weapon2 == Some(index as u16))
+                });
+                if let Some(silo) = silo.map(|b| (b.cell, b.size)) {
+                    self.launch_nuke(house, silo, cell);
                 }
             }
             1 => self.iron_curtain(cell),
-            // A storm is put off by
-            // `LightningDeferment`; while one rages another only moves the
-            // target for the next.
+            // The storm is put off by
+            // `LightningDeferment`.
             2 => {
                 let deferment = self.super_rules.storm.deferment;
-                match self.storm.as_mut() {
-                    Some(storm) if storm.started.is_some() => {}
-                    Some(storm) => {
-                        storm.cell = cell;
-                        storm.house = house;
-                        storm.deferment = storm.deferment.min(deferment);
-                    }
-                    None => self.storm = Some(Storm { cell, house, deferment, started: None, clouds: Vec::new() }),
-                }
+                self.storm = Some(Storm { cell, house, deferment, started: None, clouds: Vec::new(), clouds_until: 0 });
             }
             // The first click only remembers the
             // cell; the charge is not spent until the second.
@@ -256,10 +355,140 @@ impl World {
         state.left = kind.recharge;
     }
 
+    /// The missile leaves the silo.
+    // It starts at the middle of
+    // the silo, going straight up at 10 leptons a frame, the `NukeTakeOff`
+    // animation under it.
+    fn launch_nuke(&mut self, house: u8, (cell, size): ((i32, i32), (i32, i32)), target: (i32, i32)) {
+        let (x, y) = (cell.0 * LEPTONS_PER_CELL + size.0 * LEPTONS_PER_CELL / 2, cell.1 * LEPTONS_PER_CELL + size.1 * LEPTONS_PER_CELL / 2);
+        let at = (x, y, self.ground_z(x, y));
+        let id = self.next_id;
+        self.next_id += 1;
+        self.nukes.push(Nuke { id, house, cell: target, stage: NukeStage::Up, at, speed: 10, until: 0 });
+        self.events.push(Event::NukeLaunched { house, at, cell: target });
+    }
+
+    /// The missiles in the air.
+    pub fn nukes(&self) -> &[Nuke] {
+        &self.nukes
+    }
+
+    /// The weapon whose projectile a missile is drawn as.
+    pub fn nuke_weapon(&self, nuke: &Nuke) -> Option<u16> {
+        match nuke.stage {
+            NukeStage::Up => self.super_types.iter().find(|t| t.kind == 0).and_then(|t| t.weapon),
+            NukeStage::Down => self.super_rules.nuke_weapon,
+            NukeStage::Ball => None,
+        }
+    }
+
+    // Both ways it is a `Vertical`
+    // projectile: each frame its speed, while below the shot's, grows by the
+    // projectile's `Acceleration`, then it moves. Going up (at most 255 a frame)
+    // it is done once above its `DetonationAltitude`; then the `NukePayload`
+    // weapon's projectile is made that high above the target, falling at 1, and
+    // comes down at most at the speed that weapon's `Range` gives a shot. On the
+    // ground the `NUKEBALL` fireball plays, and only once it is out does the
+    // warhead go off.
+    fn fly_nukes(&mut self) {
+        let tick = self.tick;
+        let up = self.super_types.iter().find(|t| t.kind == 0).and_then(|t| t.weapon).and_then(|w| self.weapons.get(w as usize)).map(|w| self.projectiles.get(w.projectile as usize).cloned().unwrap_or_default());
+        let payload = self.super_rules.nuke_weapon.and_then(|w| self.weapons.get(w as usize).cloned());
+        let down = payload.as_ref().map(|w| self.projectiles.get(w.projectile as usize).cloned().unwrap_or_default());
+        let (climb, ceiling) = up.as_ref().map_or((1, 20_000), |p| (p.acceleration, p.detonation_altitude));
+        let fall = down.as_ref().map_or(1, |p| p.acceleration);
+        let top_down = payload.as_ref().map_or(235, |w| {
+            let g = if down.as_ref().is_some_and(|p| p.floater) { self.gravity as f64 * 0.5 } else { self.gravity as f64 };
+            (w.range as f64 * g * 1.2).sqrt() as i32
+        });
+        let mut landed = Vec::new();
+        for nuke in &mut self.nukes {
+            match nuke.stage {
+                NukeStage::Up => {
+                    if nuke.speed < 255 {
+                        nuke.speed += climb;
+                    }
+                    nuke.at.2 += nuke.speed;
+                    if nuke.at.2 > ceiling {
+                        let (x, y) = (nuke.cell.0 * LEPTONS_PER_CELL + 128, nuke.cell.1 * LEPTONS_PER_CELL + 128);
+                        nuke.at = (x, y, 0);
+                        nuke.stage = NukeStage::Down;
+                        nuke.speed = 1;
+                        landed.push((nuke.id, ceiling));
+                    }
+                }
+                NukeStage::Down => {
+                    if nuke.speed < top_down {
+                        nuke.speed += fall;
+                    }
+                    nuke.at.2 -= nuke.speed;
+                    landed.push((nuke.id, 0));
+                }
+                NukeStage::Ball => {}
+            }
+        }
+        // Placed over the target, or come to the ground.
+        for (id, above) in landed {
+            let Some(index) = self.nukes.iter().position(|n| n.id == id) else {
+                continue;
+            };
+            let (x, y, z) = self.nukes[index].at;
+            let ground = self.ground_z(x, y);
+            if above > 0 {
+                self.nukes[index].at.2 = ground + above;
+            } else if z < ground {
+                let ball = self.super_rules.nuke_ball;
+                let nuke = &mut self.nukes[index];
+                nuke.at.2 = ground;
+                nuke.stage = NukeStage::Ball;
+                nuke.until = tick + ball.0 as u64;
+                let at = nuke.at;
+                self.events.push(Event::NukeLanded { at });
+                if let Some(anim) = ball.1 {
+                    self.mark_of(anim, (at.0, at.1));
+                }
+            }
+        }
+        let gone: Vec<Nuke> = self.nukes.iter().copied().filter(|n| n.stage == NukeStage::Ball && n.until <= tick).collect();
+        self.nukes.retain(|n| !(n.stage == NukeStage::Ball && n.until <= tick));
+        for nuke in gone {
+            let Some(weapon) = payload.clone() else {
+                continue;
+            };
+            self.explode(nuke.at, weapon.damage, weapon.warhead, None);
+            self.irradiate(nuke.at, weapon.rad_level, weapon.warhead);
+            self.blast_event(weapon.warhead, weapon.damage, nuke.at, false);
+        }
+    }
+
+    /// Whether a house's psychic sensors cover a cell: a working sensor within
+    /// its `PsychicDetectionRadius`.
+    pub fn psychic_covers(&self, viewer: u8, cell: (i32, i32)) -> bool {
+        let half = LEPTONS_PER_CELL / 2;
+        let centre = |cell: (i32, i32)| (cell.0 * LEPTONS_PER_CELL + half, cell.1 * LEPTONS_PER_CELL + half, self.map.level(cell.0, cell.1) as i32 * crate::combat::LEVEL_HEIGHT);
+        let p = centre(cell);
+        self.buildings.iter().any(|sensor| {
+            let radius = self.building_types.get(sensor.kind as usize).map_or(0, |kind| kind.psychic_radius) as i64 * LEPTONS_PER_CELL as i64;
+            if radius == 0 || sensor.owner != viewer || sensor.buildup.is_some() || !self.online(sensor) {
+                return false;
+            }
+            let at = centre(sensor.cell);
+            let (dx, dy, dz) = ((p.0 - at.0) as i64, (p.1 - at.1) as i64, (p.2 - at.2) as i64);
+            dx * dx + dy * dy + dz * dz <= radius * radius
+        })
+    }
+
+    /// Where a house sees the warning marker of a missile on its way: the
+    /// target of one launched by a house it is not allied with, if its psychic
+    /// sensors cover that cell.
+    pub fn nuke_warnings(&self, viewer: u8) -> Vec<(i32, i32)> {
+        self.nukes.iter().filter(|n| n.stage != NukeStage::Ball && !self.allied(viewer, n.house) && self.psychic_covers(viewer, n.cell)).map(|n| n.cell).collect()
+    }
+
     /// The iron curtain comes down on the nine cells round a cell.
     // Soldiers and
     // `Organic` things are killed; vehicles and buildings can not be hurt for
-    // `IronCurtainDuration` frames.
+    // `IronCurtainDuration` frames; a building loses a charge stuck on it.
     fn iron_curtain(&mut self, cell: (i32, i32)) {
         let until = self.tick + self.super_rules.curtain_duration as u64;
         for (dx, dy) in AROUND {
@@ -273,17 +502,32 @@ impl World {
                 }
             }
             if let Some(index) = self.building_on(at) {
-                self.buildings[index].curtain_until = until;
+                let building = &mut self.buildings[index];
+                building.curtain_until = until;
+                building.c4 = None;
             }
         }
     }
 
-    /// The chronosphere moves what stands on the nine cells round one cell to
-    /// those round another.
+    /// How bright a unit or building under the iron curtain is drawn (1 when
+    /// it is not).
+    pub fn curtain_shade(&self, until: u64) -> f32 {
+        let duration = self.super_rules.curtain_duration as u64;
+        if until <= self.tick || duration == 0 {
+            return 1.0;
+        }
+        curtain_brightness((self.tick + duration).saturating_sub(until), duration)
+    }
+
+    /// The chronosphere takes hold of what stands on the nine cells round one
+    /// cell, to put it on those round another.
     // Things in the air are left; `Organic` things
     // that do not teleport of themselves are killed; those under the iron
-    // curtain are left; each keeps its place in the square.
-    fn chrono_shift(&mut self, _house: u8, from: (i32, i32), to: (i32, i32)) {
+    // curtain, held by a time weapon or already jumping are left. A vehicle
+    // goes to the middle of its cell, anything else keeps its place within the
+    // cell. Each waits 60 frames, out of action, before it goes.
+    fn chrono_shift(&mut self, from: (i32, i32), to: (i32, i32)) {
+        let tick = self.tick;
         for (dx, dy) in AROUND {
             let (source, dest) = ((from.0 + dx, from.1 + dy), (to.0 + dx, to.1 + dy));
             let here: Vec<u32> = self.units.iter().filter(|u| u.cell() == source && self.altitude(u) == 0).map(|u| u.id).collect();
@@ -296,66 +540,201 @@ impl World {
                     self.kill(crate::combat::Aim::Unit(id));
                     continue;
                 }
-                if unit.curtain_until > self.tick {
+                if unit.curtain_until > tick || unit.frozen.is_some() || unit.chrono.is_some() || tick < unit.warp_until {
                     continue;
                 }
-                let mut moved = self.lift(index);
-                moved.dest = None;
-                moved.head_to = None;
-                moved.drop_path();
-                let back = moved.clone();
-                if !self.set_down(moved, dest) {
-                    self.set_down(back, source);
-                }
+                let point = if unit.stats.infantry {
+                    (dest.0 * LEPTONS_PER_CELL + unit.x.rem_euclid(LEPTONS_PER_CELL), dest.1 * LEPTONS_PER_CELL + unit.y.rem_euclid(LEPTONS_PER_CELL))
+                } else {
+                    (dest.0 * LEPTONS_PER_CELL + 128, dest.1 * LEPTONS_PER_CELL + 128)
+                };
+                let unit = &mut self.units[index];
+                unit.dest = None;
+                unit.head_to = None;
+                unit.drop_path();
+                unit.arms.target = None;
+                unit.warp_until = tick + WARP_WAIT;
+                unit.chrono = Some(Warp { to: point, at: tick + WARP_WAIT, sink: None });
             }
         }
     }
 
-    /// Storms and missiles in the air.
-    pub(crate) fn run_weather(&mut self) {
-        // The payload goes off
-        // at the target with the `NukePayload` weapon's damage and warhead.
+    // Once its wait is over a unit goes: whatever
+    // else is on the cell is killed (another soldier only where the soldier
+    // will stand); a building or a tree there sends it to a free cell nearby
+    // instead, tried on the next frame. Where it comes down it is out of
+    // action for `ChronoDelay` frames. A vehicle that is not a ship put on open
+    // water sinks; anything put where it cannot be (a ship on land, rock) is
+    // killed, or sinks if the cell is water.
+    fn run_warps(&mut self) {
         let tick = self.tick;
-        let landed: Vec<Nuke> = self.nukes.iter().copied().filter(|nuke| nuke.lands <= tick).collect();
-        self.nukes.retain(|nuke| nuke.lands > tick);
-        for nuke in landed {
-            let Some(weapon) = self.super_rules.nuke_weapon.and_then(|index| self.weapons.get(index as usize).cloned()) else {
+        let warping: Vec<u32> = self.units.iter().filter(|u| u.chrono.is_some()).map(|u| u.id).collect();
+        for id in warping {
+            let Some(index) = self.units.iter().position(|u| u.id == id) else {
                 continue;
             };
-            let (x, y) = (nuke.cell.0 * LEPTONS_PER_CELL + 128, nuke.cell.1 * LEPTONS_PER_CELL + 128);
-            let point = (x, y, self.ground_z(x, y));
-            self.explode(point, weapon.damage, weapon.warhead, None);
-            self.irradiate(point, weapon.rad_level, weapon.warhead);
-            self.blast_event(weapon.warhead, weapon.damage, point, false);
+            let Some(mut warp) = self.units[index].chrono else {
+                continue;
+            };
+            if let Some(depth) = warp.sink {
+                // Down 5 leptons a frame, with a wake every fourth frame,
+                // until 400 under.
+                let depth = depth + 5;
+                if depth > 400 {
+                    self.vanish(id);
+                    continue;
+                }
+                self.units[index].chrono = Some(Warp { sink: Some(depth), ..warp });
+                if tick % 4 == 0 {
+                    let (x, y) = (self.units[index].x, self.units[index].y);
+                    let (rx, ry) = (self.random_below(341) as i32 - 170, self.random_below(341) as i32 - 170);
+                    let at = (x + rx, y + ry, self.ground_z(x, y));
+                    self.events.push(Event::Wake { at });
+                }
+                continue;
+            }
+            if tick < warp.at {
+                continue;
+            }
+            let cell = (warp.to.0.div_euclid(LEPTONS_PER_CELL), warp.to.1.div_euclid(LEPTONS_PER_CELL));
+            let Some(at) = self.map.index(cell.0, cell.1) else {
+                self.units[index].chrono = None;
+                continue;
+            };
+            let tree = matches!(self.map.obstacle_kind(cell), k if k == crate::Obstacle::TreeFull as u8 || k == crate::Obstacle::Tree as u8);
+            if self.building_on(cell).is_some() || tree {
+                let unit = &self.units[index];
+                if let Some(free) = crate::nearby(&self.map, &self.claims, &self.spots, unit, cell, crate::Near::new(true, false, Some(cell)), tick) {
+                    warp.to = (free.0 * LEPTONS_PER_CELL + warp.to.0.rem_euclid(LEPTONS_PER_CELL), free.1 * LEPTONS_PER_CELL + warp.to.1.rem_euclid(LEPTONS_PER_CELL));
+                    self.units[index].chrono = Some(warp);
+                }
+                continue;
+            }
+            let infantry = self.units[index].stats.infantry;
+            let victims: Vec<u32> = self
+                .units
+                .iter()
+                .filter(|u| u.id != id && u.cell() == cell && self.altitude(u) == 0)
+                .filter(|u| !(infantry && u.stats.infantry) || (u.x, u.y) == warp.to)
+                .map(|u| u.id)
+                .collect();
+            for victim in victims {
+                self.kill(crate::combat::Aim::Unit(victim));
+            }
+            let Some(index) = self.units.iter().position(|u| u.id == id) else {
+                continue;
+            };
+            let from = (self.units[index].x, self.units[index].y);
+            let from = (from.0, from.1, self.ground_z(from.0, from.1));
+            let mut unit = self.lift(index);
+            unit.x = warp.to.0;
+            unit.y = warp.to.1;
+            unit.chrono = None;
+            unit.warp_until = tick + self.super_rules.chrono_delay as u64;
+            if infantry {
+                self.spots[at] |= 1 << crate::spot_index(unit.x, unit.y);
+                self.spot_house[at] = unit.owner;
+            } else {
+                self.claims[at] = unit.id + 1;
+            }
+            let (kind, stats) = (unit.stats.kind, unit.stats);
+            let naval = (kind as usize).checked_sub(1).and_then(|k| self.unit_types.get(k)).is_some_and(|k| k.naval);
+            self.put_back(unit);
+            let to = (warp.to.0, warp.to.1, self.ground_z(warp.to.0, warp.to.1));
+            self.events.push(Event::Teleported { kind, from, to });
+            let land = self.map.land[at];
+            let water = land == Land::Water as u8;
+            let bridge = self.map.deck(cell.0, cell.1);
+            let ship_ashore = naval && (bridge || land == Land::Road as u8);
+            let sinks = water && !naval && !infantry && !bridge;
+            let stuck = sinks || ship_ashore || self.map.speed_on(cell.0, cell.1, stats.speed_type, true) <= 0;
+            if !stuck {
+                continue;
+            }
+            if water && !infantry {
+                if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                    unit.chrono = Some(Warp { to: warp.to, at: tick, sink: Some(0) });
+                    unit.warp_until = u64::MAX;
+                }
+            } else {
+                self.kill(crate::combat::Aim::Unit(id));
+            }
         }
+        // Held by a time weapon or jumping, a unit
+        // gives off a sparkle every 24th frame.
+        if tick % 24 == 0 {
+            let sparkling: Vec<(i32, i32, i32)> = self
+                .units
+                .iter()
+                .filter(|u| u.frozen.is_some() || (u.chrono.is_some_and(|w| w.sink.is_none())) || (tick < u.warp_until && u.chrono.is_none()))
+                .map(|u| (u.x + 0x78, u.y + 0x78, self.ground_z(u.x, u.y) + self.altitude(u).max(0)))
+                .collect();
+            for at in sparkling {
+                self.events.push(Event::Sparkle { at });
+            }
+        }
+    }
+
+    /// Whether the lightning storm is raging (the map is lit by the
+    /// scenario's ion lighting while it is).
+    pub fn storm_active(&self) -> bool {
+        self.storm.as_ref().is_some_and(|storm| storm.started.is_some())
+    }
+
+    /// Whether a house's radar is jammed by a storm.
+    pub fn radar_jammed(&self, house: u8) -> bool {
+        self.houses.get(house as usize).is_some_and(|h| self.tick < h.jammed_until)
+    }
+
+    /// Storms and missiles in the air, and units on the move by chronosphere.
+    pub(crate) fn run_weather(&mut self) {
+        self.fly_nukes();
+        self.run_warps();
         // While the storm rages a cloud forms over
         // the target every `LightningHitDelay` frames, and every
         // `LightningScatterDelay` one at a random cell within half
         // `LightningCellSpread` of it that no cloud is within
-        // `LightningSeparation` cells of (three tries); a cloud strikes half-way
-        // through its life, with `LightningDamage` and nobody to blame.
+        // `LightningSeparation` cells of (three tries); a cloud strikes once its
+        // animation is past half way, with `LightningDamage` and nobody to
+        // blame. The storm is over when its time is up and the last cloud has
+        // gone.
+        let tick = self.tick;
         let Some(mut storm) = self.storm.take() else {
             return;
         };
-        let rules = self.super_rules.storm;
+        let rules = self.super_rules.storm.clone();
         match storm.started {
             None => {
                 storm.deferment = storm.deferment.saturating_sub(1);
                 if storm.deferment == 0 {
                     storm.started = Some(tick);
-                    self.events.push(Event::StormStarted { cell: storm.cell });
+                    // Every house not allied with the
+                    // caller and still in the game loses its radar for the
+                    // storm's length.
+                    let jam = tick + (rules.duration as u64).saturating_sub(1);
+                    for house in 0..self.houses.len() {
+                        if !self.allied(house as u8, storm.house) && !self.houses[house].defeated {
+                            self.houses[house].jammed_until = jam;
+                        }
+                    }
+                    self.events.push(Event::StormStarted { cell: storm.cell, house: storm.house });
+                } else if storm.deferment % 225 == 0 {
+                    self.events.push(Event::StormApproaching);
                 }
             }
             Some(started) => {
-                const STRIKE_AFTER: u64 = 20;
-                if started + rules.duration as u64 >= tick {
-                    let mut cloud = |storm: &mut Storm, events: &mut Vec<Event>, cell: (i32, i32)| {
-                        storm.clouds.push((cell, tick + STRIKE_AFTER));
-                        events.push(Event::Cloud { cell });
+                let ending = started + (rules.duration as u64) < tick;
+                if !ending {
+                    let cloud = |world: &mut World, storm: &mut Storm, cell: (i32, i32)| {
+                        let kind = if rules.clouds.is_empty() { 0 } else { world.random_below(rules.clouds.len() as u32) as usize };
+                        let (strike, life) = rules.clouds.get(kind).copied().unwrap_or((20, 40));
+                        storm.clouds.push((cell, tick + strike as u64));
+                        storm.clouds_until = storm.clouds_until.max(tick + life as u64);
+                        world.events.push(Event::Cloud { cell, kind: kind as u8 });
                     };
                     if rules.hit_delay > 0 && tick % rules.hit_delay as u64 == 0 {
                         let centre = storm.cell;
-                        cloud(&mut storm, &mut self.events, centre);
+                        cloud(self, &mut storm, centre);
                     }
                     if rules.scatter_delay > 0 && tick % rules.scatter_delay as u64 == 0 {
                         for _ in 0..3 {
@@ -363,7 +742,7 @@ impl World {
                             let cell = (storm.cell.0 + self.random_below(span) as i32 - rules.spread / 2, storm.cell.1 + self.random_below(span) as i32 - rules.spread / 2);
                             let apart = storm.clouds.iter().all(|(other, _)| (other.0 - cell.0).abs() + (other.1 - cell.1).abs() >= rules.separation);
                             if self.map.in_playfield(cell.0, cell.1) && apart {
-                                cloud(&mut storm, &mut self.events, cell);
+                                cloud(self, &mut storm, cell);
                                 break;
                             }
                         }
@@ -374,11 +753,13 @@ impl World {
                 for cell in due {
                     let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
                     let point = (x, y, self.ground_z(x, y));
-                    self.events.push(Event::Bolt { cell });
+                    let kind = self.random_below(rules.bolts.max(1)) as u8;
+                    self.events.push(Event::Bolt { cell, kind });
                     self.explode(point, rules.damage, rules.warhead, None);
                     self.blast_event(rules.warhead, rules.damage, point, false);
                 }
-                if started + (rules.duration as u64) < tick && storm.clouds.is_empty() {
+                if ending && storm.clouds.is_empty() && tick >= storm.clouds_until {
+                    self.events.push(Event::StormEnded);
                     return;
                 }
             }
@@ -604,5 +985,25 @@ impl World {
         self.events.push(Event::Parachuted { unit: soldier.id, from: carrier });
         self.put_back(soldier);
         plane.passes = 5;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::curtain_brightness;
+
+    #[test]
+    fn the_iron_curtain_flares_pulses_and_fades() {
+        let at = |e| curtain_brightness(e, 750);
+        assert_eq!(at(0), 1.0);
+        assert_eq!(at(7), 2.0);
+        assert_eq!(at(10), 2.0);
+        assert!((at(31) - 0.2).abs() < 0.01);
+        assert!((at(39) - 0.5).abs() < 0.01);
+        assert!((at(55) - 0.2).abs() < 0.01);
+        assert!((at(710) - 0.2).abs() < 0.01);
+        assert_eq!(at(726), 2.0);
+        assert!(at(749) < 1.1 && at(749) > 0.9);
+        assert_eq!(at(750), 1.0);
     }
 }

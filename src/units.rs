@@ -272,7 +272,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, show_radiation)
+                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_radiation)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>),
@@ -529,6 +529,9 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
         })
         .collect();
     world.splash_anims = scene.armoury.splashes.iter().map(number).collect();
+    let known = |name: &str| Some(number(&name.to_owned())).filter(|&at| at != ra2_sim::smudge::NO_ANIM);
+    world.super_rules.nuke_ball.1 = known("NUKEBALL");
+    world.super_rules.storm.bolt_explosion = scene.bolt_explosion.as_deref().and_then(known);
     for (warhead, look) in world.warheads.iter_mut().zip(&scene.armoury.warhead_looks) {
         warhead.anim_list = look.anims.iter().map(number).collect();
     }
@@ -989,6 +992,10 @@ fn show_units(
             _ if ghost => Color::srgba(1.0, 1.0, 1.0, 0.5),
             _ => Color::WHITE,
         };
+        // Under the iron curtain it flares and
+        // pulses in brightness.
+        let shade = sim.0.curtain_shade(unit.curtain_until);
+        let wanted = if shade == 1.0 { wanted } else { Color::srgba(shade, shade, shade, wanted.alpha()) };
         if sprite.color != wanted {
             sprite.color = wanted;
         }
@@ -1551,7 +1558,11 @@ fn show_buildings(
             };
             // Held by a time weapon it is
             // drawn half see-through, as a unit is.
-            let wanted = if building.frozen.is_some() { Color::srgba(1.0, 1.0, 1.0, 0.5) } else { Color::WHITE };
+            let alpha = if building.frozen.is_some() { 0.5 } else { 1.0 };
+            // Under the iron curtain
+            // it flares and pulses in brightness; not its shadow.
+            let shade = if *shadow { 1.0 } else { sim.0.curtain_shade(building.curtain_until) };
+            let wanted = Color::srgba(shade, shade, shade, alpha);
             if picture.color != wanted {
                 picture.color = wanted;
             }
@@ -2042,6 +2053,8 @@ fn auto_build(
     mut asked: Local<usize>,
     mut enemies: Local<bool>,
     mut killed: Local<bool>,
+    mut fired: Local<Vec<bool>>,
+    mut mode: ResMut<crate::control::Mode>,
 ) {
     // RA2_BASE=GAPOWR;GAREFN;GAWALL@30,92 puts those buildings down as soon as the
     // player's first building stands: at the cell given, or wherever each first fits; for looking at
@@ -2079,6 +2092,37 @@ fn auto_build(
                     sim.0.hurt_buildings_for_tests(local());
                 }
             }
+        }
+    }
+    // RA2_SUPER='0@40,90@300;3@30,95@400;4@50,95@420' charges the player's
+    // super weapon of that kind (if granted) and fires it at the cell at the
+    // tick, for looking at super weapons; after a kind 3 the destination is
+    // being chosen.
+    if let Ok(list) = std::env::var("RA2_SUPER") {
+        let entries: Vec<&str> = list.split(';').collect();
+        fired.resize(entries.len(), false);
+        for (at, entry) in entries.iter().enumerate() {
+            let parts: Vec<Vec<i64>> = entry.split('@').map(|part| part.split(',').filter_map(|n| n.trim().parse().ok()).collect()).collect();
+            let (Some(&[kind]), Some(&[x, y]), Some(&[when])) = (parts.first().map(|v| &v[..]), parts.get(1).map(|v| &v[..]), parts.get(2).map(|v| &v[..])) else {
+                continue;
+            };
+            if fired[at] || sim.0.current_tick() < when as u64 {
+                continue;
+            }
+            fired[at] = true;
+            let Some(index) = sim.0.super_types.iter().position(|t| t.kind == kind as i32) else {
+                continue;
+            };
+            if let Some(state) = sim.0.houses[local() as usize].supers.get_mut(index).filter(|state| state.granted) {
+                state.ready = true;
+                state.left = 0;
+            }
+            sim.give(Order::Super { house: local(), index: index as u16, cell: (x as i32, y as i32) });
+            *mode = match kind {
+                3 => sim.0.super_types.iter().position(|t| t.kind == 4).map_or(crate::control::Mode::None, |second| crate::control::Mode::Super(second as u16)),
+                _ => crate::control::Mode::None,
+            };
+            info!("RA2_SUPER: kind {kind} at {x},{y}");
         }
     }
     // RA2_KILL=house,tick destroys everything a house has at a tick, for
@@ -2280,6 +2324,97 @@ fn show_corpses(
     }
 }
 
+/// An animation shown for as long as something in the game holds: the
+/// chronosphere's placement marker, a missile's warning marker.
+#[derive(Component)]
+struct Marker {
+    anim: String,
+    cell: (i32, i32),
+    began: u64,
+}
+
+/// The markers that should be up, and keeps them playing.
+// The chronosphere's
+// `ChronoPlacement` stands on its first cell, for its owner only, while the
+// destination is being chosen; it plays its `StartSound` when it appears. A
+// missile's `PSIWARN` stands on its target for a player whose psychic sensor
+// covers the cell.
+fn show_markers(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    files: Res<GameFiles>,
+    mut view: ResMut<UnitView>,
+    mode: Res<crate::control::Mode>,
+    mut images: ResMut<Assets<Image>>,
+    mut cues: MessageWriter<Cue>,
+    mut markers: Query<(Entity, &Marker, &mut Sprite, &mut Transform)>,
+) {
+    let view = &mut *view;
+    let tick = sim.0.current_tick();
+    let me = local();
+    let mut wanted: Vec<(String, (i32, i32))> = Vec::new();
+    let choosing = matches!(*mode, crate::control::Mode::Super(index) if sim.0.super_types.get(index as usize).is_some_and(|kind| kind.kind == 4));
+    if let (true, Some(cell), Some(name)) = (choosing, sim.0.houses.get(me as usize).and_then(|house| house.chrono_source), crate::audio::rules_sound(&files, "ChronoPlacement")) {
+        wanted.push((name.to_uppercase(), cell));
+    }
+    for cell in sim.0.nuke_warnings(me) {
+        wanted.push(("PSIWARN".to_owned(), cell));
+    }
+    let mut shown = Vec::new();
+    for (entity, marker, mut sprite, mut transform) in &mut markers {
+        if !wanted.iter().any(|(anim, cell)| *anim == marker.anim && *cell == marker.cell) {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        shown.push((marker.anim.clone(), marker.cell));
+        let Some(anim) = view.anim_types.get(&marker.anim) else {
+            continue;
+        };
+        let count = view.art.frame_count(&files, &anim.image);
+        let count = if anim.shadow { count / 2 } else { count };
+        let frame = anim_frame(anim, count, tick.saturating_sub(marker.began), view.game_speed).unwrap_or(anim.loop_start);
+        let art = &mut view.art;
+        let alt = anim.alt_palette;
+        let key = if alt { (format!("{}#alt", anim.image), frame) } else { (anim.image.clone(), frame) };
+        let image = view.effect_images.entry(key).or_insert_with(|| {
+            let drawn = if alt { art.infantry(&files, &anim.image, frame, Some(0), 0)? } else { art.effect(&files, &anim.image, frame)? };
+            let size = Vec2::new(drawn.width as f32, drawn.height as f32);
+            let image = Image::new(
+                Extent3d { width: drawn.width, height: drawn.height, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                drawn.rgba,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            Some((images.add(image), Vec2::new(drawn.offset.0 as f32, drawn.offset.1 as f32) + size / 2.0))
+        });
+        if let Some((handle, middle)) = image {
+            if sprite.image != *handle {
+                sprite.image = handle.clone();
+            }
+            let (x, y) = (marker.cell.0 * LEPTONS_PER_CELL + 128, marker.cell.1 * LEPTONS_PER_CELL + 128);
+            let at = scene_point_3d(view.origin, (x, y, sim.0.ground_z(x, y) + 5));
+            let centre = snapped(at + Vec2::new(0.0, anim.y_draw_offset as f32), *middle);
+            let depth = 2.0 + ((marker.cell.0 + marker.cell.1) as f32 + 2.5) * DEPTH_PER_ROW;
+            transform.translation = Vec3::new(centre.x, -centre.y, depth);
+            let colour = Color::srgba(1.0, 1.0, 1.0, anim.opacity);
+            if sprite.color != colour {
+                sprite.color = colour;
+            }
+        }
+    }
+    for (anim, cell) in wanted {
+        if shown.contains(&(anim.clone(), cell)) {
+            continue;
+        }
+        if let Some(sound) = view.anim_types.get(&anim).and_then(|kind| kind.report.clone()) {
+            let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
+            cues.write(Cue::SoundOn(sound, scene_point_3d(view.origin, (x, y, sim.0.ground_z(x, y)))));
+        }
+        commands.spawn((DespawnOnExit(Screen::InGame), Marker { anim, cell, began: tick }, Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
+    }
+}
+
 /// A shot in flight, by its id.
 #[derive(Component)]
 struct ShotSprite(u32);
@@ -2397,6 +2532,7 @@ fn show_effects(
     beams: Query<(Entity, &Beam)>,
     mut picks: Local<u32>,
     mut radar_events: ResMut<crate::radar::RadarEvents>,
+    mut status: MessageWriter<crate::bar::Status>,
 ) {
     let Some(armoury) = armoury else {
         return;
@@ -2652,14 +2788,11 @@ fn show_effects(
                 let depth = |cell: (i32, i32)| 2.0 + ((cell.0 + cell.1) as f32 + 2.5) * DEPTH_PER_ROW;
                 let key = |key: &str| crate::audio::rules_sound(&files, key);
                 match kind {
-                    0 => {
-                        cues.write(Cue::Eva("EVA_NuclearMissileLaunched"));
-                        cues.write_batch(key("DigSound").map(|name| Cue::SoundOn(name, point(cell, 0))));
-                    }
                     1 => {
                         if let Some(name) = key("IronCurtainInvokeAnim") {
                             start(&mut commands, &mut cues, view, &name, point(cell, 5), depth(cell));
                         }
+                        radar_events.raise(13, cell, tick);
                         cues.write(Cue::Eva("EVA_IronCurtainActivated"));
                     }
                     2 => {
@@ -2671,31 +2804,85 @@ fn show_effects(
                         }
                         if let (Some(name), Some(from)) = (key("ChronoBlast"), from) {
                             start(&mut commands, &mut cues, view, &name, point(from, 5), depth(from));
+                            radar_events.raise(13, from, tick);
                         }
+                        radar_events.raise(13, cell, tick);
                         cues.write(Cue::Eva("EVA_ChronosphereActivated"));
                     }
                     _ => {}
                 }
             }
-            Event::StormStarted { .. } => {
-                cues.write_batch(crate::audio::rules_sound(&files, "StormSound").map(Cue::Sound));
+            // The missile leaves its silo over
+            // `NukeTakeOff`, the siren sounds at the target and everyone is told.
+            Event::NukeLaunched { at, cell, .. } => {
+                if let Some(name) = crate::audio::rules_sound(&files, "NukeTakeOff") {
+                    let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
+                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), depth);
+                }
+                let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
+                let target = scene_point_3d(view.origin, (x, y, sim.0.ground_z(x, y)));
+                cues.write_batch(crate::audio::rules_sound(&files, "DigSound").map(|name| Cue::SoundOn(name, target)));
+                cues.write(Cue::Eva("EVA_NuclearMissileLaunched"));
             }
-            // One of the cloud animations over the cell; then one of the
-            // bolts and one of the strike sounds.
-            Event::Cloud { cell } | Event::Bolt { cell } => {
+            // The fireball where it came down.
+            Event::NukeLanded { at } => {
+                let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
+                start(&mut commands, &mut cues, view, "NUKEBALL", scene_point_3d(view.origin, at), depth);
+                radar_events.raise(13, (at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL)), tick);
+            }
+            // `StormSound` and the message as the storm breaks; the warning
+            // and the announcer while it is coming; a message to a player who
+            // calls a storm while one is on.
+            Event::StormStarted { cell, .. } => {
+                cues.write_batch(crate::audio::rules_sound(&files, "StormSound").map(Cue::Sound));
+                status.write(crate::bar::Status::Key("TXT_LIGHTNING_STORM"));
+                radar_events.raise(13, cell, tick);
+            }
+            Event::StormApproaching => {
+                cues.write(Cue::Eva("EVA_LightningStormCreated"));
+                status.write(crate::bar::Status::Key("TXT_LIGHTNING_STORM_APPROACHING"));
+            }
+            Event::StormRefused { house } => {
+                if house == local() {
+                    status.write(crate::bar::Status::Key("Msg:LightningStormActive"));
+                }
+            }
+            Event::StormEnded => {}
+            // The cloud the sim chose over the cell; then the bolt, and one of
+            // the strike sounds.
+            Event::Cloud { cell, kind } | Event::Bolt { cell, kind } => {
                 let bolt = matches!(event, Event::Bolt { .. });
                 let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
                 let ground = sim.0.ground_z(x, y);
-                let names: Vec<String> = crate::audio::rules_sound(&files, if bolt { "WeatherConBolts" } else { "WeatherConClouds" })
-                    .map(|list| list.split(',').map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).collect())
-                    .unwrap_or_default();
-                if !names.is_empty() {
-                    let name = names[pick(names.len())].clone();
+                let names = crate::audio::rules_list(&files, if bolt { "WeatherConBolts" } else { "WeatherConClouds" });
+                if let Some(name) = names.get(kind as usize).cloned() {
                     let at = scene_point_3d(view.origin, (x, y, ground + if bolt { 0 } else { 700 }));
                     start(&mut commands, &mut cues, view, &name, at, 2.0 + ((cell.0 + cell.1) as f32 + 3.0) * DEPTH_PER_ROW);
                 }
                 if bolt {
-                    cues.write_batch(crate::audio::rules_sound(&files, "LightningSounds").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, (x, y, ground)))));
+                    let sounds = crate::audio::rules_list(&files, "LightningSounds");
+                    if !sounds.is_empty() {
+                        cues.write(Cue::SoundOn(sounds[pick(sounds.len())].clone(), scene_point_3d(view.origin, (x, y, ground))));
+                    }
+                }
+            }
+            // `Wake` over a sinking vehicle; `ChronoSparkle1` over one held by a
+            // time weapon or jumping.
+            Event::Wake { at } | Event::Sparkle { at } => {
+                let key = if matches!(event, Event::Wake { .. }) { "Wake" } else { "ChronoSparkle1" };
+                if let Some(name) = crate::audio::rules_sound(&files, key) {
+                    let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
+                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), depth);
+                }
+            }
+            // Another house's super weapon
+            // building finished: a radar event there and the announcer, by
+            // which of the first four super weapons it holds.
+            Event::SuperDetected { owner, index, cell } => {
+                if owner != local() {
+                    radar_events.raise(12, cell, tick);
+                    let line = ["EVA_NuclearSiloDetected", "EVA_IronCurtainDetected", "EVA_WeatherDeviceReady", "EVA_ChronosphereDetected"].get(index as usize);
+                    cues.write_batch(line.map(|line| Cue::Eva(line)));
                 }
             }
             // The player's engineer
@@ -2827,8 +3014,10 @@ fn show_effects(
             continue;
         };
         let art = &mut view.art;
-        let image = view.effect_images.entry((anim.image.clone(), frame)).or_insert_with_key(|key| {
-            let drawn = art.effect(&files, &key.0, key.1)?;
+        let alt = anim.alt_palette;
+        let key = if alt { (format!("{}#alt", anim.image), frame) } else { (anim.image.clone(), frame) };
+        let image = view.effect_images.entry(key).or_insert_with(|| {
+            let drawn = if alt { art.infantry(&files, &anim.image, frame, Some(0), 0)? } else { art.effect(&files, &anim.image, frame)? };
             let size = Vec2::new(drawn.width as f32, drawn.height as f32);
             let image = Image::new(
                 Extent3d { width: drawn.width, height: drawn.height, depth_or_array_layers: 1 },
@@ -2846,6 +3035,10 @@ fn show_effects(
                 }
                 let centre = snapped(effect.at + Vec2::new(0.0, anim.y_draw_offset as f32), *middle);
                 transform.translation = Vec3::new(centre.x, -centre.y, effect.depth);
+                let wanted = Color::srgba(1.0, 1.0, 1.0, anim.opacity);
+                if sprite.color != wanted {
+                    sprite.color = wanted;
+                }
             }
             None => sprite.image = Handle::default(),
         }
@@ -2859,6 +3052,7 @@ fn show_effects(
         .iter()
         .map(|b| (b.id, b.weapon, b.position, b.facing(), None))
         .chain(sim.0.leaps().iter().map(|leap| (leap.id | 0x8000_0000, leap.weapon, leap.position, leap.facing, Some(leap.house))))
+        .chain(sim.0.nukes().iter().filter_map(|nuke| Some((nuke.id, sim.0.nuke_weapon(nuke)?, (nuke.at.0 as f64, nuke.at.1 as f64, nuke.at.2 as f64), 0, Some(nuke.house)))))
         .collect();
     let mut seen: Vec<u32> = Vec::new();
     for (entity, shot, mut sprite, mut transform) in &mut shots {

@@ -97,6 +97,9 @@ pub struct Projectile {
     /// `ShrapnelWeapon` and `ShrapnelCount`: the weapon thrown out where the shot
     /// lands, and how many times.
     pub shrapnel: Option<(u16, i32)>,
+    /// `Vertical` and `DetonationAltitude`: the nuclear missile's way of flying.
+    pub vertical: bool,
+    pub detonation_altitude: i32,
 }
 
 impl Default for Projectile {
@@ -119,6 +122,8 @@ impl Default for Projectile {
             course_lock: 0,
             subject_to_elevation: false,
             flak_scatter: false,
+            vertical: false,
+            detonation_altitude: 0,
         }
     }
 }
@@ -479,10 +484,28 @@ pub enum Event {
     /// A super weapon was fired at a cell (the chronosphere's second click
     /// also says where from).
     SuperFired { house: u8, kind: i32, cell: (i32, i32), from: Option<(i32, i32)> },
-    /// The lightning storm has begun; a cloud of it forms; a bolt comes down.
-    StormStarted { cell: (i32, i32) },
-    Cloud { cell: (i32, i32) },
-    Bolt { cell: (i32, i32) },
+    /// The lightning storm has begun (called by `house`); it is on its way; one
+    /// could not be called (a storm is already on its way or raging); it is
+    /// over.
+    StormStarted { cell: (i32, i32), house: u8 },
+    StormApproaching,
+    StormRefused { house: u8 },
+    StormEnded,
+    /// A cloud of the storm forms, and a bolt comes down: which of
+    /// `WeatherConClouds` and `WeatherConBolts`.
+    Cloud { cell: (i32, i32), kind: u8 },
+    Bolt { cell: (i32, i32), kind: u8 },
+    /// A nuclear missile has left its silo; it has come down and its fireball
+    /// begins.
+    NukeLaunched { house: u8, at: (i32, i32, i32), cell: (i32, i32) },
+    NukeLanded { at: (i32, i32, i32) },
+    /// A bubble over a sinking vehicle; a sparkle over something held by a
+    /// time weapon or jumping.
+    Wake { at: (i32, i32, i32) },
+    Sparkle { at: (i32, i32, i32) },
+    /// A house's building that shows itself to all has been finished: which
+    /// super weapon it holds.
+    SuperDetected { owner: u8, index: u16, cell: (i32, i32) },
     /// A bridge section has gone; a bridge has been put back.
     BridgeBroken { cell: (i32, i32) },
     BridgeRepaired { house: u8, cell: (i32, i32) },
@@ -582,6 +605,9 @@ impl World {
 
     /// How far off the ground a unit is, in leptons.
     pub fn altitude(&self, unit: &Unit) -> i32 {
+        if let Some(depth) = unit.chrono.and_then(|warp| warp.sink) {
+            return -depth;
+        }
         if let Some(plane) = unit.plane {
             return plane.z;
         }

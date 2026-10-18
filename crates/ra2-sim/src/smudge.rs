@@ -120,8 +120,11 @@ impl World {
     // from the splash list instead, 35 an entry.
     fn blast_anim(&self, warhead: u16, damage: i32, water: bool) -> u16 {
         let rules = self.warheads.get(warhead as usize);
+        let storm = &self.super_rules.storm;
         let (list, step) = match rules {
             Some(rules) if water && rules.conventional => (&self.splash_anims, 35),
+            // The storm's warhead shows `WeatherConBoltExplosion`.
+            Some(_) if warhead == storm.warhead && damage != 0 && storm.bolt_explosion.is_some() => return storm.bolt_explosion.unwrap_or(NO_ANIM),
             Some(rules) => (&rules.anim_list, 25),
             None => return NO_ANIM,
         };
@@ -139,7 +142,7 @@ impl World {
     }
 
     /// The mark of an animation type, by its number.
-    fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
+    pub(crate) fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
         if let Some(mark) = self.anim_marks.get(anim as usize).copied() {
             self.animation_mark(at, mark.scorch, mark.crater, mark.force_big, mark.size.0, mark.size.1);
         }

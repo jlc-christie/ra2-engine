@@ -42,6 +42,18 @@ pub fn rules_sound(files: &GameFiles, key: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+/// Every name in an `[AudioVisual]` (or `[General]`) list in rules.ini.
+pub fn rules_list(files: &GameFiles, key: &str) -> Vec<String> {
+    let Some(rules) = files.get("rules.ini").map(Ini::parse) else {
+        return Vec::new();
+    };
+    ["AudioVisual", "General"]
+        .iter()
+        .find_map(|section| rules.get(section, key))
+        .map(|value| value.split(',').map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Resource)]
 struct Audio {
     index: Option<AudioIndex>,

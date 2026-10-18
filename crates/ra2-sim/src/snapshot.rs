@@ -45,7 +45,7 @@ use crate::{Map, World};
 
 /// Goes up whenever a state type or the layout changes; a snapshot of another
 /// number is refused.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 type Sections = Vec<(&'static str, Vec<u8>)>;
 
