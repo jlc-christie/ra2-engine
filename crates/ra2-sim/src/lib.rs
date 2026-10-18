@@ -5406,8 +5406,11 @@ impl World {
                 others[index] = Other { allies: others[index].allies, ..Other::of(unit) };
             }
         }
+        // A unit held up by a friend at rest asks that cell to clear with no
+        // point to go away from, so what is there looks further than its
+        // neighbours for a free place.
         for cell in scatter {
-            self.scatter(cell);
+            self.scatter_from(cell, Scatter::Nearest);
         }
         for (id, cell) in attack {
             self.attack_blocker(id, cell);
