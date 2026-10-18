@@ -87,6 +87,24 @@ struct Bar {
 #[derive(Component)]
 struct MessageRoot;
 
+/// A message being typed out: one more character every 16 ms, each showing
+/// the box as wide as the text so far.
+#[derive(Component)]
+struct Typing {
+    began: f64,
+    widths: Vec<f32>,
+    shown: usize,
+}
+
+/// `IncomingMessage` as a message that is not silent arrives, and
+/// `MessageCharTyped` as its characters appear.
+#[derive(Default)]
+struct MessageSounds {
+    incoming: Option<String>,
+    typed: Option<String>,
+    read: bool,
+}
+
 pub struct BarPlugin;
 
 impl Plugin for BarPlugin {
@@ -284,9 +302,14 @@ fn buttons(
 // At most six lines 19 pixels apart, the oldest dropped to make room; a command's
 // status line stays 240 sixteenths-of-a-second-ish ticks (16 ms each: 3.84 s of
 // real time) and is added silently; the rest close up at once when one goes.
+#[allow(clippy::too_many_arguments)]
 fn messages(
     mut commands: Commands,
     mut incoming: MessageReader<Status>,
+    files: Res<GameFiles>,
+    mut cues: MessageWriter<crate::audio::Cue>,
+    mut sounds: Local<MessageSounds>,
+    mut typing: Query<(Entity, &mut Typing)>,
     mut bar: ResMut<Bar>,
     mut images: ResMut<Assets<Image>>,
     time: Res<Time<Real>>,
@@ -298,6 +321,21 @@ fn messages(
     let Ok(root) = root.single() else {
         return;
     };
+    if !sounds.read {
+        *sounds = MessageSounds { incoming: crate::audio::rules_sound(&files, "IncomingMessage"), typed: crate::audio::rules_sound(&files, "MessageCharTyped"), read: true };
+    }
+    for (entity, mut typed) in &mut typing {
+        let count = (((now - typed.began) / 0.016) as usize + 1).min(typed.widths.len());
+        if count != typed.shown {
+            typed.shown = count;
+            if let Ok(mut node) = nodes.get_mut(entity) {
+                node.width = Val::Px(typed.widths[count - 1]);
+            }
+            if let Some(sound) = sounds.typed.clone() {
+                cues.write(crate::audio::Cue::Sound(sound));
+            }
+        }
+    }
     let mut changed = false;
     for message in incoming.read() {
         let player = view.as_ref().map_or(crate::hud::TEXT, |view| view.player_colour());
@@ -306,10 +344,12 @@ fn messages(
             Status::Text(text) => (text.clone(), player, SHORT_MESSAGE),
             Status::Long(text, colour) => (text.clone(), *colour, LONG_MESSAGE),
         };
+        let typed = matches!(message, Status::Long(..));
         let Some(font) = bar.font.as_ref() else {
             continue;
         };
         let (width, mask) = font.rasterize(&text);
+        let widths: Vec<f32> = if typed { text.char_indices().map(|(at, c)| font.rasterize(&text[..at + c.len_utf8()]).0 as f32 + 2.0).collect() } else { Vec::new() };
         let height = font.height;
         if width == 0 || mask.len() != width * height {
             continue;
@@ -336,7 +376,19 @@ fn messages(
             commands.entity(oldest).despawn();
         }
         // Each line goes under the ones already showing.
-        let line = commands.spawn((absolute(0.0, 19.0 * bar.lines.len() as f32, Vec2::new(width as f32, height as f32)), ImageNode::new(image), ChildOf(root))).id();
+        let size = Vec2::new(width as f32, height as f32);
+        let line = if typed {
+            if let Some(sound) = sounds.incoming.clone() {
+                cues.write(crate::audio::Cue::Sound(sound));
+            }
+            let mut node = absolute(0.0, 19.0 * bar.lines.len() as f32, Vec2::new(widths.first().copied().unwrap_or(size.x), size.y));
+            node.overflow = Overflow::clip();
+            let line = commands.spawn((node, Typing { began: now, widths, shown: 1 }, ChildOf(root))).id();
+            commands.spawn((absolute(0.0, 0.0, size), ImageNode::new(image), ChildOf(line)));
+            line
+        } else {
+            commands.spawn((absolute(0.0, 19.0 * bar.lines.len() as f32, size), ImageNode::new(image), ChildOf(root))).id()
+        };
         bar.lines.push((line, now + lasts));
         changed = true;
     }

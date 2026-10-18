@@ -27,7 +27,7 @@ fn table_sin(angle: f64, quarter_turns: i32) -> f64 {
 }
 
 /// HSV to RGB, each 0 to 255, in the engine's integer arithmetic.
-fn hsv_to_rgb(hsv: [u8; 3]) -> [u8; 3] {
+pub(crate) fn hsv_to_rgb(hsv: [u8; 3]) -> [u8; 3] {
     let [h, s, v] = hsv.map(u32::from);
     let fraction = (h * 6) % 255;
     let p = (255 - s) * v / 255;

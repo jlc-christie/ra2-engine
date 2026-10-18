@@ -682,7 +682,7 @@ fn shortcuts(
 fn clicks(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    hover: Res<Hover>,
+    (hover, mut drag): (Res<Hover>, ResMut<crate::game::RightDrag>),
     view: Res<UnitView>,
     mut sim: ResMut<Sim>,
     mut selection: ResMut<Selection>,
@@ -751,7 +751,13 @@ fn clicks(
     if buttons.just_pressed(MouseButton::Right) && hover.radar {
         return;
     }
-    if buttons.just_pressed(MouseButton::Right) && hover.point.is_some() {
+    // On letting go, unless the press became a drag that scrolled the view.
+    if buttons.just_released(MouseButton::Right) && drag.press.is_some() {
+        let dragged = drag.started;
+        *drag = crate::game::RightDrag::default();
+        if dragged {
+            return;
+        }
         *band = Band::default();
         if placing.0.take().is_none() {
             if *mode != Mode::None {
@@ -1174,9 +1180,26 @@ fn choose_cursor(
     mode: Res<Mode>,
     keys: Res<ButtonInput<KeyCode>>,
     blocked: Res<crate::game::ScrollBlocked>,
+    drag: Res<crate::game::RightDrag>,
     mut wanted: ResMut<WantedCursor>,
 ) {
     wanted.0 = cursor::NORMAL;
+    // While a right drag scrolls, the cursor shows which ways the view
+    // can still go.
+    if drag.started {
+        wanted.0 = match drag.blocked {
+            1 => 62,
+            2 => 64,
+            3 => 63,
+            4 => 66,
+            6 => 65,
+            8 => 68,
+            9 => 69,
+            12 => 67,
+            _ => 61,
+        };
+        return;
+    }
     let Some(at) = pointer.0 else {
         return;
     };
@@ -1983,7 +2006,9 @@ fn draw_overlays(
                 // Only with the Options screen's
                 // Target Lines (`UnitActionLines`) on.
                 let fresh = prefs.target_lines && last_order.0.is_some_and(|tick| world.current_tick() < tick + ACTION_LINE_FRAMES);
-                if let (true, true, Some(goal)) = (selected, fresh, unit.destination()) {
+                // With a target, only the line to it is drawn.
+                let aim = unit.arms.target.filter(|_| unit.arms.attacking).and_then(|target| world.aim_point(target));
+                if let (true, true, None, Some(goal)) = (selected, fresh, aim, unit.destination()) {
                     let level = world.map.level(goal.0, goal.1) as i32;
                     let half = LEPTONS_PER_CELL / 2;
                     let end = scene_point(
@@ -2005,7 +2030,7 @@ fn draw_overlays(
                 }
                 // And to what it is attacking, in entry 8 (red).
                 let target_rgb = art.palette.0[8];
-                if let (true, true, Some(point)) = (selected, fresh, unit.arms.target.filter(|_| unit.arms.attacking).and_then(|target| world.aim_point(target))) {
+                if let (true, true, Some(point)) = (selected, fresh, aim) {
                     let end = scene_point(view.origin, point.0, point.1, 0) - Vec2::new(0.0, point.2 as f32 * 15.0 / ra2_sim::combat::LEVEL_HEIGHT as f32);
                     let delta = (end - at).round().as_ivec2();
                     let image = art.images.entry(OverlayKey::TargetLine(delta)).or_insert_with(|| {

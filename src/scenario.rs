@@ -1955,6 +1955,17 @@ fn stolen_technology_offers_the_special_soldiers() {
         let stats = game.stats(name);
         eprintln!("STOLEN {name}: teleporter {} c4 {} primary {:?} elite {:?}", stats.teleporter, stats.fighter.c4, stats.fighter.primary.map(|m| game.world.weapons[m.weapon as usize].range), stats.elite_primary.is_some());
     }
+    // `BuildLimit=1` counts the one being trained and any queued.
+    let prime = game.units.iter().position(|n| n == "YURIPR").unwrap() as u16;
+    let item = ra2_sim::Item::Unit(prime);
+    assert!(!game.world.at_limit(PLAYER, item));
+    game.world.order(Order::BuildUnit { house: PLAYER, unit: prime });
+    game.world.order(Order::BuildUnit { house: PLAYER, unit: prime });
+    game.run(1);
+    assert!(game.world.at_limit(PLAYER, item), "a second Yuri Prime can be ordered while one is in training");
+    let tab = game.world.unit_slot(prime);
+    assert!(game.world.houses[PLAYER as usize].tab_slot(tab).is_some_and(|p| p.building == prime));
+    assert!(game.world.houses[PLAYER as usize].queue(tab).is_empty(), "a second Yuri Prime was queued");
 }
 
 #[test]
@@ -3199,6 +3210,47 @@ fn a_tank_yuri_takes_stops_what_it_was_doing() {
     assert_eq!(game.world.unit(ours).unwrap().health, before, "the taken tank still shot at its old target");
     assert_eq!(game.world.unit(yuri).unwrap().controls, Some(theirs));
     }
+}
+
+#[test]
+fn yuri_prime_takes_a_tank_from_afar_and_only_one_can_be_trained() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    use ra2_sim::combat::Aim;
+    let at = (yard.0 + 6, yard.1 + 10);
+    let prime = game.world.add_infantry(at, 2, 0, game.stats("YURIPR"), PLAYER).unwrap();
+    let tank = game.world.add_unit((at.0 + 20, at.1), 0, game.stats("MTNK"), 2);
+    let start = game.world.unit(prime).unwrap().cell();
+    game.world.order(Order::Attack { unit: prime, target: Aim::Unit(tank) });
+    game.run(300);
+    eprintln!("PRIME from {start:?} to {:?}", game.world.unit(prime).unwrap().cell());
+    assert_eq!(game.world.unit(tank).unwrap().owner, PLAYER, "Yuri Prime did not take the tank 20 cells away");
+    assert_eq!(game.world.unit(prime).unwrap().cell(), start, "Yuri Prime walked up to it");
+}
+
+#[test]
+fn a_mirage_standing_still_is_taken_for_a_tree() {
+    let Some(mut game) = Scenario::load("mp03t4") else {
+        return;
+    };
+    let yard = game.deploy_base();
+    let at = (yard.0 + 6, yard.1 + 10);
+    let mirage = game.world.add_unit(at, 0, game.stats("MGTK"), PLAYER);
+    // Out of the Mirage's reach, so that it does not fire and give itself away.
+    let tank = game.world.add_unit((at.0 + 9, at.1), 0, game.stats("HTNK"), 2);
+    game.run(20);
+    let unit = game.world.unit(mirage).unwrap();
+    assert!(unit.disguise.is_some_and(|(_, house)| house == ra2_sim::abilities::TREE_DISGUISE), "no tree disguise: {:?}", unit.disguise);
+    assert!(game.world.disguised_to(unit, 2) && !game.world.disguised_to(unit, PLAYER));
+    game.run(200);
+    assert_eq!(game.world.unit(mirage).unwrap().health, game.stats("MGTK").strength, "the enemy tank shot at the tree");
+    let _ = tank;
+    // On the move it is itself again.
+    game.world.order(Order::Move { unit: mirage, x: at.0 - 3, y: at.1 });
+    game.run(2);
+    assert!(game.world.unit(mirage).unwrap().disguise.is_none());
 }
 
 #[test]

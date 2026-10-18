@@ -31,7 +31,7 @@ impl Video {
             Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)).filter(|&(w, h)| w >= 200 && h >= 200)
         };
         let screen = std::env::var("RA2_RES").ok().and_then(|text| parse(&text)).or(kept.screen);
-        let fullscreen = std::env::var("RA2_FULLSCREEN").map_or(kept.fullscreen, |value| value.trim() != "0");
+        let fullscreen = std::env::var("RA2_FULLSCREEN").map_or(kept.fullscreen, |value| value.trim() != "0") && !screenshot_run();
         Self { screen, fullscreen }
     }
 
@@ -42,9 +42,17 @@ impl Video {
             title: crate::home::APP_NAME.into(),
             resolution: WindowResolution::new(width, height),
             mode: if self.fullscreen { WindowMode::BorderlessFullscreen(MonitorSelection::Current) } else { WindowMode::Windowed },
+            // Screenshots are drawn off screen, so a run that takes one stays
+            // out of the way of whoever is using the machine.
+            visible: !screenshot_run(),
+            focused: !screenshot_run(),
             ..default()
         }
     }
+}
+
+fn screenshot_run() -> bool {
+    std::env::var_os("RA2_SHOT").is_some()
 }
 
 pub struct VideoPlugin;

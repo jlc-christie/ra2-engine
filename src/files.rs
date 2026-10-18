@@ -35,6 +35,8 @@ const NESTED: &[&str] = &[
     "generic.mix",
     // Sounds and the announcer, inside language.mix.
     "audio.mix",
+    // The loading screens, inside ra2.mix.
+    "load.mix",
 ];
 
 /// The sidebar art of each side, in side order.

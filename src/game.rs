@@ -251,6 +251,7 @@ impl Plugin for GamePlugin {
         app.init_resource::<CentreOn>()
             .init_resource::<ViewCentre>()
             .init_resource::<ScrollBlocked>()
+            .init_resource::<RightDrag>()
             .add_systems(OnEnter(Screen::InGame), load_map)
             .add_systems(OnExit(Screen::InGame), reset_camera)
             .add_systems(
@@ -259,6 +260,11 @@ impl Plugin for GamePlugin {
             );
     }
 }
+
+/// The player's country when it was to be random and the loading screen has
+/// already drawn it.
+#[derive(Resource)]
+pub(crate) struct DrawnCountry(pub usize);
 
 pub(crate) fn load_map(
     mut commands: Commands,
@@ -270,8 +276,10 @@ pub(crate) fn load_map(
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut next_screen: ResMut<NextState<Screen>>,
+    drawn: Option<Res<DrawnCountry>>,
 ) {
-    // A random country or colour is settled now.
+    // A random country or colour is settled now, or for the country, on the
+    // loading screen before.
     // Any of the nine countries, any of the
     // eight colours. Not original behaviour: the clock as the source of chance.
     let options = setup.options;
@@ -306,7 +314,14 @@ pub(crate) fn load_map(
     // drawn from the map's start positions (the others then take the
     // furthest left). RA2_START=n fixes it, for checks.
     let start = std::env::var("RA2_START").ok().and_then(|n| n.trim().parse().ok()).unwrap_or(if options.start < 0 { draw(1 << 16) as i32 } else { options.start });
-    let country = if options.country < 0 { draw(9) } else { options.country as usize };
+    let country = match drawn {
+        Some(drawn) => {
+            commands.remove_resource::<DrawnCountry>();
+            drawn.0
+        }
+        None if options.country < 0 => draw(9),
+        None => options.country as usize,
+    };
     let colour = colour_for(options.colour, &mut draw);
     let opponents = rows
         .iter()
@@ -602,6 +617,16 @@ fn reset_camera(mut camera: Single<&mut Transform, With<Camera2d>>) {
 #[derive(Resource, Default)]
 pub struct ScrollBlocked(pub bool);
 
+/// A right press on the map view, which becomes a drag that scrolls once the
+/// pointer has gone more than 8 pixels from where it was pressed. `blocked`
+/// has a bit for each way the view cannot go: north, east, south, west.
+#[derive(Resource, Default)]
+pub struct RightDrag {
+    pub press: Option<Vec2>,
+    pub started: bool,
+    pub blocked: u8,
+}
+
 /// Scrolls with the arrow keys or the mouse at a window edge, keeping the view
 /// inside the terrain. Letter keys are left for the game's own shortcuts.
 fn scroll_camera(
@@ -614,6 +639,7 @@ fn scroll_camera(
     mut centre: ResMut<ViewCentre>,
     mut blocked: ResMut<ScrollBlocked>,
     prefs: Res<crate::prefs::Prefs>,
+    (buttons, mut drag, pointer): (Res<ButtonInput<MouseButton>>, ResMut<RightDrag>, Res<crate::cursor::Pointer>),
 ) {
     let Some(mut view) = view else {
         return;
@@ -650,6 +676,42 @@ fn scroll_camera(
     let arrows = [KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp, KeyCode::ArrowDown];
     let held = |a: KeyCode, b: KeyCode| keys.pressed(a) || keys.pressed(b);
     let mut step = direction * SCROLL_SPEED * 4.0 / (prefs.scroll_rate + 1) as f32 * time.delta_secs();
+    let tactical = Vec2::new(window_size.x - crate::hud::SIDEBAR_WIDTH, window_size.y - crate::hud::BOTTOM_BAR_HEIGHT);
+    if buttons.just_pressed(MouseButton::Right) {
+        *drag = RightDrag { press: pointer.0.filter(|c| c.x < tactical.x && c.y < tactical.y), ..default() };
+    } else if !buttons.pressed(MouseButton::Right) && !buttons.just_released(MouseButton::Right) {
+        *drag = RightDrag::default();
+    }
+    // Each update scrolls by the pointer's distance from the press point over
+    // `ScrollRate` + 1, faster still when pressed at the screen's edge.
+    if let (Some(press), Some(at), true) = (drag.press, pointer.0, buttons.pressed(MouseButton::Right)) {
+        let mut d = at - press;
+        if !drag.started && (d.x.abs() > 8.0 || d.y.abs() > 8.0) {
+            drag.started = true;
+        }
+        if drag.started {
+            if d.x == 0.0 {
+                d.x = if press.x == 0.0 { -1.0 } else if press.x >= window_size.x - 1.0 { 1.0 } else { 0.0 };
+            }
+            if d.y == 0.0 {
+                d.y = if press.y == 0.0 { -1.0 } else if press.y >= window_size.y { 1.0 } else { 0.0 };
+            }
+            if press.x < 10.0 && d.x < 0.0 {
+                d.x = 4.0 * d.x.min(-5.0);
+            } else if press.x > window_size.x - 10.0 && d.x > 0.0 {
+                d.x = 4.0 * d.x.max(5.0);
+            }
+            if press.y < 10.0 && d.y < 0.0 {
+                d.y = 4.0 * d.y.min(-5.0);
+            } else if press.y > window_size.y - 10.0 && d.y > 0.0 {
+                d.y = 4.0 * d.y.max(5.0);
+            }
+            let f = 1.0 / (prefs.scroll_rate + 1) as f32;
+            // Paced to sixty updates a second.
+            let updates = time.delta_secs() * 60.0;
+            step = Vec2::new((d.x * f).trunc(), -(d.y * f).trunc()) * updates;
+        }
+    }
     if keys.any_pressed(arrows) {
         if held(KeyCode::ControlLeft, KeyCode::ControlRight) {
             step = direction * (size.x + size.y);
@@ -667,10 +729,17 @@ fn scroll_camera(
     // kept half a view inside the visible area; where the view is the larger,
     // the low edge is tested first, so the view sits at the area's left or
     // top.
-    let tactical = Vec2::new(window_size.x - crate::hud::SIDEBAR_WIDTH, window_size.y - crate::hud::BOTTOM_BAR_HEIGHT);
     let clamp = |value: f32, low: f32, high: f32| if value < low { low } else if value > high { high } else { value };
     let area = view.area;
     let before = camera.translation;
+    if drag.started {
+        // The middle of the view, as kept, and whether a pixel's scroll a way
+        // (in screen terms, y down) would move it.
+        let middle = Vec2::new(camera.translation.x - crate::hud::SIDEBAR_WIDTH / 2.0, -camera.translation.y - crate::hud::BOTTOM_BAR_HEIGHT / 2.0);
+        let kept = |point: Vec2| Vec2::new(clamp(point.x, area.min.x + tactical.x / 2.0, area.max.x - tactical.x / 2.0), clamp(point.y, area.min.y + tactical.y / 2.0, area.max.y - tactical.y / 2.0));
+        let moves = |way: Vec2| kept(middle + way) != kept(middle);
+        drag.blocked = [-Vec2::Y, Vec2::X, Vec2::Y, -Vec2::X].iter().enumerate().fold(0, |mask, (bit, &way)| if moves(way) { mask } else { mask | 1 << bit });
+    }
     let middle_x = camera.translation.x + step.x - crate::hud::SIDEBAR_WIDTH / 2.0;
     let middle_y = -(camera.translation.y + step.y) - crate::hud::BOTTOM_BAR_HEIGHT / 2.0;
     let middle_x = clamp(middle_x, area.min.x + tactical.x / 2.0, area.max.x - tactical.x / 2.0);

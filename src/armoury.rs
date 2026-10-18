@@ -151,6 +151,10 @@ impl Armoury {
             // DATA: `[General]` `AlliedDisguise`, `SovietDisguise`,
             // `SpyPowerBlackout`, `SpyMoneyStealPercent`; `[AI]` `BuildTech`.
             disguises: ["AlliedDisguise", "SovietDisguise"].map(|key| get(key).and_then(|name| unit(&name)).map(|index| index + 1)),
+            // DATA: `[General]` `DefaultMirageDisguises`, `InfantryBlinkDisguiseTime`.
+            mirage_looks: get("DefaultMirageDisguises").map_or(0, |list| list.split(',').filter(|name| !name.trim().is_empty()).count() as u16),
+            c4_warhead: get("C4Warhead").map(|name| self.warhead(rules, &name)),
+            infantry_blink: get("InfantryBlinkDisguiseTime").and_then(|v| v.parse().ok()).unwrap_or(defaults.infantry_blink),
             spy_blackout: get("SpyPowerBlackout").and_then(|v| v.parse().ok()).unwrap_or(defaults.spy_blackout),
             spy_steal: get("SpyMoneyStealPercent").and_then(|v| v.parse().ok()).unwrap_or(defaults.spy_steal),
             prism_type: get("PrismType").and_then(|name| building(&name)),
@@ -196,6 +200,7 @@ impl Armoury {
             fire_once: yes(get("FireOnce"), false),
             limbo_launch: yes(get("LimboLaunch"), false),
             spawner: yes(get("Spawner"), false),
+            fake_blink: number("DisguiseFakeBlinkTime").unwrap_or(0).max(0) as u32,
             area_fire: yes(get("AreaFire"), false),
             is_sonic: yes(get("IsSonic"), false),
             sabotage_cursor: yes(get("SabotageCursor"), false),
@@ -480,6 +485,7 @@ impl Armoury {
             aircraft: rules.section("AircraftTypes").iter().any(|(_, entry)| entry.trim().eq_ignore_ascii_case(name)),
             can_disguise: yes(get("CanDisguise"), false),
             perma_disguise: yes(get("PermaDisguise"), false),
+            disguise_when_still: yes(get("DisguiseWhenStill"), false),
             ivan: yes(get("Ivan"), false),
             agent: yes(get("Agent"), false),
             detect_disguise: yes(get("DetectDisguise"), false),

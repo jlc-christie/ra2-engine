@@ -152,6 +152,9 @@ pub(crate) struct UnitView {
     /// Drawn building images by art, frame, palette, height level and whether it
     /// is the shadow, with where each goes relative to the building's draw point.
     building_images: HashMap<PartKey, Option<(Handle<Image>, Vec2)>>,
+    /// Each building's animation clock: when it was offline, and its super
+    /// weapon's stage.
+    building_clocks: HashMap<u32, AnimClock>,
     /// The player's palette, and every house's by owner.
     player_palette: Option<usize>,
     house_palettes: Vec<Option<usize>>,
@@ -187,6 +190,7 @@ struct BuildingArt {
     zshape_move: (i32, i32),
     normal_z_adjust: i32,
     anims: Vec<crate::terrain::AnimSlot>,
+    charged_anim_time: f32,
 }
 
 /// Art name, frame, palette, height level, shadow.
@@ -266,7 +270,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_bridges, show_ore, show_effects, show_corpses, show_radiation)
+                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, show_radiation)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>),
@@ -463,6 +467,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
             normal_z_adjust: info.normal_z_adjust,
             under_door: info.under_door.take(),
             anims: std::mem::take(&mut info.anims),
+            charged_anim_time: info.charged_anim_time,
         });
         world.building_types.push(info.sim);
         catalog.push(CatalogEntry {
@@ -663,6 +668,7 @@ pub fn setup(
         smudge_sprites: HashMap::new(),
         smudges_shown: None,
         building_images: HashMap::new(),
+        building_clocks: HashMap::new(),
         player_palette,
         images: HashMap::new(),
     });
@@ -957,6 +963,8 @@ fn show_units(
         // disguised unit that does not show its true self is drawn as the type
         // it imitates, in the colours of the house it imitates.
         let masked = unit.disguise.filter(|_| !sim.0.shows_true_self(unit, local()));
+        let tree = masked.is_some_and(|(_, house)| house == ra2_sim::abilities::TREE_DISGUISE);
+        let masked = masked.filter(|_| !tree);
         let mask_look = masked.and_then(|(kind, house)| (kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map(|k| (k.image.clone(), view.palette_of(house))));
         let (model, palette) = match &mask_look {
             Some((model, palette)) => (model, palette),
@@ -970,6 +978,7 @@ fn show_units(
         // cloaking unit is a quarter, then half, see-through; cloaked, its owner
         // (and whoever senses it) sees it half see-through and others not at all.
         let wanted = match sim.0.visual_character(unit, local()) {
+            _ if tree => Color::srgba(1.0, 1.0, 1.0, 0.0),
             5 => Color::srgba(1.0, 1.0, 1.0, 0.0),
             2..=4 => Color::srgba(1.0, 1.0, 1.0, 0.5),
             1 => Color::srgba(1.0, 1.0, 1.0, 0.75),
@@ -1315,6 +1324,31 @@ fn anim_frame(anim: &crate::terrain::AnimType, images: usize, ticks: u64, speed:
     Some(anim.start + (from + (steps - first) % round) as usize)
 }
 
+#[derive(Clone, Default)]
+struct AnimClock {
+    /// The last few spans the building was offline, the latest perhaps still
+    /// open.
+    off: Vec<(u64, Option<u64>)>,
+    super_stage: u8,
+    super_since: u64,
+}
+
+impl AnimClock {
+    /// Ticks the building was online between two moments.
+    fn online_between(&self, from: u64, to: u64) -> u64 {
+        let off: u64 = self.off.iter().map(|&(start, end)| end.unwrap_or(to).min(to).saturating_sub(start.max(from))).sum();
+        to.saturating_sub(from).saturating_sub(off)
+    }
+
+    fn offline(&self) -> bool {
+        self.off.last().is_some_and(|span| span.1.is_none())
+    }
+
+    fn back_on(&self) -> u64 {
+        self.off.last().and_then(|span| span.1).unwrap_or(0)
+    }
+}
+
 /// Keeps the sprites each building is drawn from: its build-up animation while
 /// that runs; afterwards its body, bib, shadows and the animations it shows at
 /// rest.
@@ -1330,6 +1364,8 @@ fn show_buildings(
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
+    let standing: std::collections::HashSet<u32> = sim.0.buildings().iter().map(|b| b.id).collect();
+    view.building_clocks.retain(|id, _| standing.contains(id));
     // Buildings that are gone, for instance packed up into a vehicle.
     for (entity, sprite, ..) in &shown {
         if !sim.0.buildings().iter().any(|b| b.id == sprite.0) {
@@ -1393,29 +1429,75 @@ fn show_buildings(
                 if let Some(floor) = art.under_door.as_ref().filter(|_| building.unloading()) {
                     with_shadow(&mut parts, &mut view.art, &files, floor, frame, body_z + step / 2.0, false);
                 }
-                let mut slots: Vec<&crate::terrain::AnimSlot> = art.anims.iter().filter(|slot| slot.refinery_level == 0).collect();
+                // Offline, `Powered` animations stop on their frame and
+                // `PoweredLight` ones go, to start again when it comes back.
+                let mut clock = view.building_clocks.get(&building.id).cloned().unwrap_or_else(|| AnimClock { super_since: building.opened, ..default() });
+                let offline = !sim.0.online(building);
+                match (offline, clock.offline()) {
+                    (true, false) => {
+                        clock.off.push((tick, None));
+                        if clock.off.len() > 8 {
+                            clock.off.remove(0);
+                        }
+                    }
+                    (false, true) => clock.off.last_mut().unwrap().1 = Some(tick),
+                    _ => {}
+                }
+                // A super weapon's building opens up once its weapon is
+                // within `ChargedAnimTime` minutes of ready, and closes again
+                // once it has been fired.
+                let charged = art.charged_anim_time;
+                let near = sim.0.building_types.get(building.kind as usize).and_then(|kind| kind.super_weapon).and_then(|index| sim.0.houses.get(building.owner as usize)?.supers.get(index as usize)).is_some_and(|state| {
+                    state.granted && !(charged < if state.ready { 0.0 } else { state.left as f32 / 900.0 })
+                });
+                if charged <= 990.0 {
+                    match (clock.super_stage, near) {
+                        (0, true) | (2, false) => {
+                            clock.super_stage += 1;
+                            clock.super_since = tick;
+                        }
+                        _ => {}
+                    }
+                }
+                let mut slots: Vec<&crate::terrain::AnimSlot> = art.anims.iter().filter(|slot| slot.refinery_level == 0 && slot.super_stage.is_none_or(|stage| stage == clock.super_stage)).collect();
                 slots.sort_by_key(|slot| (slot.y_sort, -slot.z_adjust));
                 for (order, slot) in slots.into_iter().enumerate() {
                     // The firing animation runs from
                     // the start of each charge.
                     // A refinery's runs while
                     // a miner's load is paid for.
-                    let since = match (slot.special, building.charge.map(|charge| charge.0).or(building.refining)) {
+                    let mut since = match (slot.special, building.charge.map(|charge| charge.0).or(building.refining)) {
                         (true, Some(began)) => began,
                         (true, None) => continue,
+                        (false, _) if slot.super_stage.is_some() => clock.super_since,
                         (false, _) => building.opened,
                     };
+                    let mut now = tick;
+                    if slot.powered {
+                        now = since + clock.online_between(since, tick);
+                    } else if slot.powered_light {
+                        if clock.offline() {
+                            continue;
+                        }
+                        since = since.max(clock.back_on());
+                    }
                     let name = if damaged { &slot.damaged } else { &slot.name };
                     let Some(anim) = view.anim_types.get(&name.to_uppercase()) else {
                         continue;
                     };
                     let count = view.art.frame_count(&files, &anim.image);
                     let images = if anim.shadow { count / 2 } else { count };
-                    let Some(frame) = anim_frame(anim, images, tick.saturating_sub(since), view.game_speed) else {
+                    let Some(frame) = anim_frame(anim, images, now.saturating_sub(since), view.game_speed) else {
+                        // Opening leads to ready, closing back to charging.
+                        if matches!(slot.super_stage, Some(1 | 3)) {
+                            clock.super_stage = (clock.super_stage + 1) % 4;
+                            clock.super_since = tick;
+                        }
                         continue;
                     };
                     with_shadow(&mut parts, &mut view.art, &files, &anim.image, frame, body_z + step * (order + 1) as f32, anim.shadow);
                 }
+                view.building_clocks.insert(building.id, clock);
                 // A voxel turret, at the draw point
                 // moved by `TurretAnimX` and `TurretAnimY`, facing in 32 steps;
                 // not while the building is going up or coming down.
@@ -1469,9 +1551,9 @@ fn show_buildings(
             let image = part_image(view, &files, &mut images, &key);
             match image {
                 Some((handle, centre)) => {
-                    let centre = anchor + centre;
+                    let centre = snapped(anchor, centre);
                     picture.image = handle;
-                    transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), *z);
+                    transform.translation = Vec3::new(centre.x, -centre.y, *z);
                     *visibility = Visibility::Inherited;
                 }
                 None => *visibility = Visibility::Hidden,
@@ -1482,8 +1564,8 @@ fn show_buildings(
             let key: PartKey = (name.clone(), *frame, palette, level, *shadow);
             let (handle, place, visibility) = match part_image(view, &files, &mut images, &key) {
                 Some((handle, centre)) => {
-                    let centre = anchor + centre;
-                    (handle, Vec3::new(centre.x.round(), -centre.y.round(), *z), Visibility::Inherited)
+                    let centre = snapped(anchor, centre);
+                    (handle, Vec3::new(centre.x, -centre.y, *z), Visibility::Inherited)
                 }
                 None => (Handle::default(), Vec3::new(anchor.x, -anchor.y, *z), Visibility::Hidden),
             };
@@ -1550,8 +1632,8 @@ fn show_bridges(mut commands: Commands, sim: Res<Sim>, files: Res<GameFiles>, mu
         for (frame, shadow, z) in [(frame + frames / 2, true, 1.0 + row * DEPTH_PER_ROW), (frame, false, 2.0 + row * DEPTH_PER_ROW)] {
             let key: PartKey = (format!("bridge:{art}"), frame, None, level + if high { 4 } else { 0 }, shadow);
             if let Some((handle, centre)) = part_image(view, &files, &mut images, &key) {
-                let centre = anchor + centre;
-                commands.spawn((DespawnOnExit(Screen::InGame), BridgeSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x.round(), -centre.y.round(), z)));
+                let centre = snapped(anchor, centre);
+                commands.spawn((DespawnOnExit(Screen::InGame), BridgeSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, z)));
             }
         }
     }
@@ -1723,8 +1805,68 @@ fn show_crates(
             Some((images.add(image), Vec2::new(drawn.offset.0 as f32, drawn.offset.1 as f32) + size / 2.0))
         });
         if let Some((handle, centre)) = picture.clone() {
-            let centre = anchor + centre;
-            commands.spawn((DespawnOnExit(Screen::InGame), CrateSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x.round(), -centre.y.round(), 2.0 + row * DEPTH_PER_ROW)));
+            let centre = snapped(anchor, centre);
+            commands.spawn((DespawnOnExit(Screen::InGame), CrateSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, 2.0 + row * DEPTH_PER_ROW)));
+        }
+    }
+}
+
+/// A Mirage's tree.
+#[derive(Component)]
+struct MirageSprite;
+
+/// Draws each Mirage that the player takes for a tree as that tree: one of
+/// `DefaultMirageDisguises`, drawn as a terrain object at its cell's middle.
+fn show_mirages(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    files: Res<GameFiles>,
+    mut view: ResMut<UnitView>,
+    mut images: ResMut<Assets<Image>>,
+    old: Query<Entity, With<MirageSprite>>,
+    mut names: Local<Option<Vec<String>>>,
+    mut shown: Local<Vec<(u32, u16, (i32, i32))>>,
+) {
+    let names = names.get_or_insert_with(|| {
+        files
+            .get("rules.ini")
+            .map(ra2_formats::ini::Ini::parse)
+            .and_then(|rules| rules.get("General", "DefaultMirageDisguises").map(|list| list.split(',').map(|name| name.trim().to_lowercase()).filter(|name| !name.is_empty()).collect()))
+            .unwrap_or_default()
+    });
+    let now: Vec<(u32, u16, (i32, i32))> = sim
+        .0
+        .units()
+        .iter()
+        .filter_map(|unit| {
+            let (look, house) = unit.disguise?;
+            let cell = unit.cell();
+            (house == ra2_sim::abilities::TREE_DISGUISE && !sim.0.shows_true_self(unit, local()) && !sim.0.map.shrouded(cell.0, cell.1)).then_some((unit.id, look, cell))
+        })
+        .collect();
+    if now == *shown {
+        return;
+    }
+    *shown = now.clone();
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    let view = &mut *view;
+    for (_, look, cell) in now {
+        let Some(name) = names.get(look as usize) else {
+            continue;
+        };
+        let level = sim.0.map.level(cell.0, cell.1) as i32;
+        let half = LEPTONS_PER_CELL / 2;
+        let anchor = scene_point(view.origin, cell.0 * LEPTONS_PER_CELL + half, cell.1 * LEPTONS_PER_CELL + half, level);
+        let row = (cell.0 + cell.1) as f32;
+        let frames = view.art.frame_count(&files, name);
+        for (frame, shadow, z) in [(frames / 2, true, 1.0 + row * DEPTH_PER_ROW), (0, false, 2.0 + (row + 0.9) * DEPTH_PER_ROW)] {
+            let key: PartKey = (format!("bridge:{name}"), frame, None, level, shadow);
+            if let Some((handle, centre)) = part_image(view, &files, &mut images, &key) {
+                let centre = snapped(anchor, centre);
+                commands.spawn((DespawnOnExit(Screen::InGame), MirageSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, z)));
+            }
         }
     }
 }
@@ -1768,12 +1910,12 @@ fn show_walls(
         ] {
             let key: PartKey = (art.clone(), frame, palette, level, shadow);
             if let Some((handle, centre)) = part_image(view, &files, &mut images, &key) {
-                let centre = anchor + centre;
+                let centre = snapped(anchor, centre);
                 commands.spawn((
                     DespawnOnExit(Screen::InGame),
                     WallSprite,
                     Sprite::from_image(handle),
-                    Transform::from_xyz(centre.x.round(), -centre.y.round(), z),
+                    Transform::from_xyz(centre.x, -centre.y, z),
                 ));
             }
         }
@@ -1782,6 +1924,12 @@ fn show_walls(
 
 /// The image of one part of a building, and where its middle goes relative to the
 /// building's draw point.
+/// Where a sprite's centre goes for its pixels to land on the screen's: a
+/// frame of odd width or height has its centre half a pixel off the grid.
+fn snapped(point: Vec2, middle: Vec2) -> Vec2 {
+    point.round() + middle
+}
+
 fn part_image(
     view: &mut UnitView,
     files: &GameFiles,
@@ -2115,8 +2263,8 @@ fn show_corpses(
             if sprite.image != *handle {
                 sprite.image = handle.clone();
             }
-            let centre = point + *middle;
-            transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), corpse.depth);
+            let centre = snapped(point, *middle);
+            transform.translation = Vec3::new(centre.x, -centre.y, corpse.depth);
         }
     }
 }
@@ -2675,8 +2823,8 @@ fn show_effects(
                 if sprite.image != *handle {
                     sprite.image = handle.clone();
                 }
-                let centre = effect.at + *middle - Vec2::new(0.0, anim.y_draw_offset as f32 * -1.0);
-                transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), effect.depth);
+                let centre = snapped(effect.at + Vec2::new(0.0, anim.y_draw_offset as f32), *middle);
+                transform.translation = Vec3::new(centre.x, -centre.y, effect.depth);
             }
             None => sprite.image = Handle::default(),
         }
@@ -2734,9 +2882,9 @@ fn show_effects(
                 sprite.image = handle.clone();
             }
             let p = position;
-            let centre = scene_point_3d(view.origin, (p.0 as i32, p.1 as i32, p.2 as i32)) + *middle;
+            let centre = snapped(scene_point_3d(view.origin, (p.0 as i32, p.1 as i32, p.2 as i32)), *middle);
             let depth = 2.0 + ((p.0 + p.1) as f32 / LEPTONS_PER_CELL as f32 + 2.0) * DEPTH_PER_ROW;
-            transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), depth);
+            transform.translation = Vec3::new(centre.x, -centre.y, depth);
         }
     }
     for &(id, weapon, ..) in &flying {

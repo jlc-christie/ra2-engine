@@ -75,6 +75,8 @@ pub(crate) enum Screen {
     InGame,
     /// Passed through on the way from one game into a loaded one.
     Loading,
+    /// The player's country's picture, shown while a skirmish loads.
+    LoadScreen,
     /// The figures after a skirmish.
     Score,
     /// The Options screen: display, game, interface and audio settings.
@@ -286,6 +288,7 @@ impl Plugin for ShellPlugin {
             Ok("game") => Screen::InGame,
             Ok("score") => Screen::Score,
             Ok("options") => Screen::Options,
+            Ok("loading") => Screen::LoadScreen,
             _ => Screen::MainMenu,
         };
         let shell = Shell::load(app.world().resource::<GameFiles>().clone());
@@ -322,6 +325,8 @@ impl Plugin for ShellPlugin {
             .add_systems(OnEnter(Screen::Skirmish), start_slide)
             .add_systems(OnEnter(Screen::ChooseMap), start_slide)
             .add_systems(OnEnter(Screen::Options), (spawn_options, start_slide))
+            .add_systems(OnEnter(Screen::LoadScreen), spawn_load_screen)
+            .add_systems(Update, leave_load_screen.run_if(in_state(Screen::LoadScreen)))
             .add_systems(
                 Update,
                 (
@@ -842,6 +847,132 @@ fn spawn_main_menu(
             ],
         );
     });
+}
+
+/// What the loading screen shows for each country, in `[Countries]` order:
+/// the picture's name, the country's name, its special unit and the line about it.
+const LOAD_SCREENS: [(&str, &str, &str, &str); 9] = [
+    ("ustates", "Name:Americans", "Name:Para", "LoadBrief:USA"),
+    ("korea", "Name:Alliance", "Name:BEAGLE", "LoadBrief:Korea"),
+    ("france", "Name:French", "Name:GTGCAN", "LoadBrief:French"),
+    ("germany", "Name:Germans", "Name:TNKD", "LoadBrief:Germans"),
+    ("ukingdom", "Name:British", "Name:SNIPE", "LoadBrief:British"),
+    ("libya", "Name:Africans", "Name:DTRUCK", "LoadBrief:Lybia"),
+    ("iraq", "Name:Arabs", "Name:DESO", "LoadBrief:Iraq"),
+    ("cuba", "Name:Confederation", "Name:TERROR", "LoadBrief:Cuba"),
+    ("russia", "Name:Russians", "Name:TTNK", "LoadBrief:Russia"),
+];
+
+/// Not original behaviour: the original shows the screen only as long as the
+/// map takes to load, which is now too quick to read it.
+const LOAD_SCREEN_SECONDS: f64 = 2.5;
+
+#[derive(Resource)]
+struct LoadScreenShown(f64);
+
+/// The loading screen: the country's picture, its name at the bottom right,
+/// its special unit, the line about that unit and "Loading..." at the left, in
+/// the side's load colour on darkened boxes.
+fn spawn_load_screen(
+    mut commands: Commands,
+    mut shell: ResMut<Shell>,
+    mut images: ResMut<Assets<Image>>,
+    setup: Res<GameSetup>,
+    time: Res<Time<Real>>,
+) {
+    let country = match setup.options.country {
+        country @ 0..=8 => country as usize,
+        _ => {
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.subsec_nanos());
+            let country = nanos as usize % LOAD_SCREENS.len();
+            commands.insert_resource(crate::game::DrawnCountry(country));
+            country
+        }
+    };
+    commands.insert_resource(LoadScreenShown(time.elapsed_secs_f64()));
+    let (picture_name, name, unit, brief) = LOAD_SCREENS[country];
+    let rules = shell.files.get("rules.ini").map(Ini::parse);
+    let scheme = if country < 5 { "AlliedLoad" } else { "SovietLoad" };
+    let hsv = rules.as_ref().and_then(|rules| rules.get("Colors", scheme)).and_then(|value| {
+        let parts: Vec<u8> = value.split(',').filter_map(|part| part.split(';').next()?.trim().parse().ok()).collect();
+        <[u8; 3]>::try_from(parts.get(..3)?).ok()
+    });
+    let colour = crate::colors::hsv_to_rgb(hsv.unwrap_or([164, 255, 255]));
+    let mut painter = Painter { shell: &mut shell, images: &mut images };
+    let line_height = painter.shell.font.height as f32;
+    let darken = |p: &mut ChildSpawnerCommands, x: f32, y: f32, width: f32, height: f32| {
+        p.spawn((place(x - 4.0, y - 4.0, width + 8.0, height + 8.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
+    };
+    commands
+        .spawn((
+            DespawnOnExit(Screen::LoadScreen),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+        ))
+        .with_children(|outer| {
+            outer
+                .spawn(Node { width: Val::Px(SCREEN.x), height: Val::Px(SCREEN.y), flex_shrink: 0.0, overflow: Overflow::clip(), ..default() })
+                .with_children(|p| {
+                    let back = painter.shell.shp(painter.images, &format!("ls800{picture_name}.shp"), "mpls.pal", 0);
+                    p.spawn(picture(&back, 0.0, 0.0));
+
+                    let name = painter.shell.string(name);
+                    let width = painter.shell.font.width(&name) as f32;
+                    darken(p, 533.0 + 200.0 - width, 545.0, width, line_height);
+                    let pic = painter.shell.text(painter.images, &name, colour);
+                    p.spawn(picture(&pic, 533.0 + 200.0 - pic.size.x, 545.0));
+
+                    let unit = painter.shell.string(unit).to_uppercase();
+                    let pic = painter.shell.text(painter.images, &unit, colour);
+                    p.spawn(picture(&pic, 20.0, 90.0));
+
+                    let brief = painter.shell.string(brief);
+                    let lines = wrap(&painter.shell.font, &brief, 398);
+                    darken(p, 20.0, 158.0, 398.0, line_height * lines.len() as f32);
+                    for (row, line) in lines.iter().enumerate() {
+                        let pic = painter.shell.text(painter.images, line, colour);
+                        p.spawn(picture(&pic, 20.0, 158.0 + line_height * row as f32));
+                    }
+
+                    let loading = painter.shell.string("GUI:LoadingEx");
+                    let pic = painter.shell.text(painter.images, &loading, colour);
+                    darken(p, 20.0, 300.0, pic.size.x, line_height);
+                    p.spawn(picture(&pic, 20.0, 300.0));
+                });
+        });
+}
+
+/// Breaks text into lines no wider than `width`, at spaces and at the
+/// strings' own " \n " breaks.
+fn wrap(font: &Font, text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+            if !line.is_empty() && font.width(&candidate) > width {
+                lines.push(std::mem::replace(&mut line, word.to_owned()));
+            } else {
+                line = candidate;
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+fn leave_load_screen(shown: Option<Res<LoadScreenShown>>, time: Res<Time<Real>>, mut next_screen: ResMut<NextState<Screen>>) {
+    if shown.is_none_or(|shown| time.elapsed_secs_f64() - shown.0 >= LOAD_SCREEN_SECONDS) {
+        next_screen.set(Screen::InGame);
+    }
 }
 
 /// The score screen after a skirmish.
@@ -2194,7 +2325,7 @@ fn finish_leaving(
                     redraw.0 = true;
                     next_screen.set(Screen::Skirmish);
                 } else {
-                    next_screen.set(Screen::InGame);
+                    next_screen.set(Screen::LoadScreen);
                 }
             }
         }
@@ -2287,7 +2418,7 @@ fn on_menu_action(
                     redraw.0 = true;
                     next_screen.set(Screen::Skirmish);
                 } else {
-                    next_screen.set(Screen::InGame);
+                    next_screen.set(Screen::LoadScreen);
                 }
             }
         }

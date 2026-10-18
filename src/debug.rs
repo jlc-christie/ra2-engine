@@ -108,8 +108,9 @@ pub struct FakePointer(pub Option<Vec2>);
 /// checks. Steps are separated by `;` and run in order, each as
 /// `<when> <what>`: `<when>` is `t<tick>` (once the simulation has reached that
 /// tick) or `+<frames>` (so many frames after the step before); `<what>` is
-/// `at x,y` (put the mouse there, in window pixels), `left`, `right` (a click)
-/// or `key <KeyCode name or letter>`. Mouse steps also go to Bevy's picking,
+/// `at x,y` (put the mouse there, in window pixels), `left`, `right` (a click),
+/// `hold right` and `let right` (press and let go, for a drag) or
+/// `key <KeyCode name or letter>`. Mouse steps also go to Bevy's picking,
 /// so menu buttons can be clicked; that works only without `RA2_SHOT` (with
 /// the off-screen picture only the screen's outer nodes are hit; not looked
 /// into).
@@ -133,6 +134,8 @@ enum When {
 enum What {
     At(Vec2),
     Mouse(MouseButton),
+    Hold(MouseButton),
+    Let(MouseButton),
     Key(KeyCode),
 }
 
@@ -154,6 +157,8 @@ impl Script {
                     }
                     ("left", _) => What::Mouse(MouseButton::Left),
                     ("right", _) => What::Mouse(MouseButton::Right),
+                    ("hold", Some("right")) => What::Hold(MouseButton::Right),
+                    ("let", Some("right")) => What::Let(MouseButton::Right),
                     ("key", Some(name)) => What::Key(key_named(name)?),
                     _ => return None,
                 };
@@ -225,7 +230,7 @@ fn play_script(
                     }
                 }
                 What::Key(key) => keys.release(key),
-                What::At(_) => {}
+                What::At(_) | What::Hold(_) | What::Let(_) => {}
             }
         }
         *frames > 0
@@ -261,5 +266,7 @@ fn play_script(
             keys.press(key);
             script.held.push((what, 2));
         }
+        What::Hold(button) => buttons.press(button),
+        What::Let(button) => buttons.release(button),
     }
 }

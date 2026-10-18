@@ -86,9 +86,22 @@ impl World {
             }
             let units: Vec<u32> = self.units.iter().filter(|unit| unit.owner == house).map(|unit| unit.id).collect();
             let buildings: Vec<u32> = self.buildings.iter().filter(|b| b.owner == house).map(|b| b.id).collect();
+            // Each takes its whole health from
+            // `C4Warhead`, so it dies as anything else would, by nobody's hand.
             for aim in units.into_iter().map(Aim::Unit).chain(buildings.into_iter().map(Aim::Building)) {
-                self.score_kill(aim, None);
-                self.kill(aim);
+                let health = match aim {
+                    Aim::Unit(id) => self.unit(id).map(|unit| unit.health),
+                    Aim::Building(id) => self.buildings.iter().find(|b| b.id == id).map(|b| b.health),
+                    Aim::Cell(..) => None,
+                };
+                let Some(health) = health else {
+                    continue;
+                };
+                let died = self.ability_rules.c4_warhead.is_some_and(|warhead| self.receive_damage(aim, health.max(1), 0, warhead, None));
+                if !died && self.alive(aim) {
+                    self.score_kill(aim, None);
+                    self.kill(aim);
+                }
             }
             self.houses[house as usize].defeated = true;
             self.houses[house as usize].ai = None;

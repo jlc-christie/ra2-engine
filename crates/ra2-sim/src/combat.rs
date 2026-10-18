@@ -161,11 +161,14 @@ pub struct Weapon {
     pub ambient_damage: i32,
     /// `Spawner`: firing it sends the unit's spawns at the target.
     pub spawner: bool,
+    /// `DisguiseFakeBlinkTime`: frames a Mirage firing it shows its true self.
+    pub fake_blink: u32,
 }
 
 impl Default for Weapon {
     fn default() -> Self {
         Self {
+            fake_blink: 0,
             damage: 0,
             rof: 0,
             range: 0,
@@ -244,6 +247,9 @@ pub struct Fighter {
     /// `CanDisguise` and `PermaDisguise`.
     pub can_disguise: bool,
     pub perma_disguise: bool,
+    /// `DisguiseWhenStill`: a Mirage, which takes the look of a tree when it
+    /// stands still.
+    pub disguise_when_still: bool,
     pub ivan: bool,
     pub agent: bool,
     pub detect_disguise: bool,
@@ -298,6 +304,7 @@ impl Default for Fighter {
             aircraft: false,
             can_disguise: false,
             perma_disguise: false,
+            disguise_when_still: false,
             ivan: false,
             agent: false,
             detect_disguise: false,
@@ -1075,6 +1082,12 @@ impl World {
         arms.rearm_at = self.tick + delay as u64;
         arms.fired_at = self.tick;
         self.events.push(Event::Fired { weapon: mount.weapon, at: from, to: aim, facing: (firing >> 8) as u8, by });
+        if let Aim::Unit(id) = by {
+            let (tick, blink) = (self.tick, weapon.fake_blink as u64);
+            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id).filter(|unit| unit.stats.fighter.disguise_when_still) {
+                unit.blinks_until = tick + blink;
+            }
+        }
         true
     }
 

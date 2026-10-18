@@ -383,6 +383,13 @@ pub struct AnimSlot {
     /// One of a refinery's fill-level lights other than the first: not shown
     /// while the refinery is empty.
     pub refinery_level: usize,
+    /// `…Powered` (default yes): stops on its frame while the building is
+    /// offline. Otherwise `…PoweredLight`: gone while offline, started again
+    /// when it comes back on.
+    pub powered: bool,
+    pub powered_light: bool,
+    /// `SuperAnim` to `SuperAnimFour`: charging, opening, ready, closing.
+    pub super_stage: Option<u8>,
 }
 
 /// An animation type from art.ini.
@@ -547,6 +554,9 @@ pub struct BuildingInfo {
     pub buildup: Option<String>,
     /// art.ini `BibShape`.
     pub bib: Option<String>,
+    /// `ChargedAnimTime`: minutes before its super weapon is ready at which
+    /// the building opens up; 990 or more never.
+    pub charged_anim_time: f32,
     /// art.ini `DeployingAnim` and `UnderDoorAnim`: a factory's body and the floor
     /// under its door while a vehicle is on its way out.
     pub deploying: Option<String>,
@@ -1983,7 +1993,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             let art_number = |key: &str| art_key(key).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
             let (queueing_cell, impassable_rows) = (art_key("QueueingCell"), art_key("NumberImpassableRows"));
             let refinery = yes("Refinery");
-            let anims: Vec<AnimSlot> = ["ActiveAnim", "ActiveAnimTwo", "ActiveAnimThree", "ActiveAnimFour", "IdleAnim", "SuperAnim", "SpecialAnim"]
+            let anims: Vec<AnimSlot> = ["ActiveAnim", "ActiveAnimTwo", "ActiveAnimThree", "ActiveAnimFour", "IdleAnim", "SuperAnim", "SuperAnimTwo", "SuperAnimThree", "SuperAnimFour", "SpecialAnim"]
                 .iter()
                 .enumerate()
                 .filter_map(|(index, prefix)| {
@@ -1997,6 +2007,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         // A refinery's and a silo's `SpecialAnim` are not firing
                         // animations.
                         special: *prefix == "SpecialAnim",
+                        powered: art_key(&format!("{prefix}Powered")).is_none_or(|v| matches!(v.as_str(), "yes" | "true" | "1")),
+                        powered_light: art_key(&format!("{prefix}PoweredLight")).is_some_and(|v| matches!(v.as_str(), "yes" | "true" | "1")),
+                        super_stage: ["SuperAnim", "SuperAnimTwo", "SuperAnimThree", "SuperAnimFour"].iter().position(|p| p == prefix).map(|i| i as u8),
                     })
                 })
                 .collect();
@@ -2005,6 +2018,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             }
             BuildingInfo {
                 bib: art_key("BibShape"),
+                charged_anim_time: get("ChargedAnimTime").and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(999.0),
                 zshape_move: art_key("ZShapePointMove")
                     .and_then(|v| {
                         let mut n = v.split(',').filter_map(|n| n.split(';').next()?.trim().parse::<i32>().ok());

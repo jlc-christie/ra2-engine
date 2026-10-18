@@ -111,6 +111,9 @@ pub struct Leap {
     biter: Unit,
 }
 
+/// The house of a disguise that is a tree, not a unit.
+pub const TREE_DISGUISE: u8 = u8::MAX;
+
 #[derive(Clone, Debug)]
 pub struct Rules {
     /// `[CombatDamage] DeathWeapon`: what goes off for an exploding type with
@@ -118,6 +121,12 @@ pub struct Rules {
     pub death_weapon: Option<u16>,
     /// `AlliedDisguise` and `SovietDisguise`: unit kinds (as a unit's `kind`).
     pub disguises: [Option<u16>; 2],
+    /// How many `DefaultMirageDisguises` there are to pick from, and
+    /// `InfantryBlinkDisguiseTime`.
+    pub mirage_looks: u16,
+    pub infantry_blink: u32,
+    /// `C4Warhead`: the warhead of "absolute damage".
+    pub c4_warhead: Option<u16>,
     /// `SpyPowerBlackout` and `SpyMoneyStealPercent`.
     pub spy_blackout: u32,
     pub spy_steal: f64,
@@ -137,7 +146,7 @@ pub struct Rules {
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { death_weapon: None, disguises: [None; 2], spy_blackout: 1000, spy_steal: 0.5, build_tech: Vec::new(), prism_type: None, prism_max: 8, prism_modifier: 1.5, prism_delay: 60, ivan_damage: 400, ivan_warhead: 0, ivan_delay: 450 }
+        Self { death_weapon: None, disguises: [None; 2], mirage_looks: 0, infantry_blink: 20, c4_warhead: None, spy_blackout: 1000, spy_steal: 0.5, build_tech: Vec::new(), prism_type: None, prism_max: 8, prism_modifier: 1.5, prism_delay: 60, ivan_damage: 400, ivan_warhead: 0, ivan_delay: 450 }
     }
 }
 
@@ -309,6 +318,57 @@ impl World {
         })
     }
 
+    /// Whether one of a house's buildings that sees through disguises covers a
+    /// cell.
+    fn disguise_detected(&self, cell: (i32, i32), house: u8) -> bool {
+        // Only buildings with `DetectDisguise`
+        // mark cells, out to `DetectDisguiseRange`.
+        self.buildings.iter().any(|building| {
+            building.owner == house
+                && self.building_types.get(building.kind as usize).is_some_and(|kind| {
+                    let reach = kind.detect_disguise as i64;
+                    let (dx, dy) = ((building.cell.0 - cell.0) as i64, (building.cell.1 - cell.1) as i64);
+                    reach > 0 && dx * dx + dy * dy <= reach * reach
+                })
+        })
+    }
+
+    /// A Mirage takes the look of a tree while it stands still, and loses it
+    /// when it moves or an enemy soldier comes beside it; then it waits
+    /// `InfantryBlinkDisguiseTime` before taking it again.
+    fn run_mirages(&mut self) {
+        let (looks, blink) = (self.ability_rules.mirage_looks, self.ability_rules.infantry_blink as u64);
+        for index in 0..self.units.len() {
+            let unit = &self.units[index];
+            if !unit.stats.fighter.disguise_when_still || unit.health <= 0 {
+                continue;
+            }
+            if unit.is_moving() {
+                self.units[index].disguise = None;
+                continue;
+            }
+            let (cell, owner) = (unit.cell(), unit.owner);
+            if self.tick % 8 != 0 {
+                let enemy_beside = crate::path::DIRECTIONS.iter().any(|step| {
+                    let next = (cell.0 + step.0, cell.1 + step.1);
+                    self.units.iter().any(|other| other.stats.infantry && other.health > 0 && other.cell() == next && !self.allied(other.owner, owner))
+                });
+                if enemy_beside {
+                    let unit = &mut self.units[index];
+                    unit.disguise = None;
+                    unit.undisguised_until = self.tick + blink;
+                    continue;
+                }
+            }
+            if self.units[index].disguise.is_none() && self.tick >= self.units[index].undisguised_until && looks > 0 {
+                let look = (self.next_random() % looks as u32) as u16;
+                let unit = &mut self.units[index];
+                unit.disguise = Some((look, TREE_DISGUISE));
+                unit.disguised_at = self.tick;
+            }
+        }
+    }
+
     /// Whether a unit's disguise takes in a house.
     // Disguised; its owner no ally of the house;
     // no detector of the house's covering its cell; and the house is the one
@@ -317,6 +377,9 @@ impl World {
         let Some((_, as_house)) = unit.disguise else {
             return false;
         };
+        if as_house == TREE_DISGUISE {
+            return !self.allied(unit.owner, house) && !self.disguise_detected(unit.cell(), house);
+        }
         if self.allied(unit.owner, house) || !(as_house == house || self.allied(as_house, house)) {
             return false;
         }
@@ -338,7 +401,7 @@ impl World {
     // every 256; anyone else sees the disguise unless one of their detectors
     // covers its cell (there is no test of alliance here).
     pub fn shows_true_self(&self, unit: &Unit, house: u8) -> bool {
-        if unit.disguise.is_none() {
+        if unit.disguise.is_none() || self.tick < unit.blinks_until {
             return true;
         }
         if unit.owner == house {
@@ -874,6 +937,7 @@ impl World {
         self.run_veterancy();
         self.run_cloaks();
         self.run_crush();
+        self.run_mirages();
         // A `PermaDisguise` type starts out looking
         // like its side's ordinary soldier, of its own house.
         let disguises = self.ability_rules.disguises;

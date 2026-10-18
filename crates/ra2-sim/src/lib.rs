@@ -1365,9 +1365,15 @@ pub struct Unit {
     pub dropped_at: u64,
     /// When it came down from a parachute drop (0: never).
     pub landed_at: u64,
-    /// What an enemy takes it for: a unit type and a house.
+    /// What an enemy takes it for: a unit type and a house, or with the house
+    /// `TREE_DISGUISE`, one of `DefaultMirageDisguises`.
     pub disguise: Option<(u16, u8)>,
     pub disguised_at: u64,
+    /// A Mirage's disguise: not put on again before this tick, after an enemy
+    /// soldier came beside it; and not shown, though still worn, before this
+    /// one, after it fired.
+    pub undisguised_until: u64,
+    pub blinks_until: u64,
     /// The foundation (top cell and size) of the building it has been sent
     /// into, whose cells it may walk onto.
     enter_area: Option<((i32, i32), (i32, i32))>,
@@ -1482,6 +1488,8 @@ impl Unit {
             landed_at: 0,
             disguise: None,
             disguised_at: 0,
+            undisguised_until: 0,
+            blinks_until: 0,
             enter_area: None,
             work: Work::default(),
             arms: combat::Arms::facing(facing),
@@ -1960,7 +1968,7 @@ impl House {
         }
     }
 
-    fn queue(&self, tab: usize) -> &Vec<u16> {
+    pub fn queue(&self, tab: usize) -> &Vec<u16> {
         match tab {
             2 => &self.infantry_queue,
             4 => &self.ship_queue,
@@ -2875,7 +2883,13 @@ impl World {
         let limit = self.terms(item).and_then(|terms| terms.build_limit);
         let owned = match item {
             Item::Building(kind) => self.buildings.iter().filter(|b| b.owner == house && b.kind == kind).count(),
-            Item::Unit(kind) => self.units.iter().filter(|u| u.owner == house && u.stats.kind == kind + 1).count(),
+            Item::Unit(kind) => {
+                let tab = self.unit_slot(kind);
+                let queued = self.houses.get(house as usize).map_or(0, |h| {
+                    h.tab_slot(tab).filter(|p| p.building == kind).into_iter().count() + h.queue(tab).iter().filter(|&&k| k == kind).count()
+                });
+                self.units.iter().filter(|u| u.owner == house && u.stats.kind == kind + 1).count() + queued
+            }
         } as i32;
         // The aircraft that live on pads, together,
         // owned and being built, may not outnumber the house's pads.
