@@ -543,6 +543,9 @@ impl World {
                 if unit.curtain_until > tick || unit.frozen.is_some() || unit.chrono.is_some() || tick < unit.warp_until {
                     continue;
                 }
+                // A parasite is put out where it was.
+                self.parasite_exit(index);
+                let unit = &self.units[index];
                 let point = if unit.stats.infantry {
                     (dest.0 * LEPTONS_PER_CELL + unit.x.rem_euclid(LEPTONS_PER_CELL), dest.1 * LEPTONS_PER_CELL + unit.y.rem_euclid(LEPTONS_PER_CELL))
                 } else {
@@ -555,16 +558,6 @@ impl World {
                 unit.arms.target = None;
                 unit.warp_until = tick + WARP_WAIT;
                 unit.chrono = Some(Warp { to: point, at: tick + WARP_WAIT, sink: None });
-                // A parasite is put out where it was.
-                self.parasite_exit(index);
-                let mut moved = self.lift(index);
-                moved.dest = None;
-                moved.head_to = None;
-                moved.drop_path();
-                let back = moved.clone();
-                if !self.set_down(moved, dest) {
-                    self.set_down(back, source);
-                }
             }
         }
     }

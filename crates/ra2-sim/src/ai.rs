@@ -155,7 +155,7 @@ impl World {
         let probe = Unit::new(u32::MAX - 1, owner, cell, 0, *stats);
         let others: Vec<Other> = self.others();
         let taken = self.units.iter().any(|u| u.cell() == cell && !(u.stats.infantry && stats.infantry));
-        !taken && entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &probe, cell, None, cell, -1) == code::OK
+        !taken && entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, &probe, cell, None, cell, -1) == code::OK
     }
 
     /// Puts a new unit on a cell or the nearest free one round it.

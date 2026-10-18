@@ -240,13 +240,21 @@ impl Rock {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pose {
     pub pitch: f32,
+    /// Rolled this many radians about its length, before the pitch.
+    pub roll: f32,
     pub tilt: Option<[[f32; 3]; 3]>,
     pub rock: Option<Rock>,
 }
 
 impl Pose {
+    fn rolled(&self, v: [f32; 3]) -> [f32; 3] {
+        let (rs, rc) = self.roll.sin_cos();
+        [v[0], v[1] * rc - v[2] * rs, v[1] * rs + v[2] * rc]
+    }
+
     /// A model-space direction in view space.
     fn turn(&self, v: [f32; 3], facing: u8) -> [f32; 3] {
+        let v = self.rolled(v);
         let (ps, pc) = self.pitch.sin_cos();
         let mut v = [v[0] * pc - v[2] * ps, v[1], v[0] * ps + v[2] * pc];
         if let Some(rock) = &self.rock {
@@ -257,6 +265,7 @@ impl Pose {
 
     /// A model-space point in view space.
     pub fn place(&self, v: [f32; 3], facing: u8) -> [f32; 3] {
+        let v = self.rolled(v);
         let (ps, pc) = self.pitch.sin_cos();
         let mut v = [v[0] * pc - v[2] * ps, v[1], v[0] * ps + v[2] * pc];
         let mut lift = 0.0;
@@ -284,18 +293,6 @@ pub fn render(
     facing: u8,
     light: [u32; 3],
     frame: usize,
-    pitch: f32,
-    roll: f32,
-    tilt: Option<[[f32; 3]; 3]>,
-) -> Option<VoxelSprite> {
-    // Rolled by `roll` radians about its length, then the nose raised by
-    // `pitch` radians, before the model is turned to its facing.
-    let (pitch_sin, pitch_cos) = pitch.sin_cos();
-    let (roll_sin, roll_cos) = roll.sin_cos();
-    let to_view = |v: [f32; 3], facing: u8| {
-        let v = [v[0], v[1] * roll_cos - v[2] * roll_sin, v[1] * roll_sin + v[2] * roll_cos];
-        to_view_on([v[0] * pitch_cos - v[2] * pitch_sin, v[1], v[0] * pitch_sin + v[2] * pitch_cos], facing, tilt.as_ref())
-    };
     pose: Pose,
 ) -> Option<VoxelSprite> {
     // Every voxel as (screen x, screen y, nearness, colour).

@@ -162,15 +162,11 @@ impl World {
         at.2 - self.map.level(at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL)) as i32 * crate::combat::LEVEL_HEIGHT < 30
     }
 
-    /// The mark of an animation type, by its number.
-    pub(crate) fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
-        if let Some(mark) = self.anim_marks.get(anim as usize).copied() {
-            self.animation_mark(at, mark.scorch, mark.crater, mark.force_big, mark.size.0, mark.size.1);
     /// The mark of an animation type, by its number, made when the
     /// animation reaches its largest picture.
     // At once when that is its first picture; otherwise when the start
     // frame plus the stage reaches it.
-    fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
+    pub(crate) fn mark_of(&mut self, anim: u16, at: (i32, i32)) {
         let Some(mark) = self.anim_marks.get(anim as usize).copied() else {
             return;
         };

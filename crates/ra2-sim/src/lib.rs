@@ -393,6 +393,16 @@ impl Map {
         }
     }
 
+    /// The cell a route's corridor starts or ends at for a cell: on a deck,
+    /// the nearer end of its bridge.
+    pub fn corridor_cell(&self, cell: (i32, i32), deck: bool) -> (i32, i32) {
+        self.index(cell.0, cell.1)
+            .filter(|_| deck)
+            .map(|index| self.bridge_end[index])
+            .filter(|&end| end != 0)
+            .map_or(cell, |end| (((end - 1) as i32) % self.width, ((end - 1) as i32) / self.width))
+    }
+
     /// The zone of a cell for a movement zone, on its deck or on the ground.
     // A deck cell is in the zone
     // of its bridge's end.
@@ -446,8 +456,14 @@ impl Map {
             let Some(&first) = ends.first() else {
                 continue;
             };
+            // Each deck cell answers for the nearer of its bridge's ends.
+            let distance = |a: usize, b: usize| {
+                let (dx, dy) = ((a as i32 % width - b as i32 % width) as f64, (a as i32 / width - b as i32 / width) as f64);
+                (dx * dx + dy * dy).sqrt() as i32
+            };
             for cell in cells {
-                self.bridge_end[cell] = first as u32 + 1;
+                let nearest = ends.iter().copied().min_by_key(|&end| distance(cell, end)).unwrap_or(first);
+                self.bridge_end[cell] = nearest as u32 + 1;
             }
             if let Some(zones) = self.zones.as_mut() {
                 let cell_of = |index: usize| ((index as i32) % width, (index as i32) / width);
@@ -2696,7 +2712,7 @@ impl World {
             return false;
         };
         let others: Vec<Other> = self.others();
-        entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, unit, cell, None, unit.cell(), -1) <= code::CLOAK
+        entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, unit, cell, None, unit.cell(), -1) <= code::CLOAK
     }
 
     /// Whether a building can pack up into a vehicle.
@@ -3214,7 +3230,7 @@ impl World {
         let others: Vec<Other> = self.others();
         let free = |cell: (i32, i32)| {
             self.map.index(cell.0, cell.1).is_some()
-                && entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &probe, cell, None, cell, -1) == code::OK
+                && entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, &probe, cell, None, cell, -1) == code::OK
         };
         let special = if factory.gdi_barracks {
             Some((origin.0 + 1, origin.1 + 2))
@@ -3560,7 +3576,7 @@ impl World {
             let (here, behind, owner) = (self.units[index].cell(), (self.units[index].heading() + 4) & 7, self.units[index].owner);
             let others: Vec<Other> = self.others();
             let free = |world: &Self, passenger: &Unit, cell: (i32, i32)| {
-                entry_code(&world.map, &world.claims, (&world.spots, &world.spot_house), &others, passenger, cell, None, cell, -1) == code::OK
+                entry_code(&world.map, &world.claims, (&world.spots, &world.spot_house), &others, &world.buildings, passenger, cell, None, cell, -1) == code::OK
             };
             let way = (0..8).map(|turn| (behind + turn) & 7).find(|&dir| free(self, &passenger, step(here, dir)));
             let Some(dir) = way else {
@@ -3782,7 +3798,7 @@ impl World {
                 return false;
             }
         }
-        entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), others, unit, cell, None, cell, -1) == code::OK
+        entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), others, &self.buildings, unit, cell, None, cell, -1) == code::OK
     }
 
     /// The ore cell a miner would go for within a number of cells.
@@ -5521,10 +5537,16 @@ impl World {
         };
         let owner = self.units[index].owner;
         let enemy = |u: &Unit| u.id != id && u.cell() == cell && u.jet.is_none() && u.plane.is_none() && !self.allied(owner, u.owner);
-        let found = self.units.iter().filter(|u| enemy(u)).min_by_key(|u| u.stats.infantry).map(|u| u.id);
-        if let Some(target) = found {
+        let found = self.units.iter().filter(|u| enemy(u)).min_by_key(|u| u.stats.infantry).map(|u| combat::Aim::Unit(u.id));
+        let building = || {
+            self.buildings
+                .iter()
+                .find(|b| (b.cell.0..b.cell.0 + b.size.0).contains(&cell.0) && (b.cell.1..b.cell.1 + b.size.1).contains(&cell.1) && !self.allied(owner, b.owner))
+                .map(|b| combat::Aim::Building(b.id))
+        };
+        if let Some(target) = found.or_else(building) {
             let arms = &mut self.units[index].arms;
-            arms.target = Some(combat::Aim::Unit(target));
+            arms.target = Some(target);
             arms.attacking = true;
         }
     }
@@ -5786,6 +5808,7 @@ struct Other {
     holds: Option<(i32, i32)>,
     /// The houses its owner counts as friends, its own among them, a bit each.
     allies: u32,
+    cloaked: bool,
     /// Its type, stored speed and path, for the avoid marking of searches.
     kind: u16,
     speed: i32,
@@ -5808,6 +5831,7 @@ impl Other {
             on_bridge: unit.on_bridge,
             holds: unit.jet.and_then(|jet| jet.holds),
             allies: 1u32.checked_shl(unit.owner as u32).unwrap_or(0),
+            cloaked: unit.cloak.state == 2,
             kind: unit.stats.kind,
             speed: unit.stats.speed,
             path: unit.path,
@@ -5899,7 +5923,7 @@ impl Ground<'_> {
     }
 
     fn can_enter_at(&self, unit: &Unit, to: (i32, i32), dir: Option<usize>, from: (i32, i32), level: i32) -> u8 {
-        entry_code(self.map, self.claims, (self.spots, self.spot_house), self.others, unit, to, dir, from, level)
+        entry_code(self.map, self.claims, (self.spots, self.spot_house), self.others, self.buildings, unit, to, dir, from, level)
     }
 
     /// What a step into a cell costs the search.
@@ -6062,9 +6086,13 @@ impl Ground<'_> {
             let this = &*self;
             let who = &*unit;
             let zones = this.map.zones.as_ref();
-            let usable = zones.filter(|zones| zones.playable(here) && zones.playable(dest));
+            // On a deck, or with a bridge at the
+            // destination, the corridor runs from or to the nearer end of the
+            // bridge.
+            let (from, to) = (this.map.corridor_cell(here, who.on_bridge), this.map.corridor_cell(dest, this.map.bridged(dest.0, dest.1)));
+            let usable = zones.filter(|zones| zones.playable(from) && zones.playable(to));
             let mut barred = zones::Barred::default();
-            let mut corridor = usable.and_then(|zones| zones.corridor_barred(here, dest, zone, &barred));
+            let mut corridor = usable.and_then(|zones| zones.corridor_barred(from, to, zone, &barred));
             // How far along the bottom level's corridor the search got, and the
             // first cell it reached there.
             let progress = std::cell::Cell::new((0usize, here));
@@ -6105,6 +6133,8 @@ impl Ground<'_> {
             // that fails bars links at the subzones where it got furthest and a
             // new corridor is picked, up to five tries in all; once the corridor
             // cannot be used, one search without it is final.
+            // The cell entered is judged at its own
+            // level, so a step that only the height rule refuses counts as open.
             let blocked = |to: (i32, i32), dir: usize, from: (i32, i32)| this.can_enter_at(who, to, Some(dir), from, this.map.level(to.0, to.1) as i32) != code::OK;
             let mut tries = 0;
             let found = loop {
@@ -6117,18 +6147,18 @@ impl Ground<'_> {
                 }
                 tries += 1;
                 let still = zones.bar_after_failure(confined, progress.get().1, zone, &blocked, &mut barred);
-                // Not original behaviour: where the engine gives up (five
-                // failures, or no corridor left) one search without a corridor
-                // is made. Our subzones join some cells by cliffs that cannot
-                // reach each other (Isle of War: (108, 90) to (108, 93) fails
-                // inside the destination's own subzone), so a route kept to
-                // them can fail where the engine's does not.
-                if tries >= 5 || !still {
+                // After five failures, or with no corridor left to
+                // pick, it gives up; once the corridor can no longer be used,
+                // one search without it is final.
+                if tries >= 5 {
+                    break None;
+                }
+                if !still {
                     break run(None);
                 }
-                corridor = zones.corridor_barred(here, dest, zone, &barred);
+                corridor = zones.corridor_barred(from, to, zone, &barred);
                 if corridor.is_none() {
-                    break run(None);
+                    break None;
                 }
             };
             found
@@ -6182,6 +6212,7 @@ map: &Map,
 claims: &[u32],
 spots: (&[u8], &[u8]),
 others: &[Other],
+buildings: &[Building],
 unit: &Unit,
 to: (i32, i32),
 dir: Option<usize>,
@@ -6248,15 +6279,18 @@ level: i32,
     if let Some(other) = holder(map, claims, others, to, unit.id, deck) {
         if unit.boarding == Some(other.id) && unit.stats.infantry {
             // Its own transport: the soldier walks on to a spot of the cell.
+        } else if !friend_of(others, unit, other.owner) && other.cloaked {
+            // A cloaked enemy is a cell the mover does not know is taken.
+            result = code::CLOAK;
         } else if !friend_of(others, unit, other.owner) {
             // To a vehicle an
             // enemy is something to crush (no code) if it is a `Crusher`
             // and the enemy `Crushable`; else something to shoot through if
-            // it is armed; else closed.
-            if unit.stats.infantry || unit.stats.fighter.primary.is_none() {
+            // it is armed; else closed. The same for an armed soldier.
+            if unit.stats.fighter.primary.is_none() {
                 return code::NO;
             }
-            if !(unit.stats.crusher && other.crushable) {
+            if unit.stats.infantry || !(unit.stats.crusher && other.crushable) {
                 result = code::DESTROYABLE;
             }
         } else {
@@ -6271,6 +6305,15 @@ level: i32,
             }
             result = if other.moving { code::MOVING_BLOCK } else { code::TEMP };
         }
+    }
+    // An enemy building is something an armed
+    // vehicle can shoot its way through; anyone else's is closed.
+    if !deck && map.index(to.0, to.1).is_some_and(|index| map.obstacle[index] == Obstacle::Building as u8 && !map.passable[index]) {
+        let owner = buildings.iter().find(|b| (b.cell.0..b.cell.0 + b.size.0).contains(&to.0) && (b.cell.1..b.cell.1 + b.size.1).contains(&to.1)).map(|b| b.owner);
+        return match owner {
+            Some(owner) if !friend_of(others, unit, owner) && unit.stats.fighter.primary.is_some() => result.max(code::DESTROYABLE),
+            _ => code::NO,
+        };
     }
     if map.speed_on(to.0, to.1, unit.stats.speed_type, deck) == 0 {
         return code::NO;
@@ -6294,9 +6337,10 @@ level: i32,
     if !friend_of(others, unit, spots.1[index]) {
         // To a `Crusher`
         // vehicle a cell of enemy soldiers that can all be crushed is open; to
-        // another armed one they are something to shoot through.
+        // another armed one, or an armed soldier, they are something to
+        // shoot through.
         if unit.stats.infantry {
-            return code::NO;
+            return if unit.stats.fighter.primary.is_some() { result.max(code::DESTROYABLE) } else { code::NO };
         }
         let crushes = unit.stats.crusher && others.iter().filter(|other| other.infantry && other.cell == to).all(|other| other.crushable);
         return if crushes {
@@ -6790,6 +6834,8 @@ fn next_hop(unit: &mut Unit, ground: &mut Ground, first: bool) {
             }
         }
         _ if first => retry(unit, ground),
+        // An enemy in the way with no way round it: attack it, and wait.
+        code::DESTROYABLE => ground.attack.push((unit.id, next)),
         _ => {}
     }
 }
@@ -7010,7 +7056,7 @@ fn follow_track(unit: &mut Unit, ground: &mut Ground) {
     // With the first point the unit lets go of the
     // cell it is leaving, and is no longer counted as blocked.
     if drive.index == 0 {
-        if drive.from != drive.head {
+        if drive.from != drive.head && ground.tracks.is_some() {
             ground.release(drive.from, unit.id);
         }
         if unit.tethered {
@@ -7019,7 +7065,13 @@ fn follow_track(unit: &mut Unit, ground: &mut Ground) {
         unit.blocked_until = None;
     }
     let Some(tracks) = ground.tracks else {
+        // Not original behaviour: without the engine's tracks the unit goes
+        // straight from cell to cell, and keeps the cell it leaves until it is
+        // out of it.
         step_straight(unit, drive);
+        if drive.from != drive.head && unit.cell() != drive.from {
+            ground.release(drive.from, unit.id);
+        }
         return;
     };
     let entry = tracks.selector[drive.selector];
@@ -7072,6 +7124,12 @@ fn step_straight(unit: &mut Unit, mut drive: Drive) {
     let point = if dx != 0 && dy != 0 { DIAGONAL_POINT } else { STRAIGHT_POINT };
     unit.x += dx.clamp(-point, point);
     unit.y += dy.clamp(-point, point);
+    // A diagonal step passes through the corner the four cells share, which
+    // counts as the cell below and right; it is stepped over.
+    if unit.x & 255 == 0 && unit.y & 255 == 0 && (unit.x, unit.y) != (tx, ty) {
+        unit.x += (tx - unit.x).signum();
+        unit.y += (ty - unit.y).signum();
+    }
     drive.index += 1;
     unit.drive = if (unit.x, unit.y) == (tx, ty) { None } else { Some(drive) };
 }
@@ -7316,17 +7374,12 @@ mod tests {
     #[test]
     fn two_units_never_share_a_cell() {
         // Head-on along a corridor one cell wide, with one passing place.
+        for tracks in [None, engine_tracks()] {
         let mut map = Map::new(20, 5);
         for x in 0..20 {
             map.set_cell(x, 2, true, 0);
         }
         map.set_cell(10, 1, true, 0);
-        // Needs the engine's drive tracks (from the game's own files).
-        let Some(tracks) = engine_tracks() else {
-            eprintln!("game.exe not found; skipping");
-            return;
-        };
-        let tracks = Some(tracks);
         let mut world = World::new(map, tracks);
         let a = world.add_unit((2, 2), 64, UnitStats { speed: 6, ..UnitStats::default() }, 0);
         let b = world.add_unit((17, 2), 192, UnitStats { speed: 6, ..UnitStats::default() }, 0);
@@ -7339,16 +7392,12 @@ mod tests {
         // B pulls into the passing place; A gets through to where B started.
         assert_eq!(world.unit(b).unwrap().cell(), (10, 1));
         assert_eq!(world.unit(a).unwrap().cell(), (17, 2));
+        }
     }
 
     #[test]
     fn a_blocked_unit_paths_round_a_parked_one() {
-        // Needs the engine's drive tracks (from the game's own files).
-        let Some(tracks) = engine_tracks() else {
-            eprintln!("game.exe not found; skipping");
-            return;
-        };
-        let tracks = Some(tracks);
+        for tracks in [None, engine_tracks()] {
         let mut world = World::new(open_field(12), tracks);
         let mover = world.add_unit((1, 5), 64, UnitStats { speed: 6, ..UnitStats::default() }, 0);
         let parked = world.add_unit((5, 5), 0, UnitStats::default(), 0);
@@ -7359,6 +7408,7 @@ mod tests {
         }
         assert_eq!(world.unit(mover).unwrap().cell(), (10, 5));
         assert_eq!(world.unit(parked).unwrap().cell(), (5, 5));
+        }
     }
 
     #[test]

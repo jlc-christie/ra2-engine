@@ -627,7 +627,7 @@ impl World {
     /// Puts something that was off the map on a cell, if the cell will have it.
     pub(crate) fn set_down(&mut self, mut unit: Unit, cell: (i32, i32)) -> bool {
         let others: Vec<Other> = self.others();
-        let free = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &unit, cell, None, cell, -1) == code::OK;
+        let free = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, &unit, cell, None, cell, -1) == code::OK;
         let Some(at) = self.map.index(cell.0, cell.1).filter(|_| free) else {
             return false;
         };
@@ -1074,7 +1074,7 @@ impl World {
         let mut out = Vec::new();
         for mut rider in riders {
             let others: Vec<Other> = self.others();
-            let free = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &rider, cell, None, cell, -1) == code::OK;
+            let free = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, &rider, cell, None, cell, -1) == code::OK;
             let Some(at) = self.map.index(cell.0, cell.1).filter(|_| free) else {
                 continue;
             };

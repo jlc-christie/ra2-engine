@@ -1345,7 +1345,7 @@ impl World {
         let start = (toward + 3) & 7;
         let others = self.others();
         let open = |cell: (i32, i32)| {
-            self.map.in_playfield(cell.0, cell.1) && crate::entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, unit, cell, None, cell, -1) == crate::path::code::OK
+            self.map.in_playfield(cell.0, cell.1) && crate::entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, unit, cell, None, cell, -1) == crate::path::code::OK
         };
         for r in min..max {
             let mut at = (to.0 + DIRECTIONS[start].0 * r, to.1 + DIRECTIONS[start].1 * r);

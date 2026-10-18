@@ -1693,7 +1693,7 @@ impl World {
             return;
         }
         let others: Vec<Other> = self.others();
-        let open = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, unit, wanted, None, wanted, -1) == code::OK;
+        let open = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, unit, wanted, None, wanted, -1) == code::OK;
         let cell = if open { Some(wanted) } else { nearby(&self.map, &self.claims, &self.spots, unit, wanted, crate::Near::new(false, true, Some(wanted)), self.tick) };
         let Some(cell) = cell.filter(|&cell| cell != unit.cell()) else {
             return;
@@ -1835,7 +1835,7 @@ impl World {
             .collect();
         let others: Vec<Other> = self.others();
         let free = |world: &Self, who: &Unit, cell: (i32, i32)| {
-            entry_code(&world.map, &world.claims, (&world.spots, &world.spot_house), &others, who, cell, None, cell, -1) == code::OK
+            entry_code(&world.map, &world.claims, (&world.spots, &world.spot_house), &others, &world.buildings, who, cell, None, cell, -1) == code::OK
         };
         let Some(exit) = order.iter().copied().find(|&cell| free(self, &occupants[0], cell)) else {
             return;
@@ -2441,7 +2441,7 @@ impl World {
                     continue;
                 }
                 let clear = cell == unit.cell()
-                    || entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, unit, cell, None, cell, -1) == code::OK;
+                    || entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, unit, cell, None, cell, -1) == code::OK;
                 let reachable = self.map.zones().is_none_or(|zones| {
                     let zone = unit.stats.movement_zone as usize;
                     let _ = zones;
@@ -2467,7 +2467,7 @@ impl World {
                         continue;
                     }
                     let zone = unit.stats.movement_zone as usize;
-                    let free = round == unit.cell() || entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, unit, round, None, round, -1) == code::OK;
+                    let free = round == unit.cell() || entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, unit, round, None, round, -1) == code::OK;
                     if free && self.map.zone_on(round, zone, self.map.deck(round.0, round.1)) == self.map.zone_on(unit.cell(), zone, unit.on_bridge) {
                         if round != unit.cell() {
                             self.send(index, round);

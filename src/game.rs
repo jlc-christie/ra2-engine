@@ -594,11 +594,12 @@ pub(crate) fn load_map(
         if let Some(animated) = animated {
             spawned.insert(animated);
         }
+        if let Some(depth) = placement.depth.clone() {
+            spawned.insert(depth);
+        }
         if let Some(rule) = placement.light {
             let level = built_levels.get(&placement.light_cell).copied().unwrap_or(0);
             spawned.insert(crate::lighting::Lit { cell: placement.light_cell, level, rule });
-        if let Some(depth) = placement.depth.clone() {
-            spawned.insert(depth);
         }
     }
 

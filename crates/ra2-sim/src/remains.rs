@@ -363,12 +363,6 @@ impl World {
         (unit.x, unit.y, self.ground_z(unit.x, unit.y) + self.altitude(unit) + deck)
     }
 
-    /// Destroys a unit, as if shot, for tests.
-    #[doc(hidden)]
-    pub fn kill_unit_for_tests(&mut self, unit: u32) {
-        self.kill(Aim::Unit(unit));
-    }
-
     pub fn debris(&self) -> &[Debris] {
         &self.wreckage.debris
     }
@@ -443,7 +437,7 @@ impl World {
         let mut unit = Unit::new(id, owner, cell, 0, stats);
         unit.facing = 0;
         let others: Vec<Other> = self.others();
-        if entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &unit, cell, None, cell, -1) != code::OK {
+        if entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, &unit, cell, None, cell, -1) != code::OK {
             return None;
         }
         let at = self.map.index(cell.0, cell.1)?;
@@ -674,7 +668,7 @@ impl World {
     /// one it can stand on; it is lost if there is none.
     fn release_parasite(&mut self, biter: Unit, cell: (i32, i32)) {
         let others: Vec<Other> = self.others();
-        let open = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &biter, cell, None, cell, -1) == code::OK;
+        let open = entry_code(&self.map, &self.claims, (&self.spots, &self.spot_house), &others, &self.buildings, &biter, cell, None, cell, -1) == code::OK;
         let spot = if open { Some(cell) } else { crate::nearby(&self.map, &self.claims, &self.spots, &biter, cell, crate::Near::new(false, true, Some(cell)), self.tick) };
         if let Some(spot) = spot {
             self.set_down(biter, spot);

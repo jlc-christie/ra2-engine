@@ -136,16 +136,9 @@ pub(crate) struct UnitView {
     /// Vehicles rocking from a blast.
     rocks: HashMap<u32, Rocking>,
     walk_tick: u64,
-    /// Unit pictures with the pixels the ground hides taken out, by picture and
-    /// place.
-    masked: HashMap<(bevy::asset::AssetId<Image>, i32, i32), Handle<Image>>,
     /// Shadows, by picture, with where each one's middle lies from the draw
     /// point.
     shadow_images: HashMap<ShadowKey, Option<(Handle<Image>, Vec2)>>,
-    /// Where each building type's body art lies from its draw point, and its size.
-    body_boxes: HashMap<u16, Option<((i32, i32), u32, u32)>>,
-    /// Shadows of flyers, by model and direction.
-    shadow_images: HashMap<(String, u8), Option<(Handle<Image>, Vec2)>>,
     /// Pictures of one-off animations and of shots, by art and frame.
     effect_images: HashMap<(String, usize), Option<(Handle<Image>, Vec2)>>,
     ore_shown: Option<u64>,
@@ -169,7 +162,7 @@ pub(crate) struct UnitView {
     /// Drawn images by model, direction (0 to 31), palette and height level.
     images: HashMap<(String, u8, Option<u8>, Option<usize>, i32), Option<UnitImage>>,
     /// Vehicles being rocked, by unit id, and the tick they were last stepped.
-    rocks: HashMap<u32, Rock>,
+    drone_rocks: HashMap<u32, Rock>,
     rock_tick: u64,
 }
 
@@ -375,9 +368,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_radiation)
-                (auto_build, announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, show_radiation, show_debris, show_sinking, show_sparks)
-                (auto_build, announce, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_corpses, light_world, light_units, crate::lighting::apply)
+                (auto_build, announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>),
@@ -827,9 +818,8 @@ pub fn setup(
         ore_art,
         shadow_images: HashMap::new(),
         rocks: HashMap::new(),
-        masked: HashMap::new(),
         walk_counters: HashMap::new(),
-        rocks: HashMap::new(),
+        drone_rocks: HashMap::new(),
         rock_tick: 0,
         ramps: HashMap::new(),
         walk_tick: 0,
@@ -933,148 +923,13 @@ fn show_units(
     files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
-    mut sprites: Query<(Entity, &UnitSprite, &mut Sprite, &mut Transform), Without<UnitShadow>>,
+    mut sprites: Query<(Entity, &UnitSprite, &mut Sprite, &mut Transform, Option<&mut Depth>), Without<UnitShadow>>,
     mut shadows: Query<(Entity, &UnitShadow, &mut Sprite, &mut Transform, &mut Visibility), Without<UnitSprite>>,
 ) {
     let view = &mut *view;
     // The shadow each unit casts this frame: picture, where its draw point is,
     // and its depth.
     let mut cast: HashMap<u32, (ShadowKey, Vec2, f32)> = HashMap::new();
-    // Where each building stands in depth, for putting units in front of it or
-    // behind it.
-    // Against a
-    // building's body, a unit whose picture ends at row yu is in front where
-    // yu > 0.75 (yb + 10.7 − NormalZAdjust + a) + 0.25 ya − |x − xa| / 4, with yb
-    // the body's last row, (xa, ya) the building's anchor in the depth shape and a
-    // the unit's own adjust: −1, −3 for one leaving its factory, −14 for a miner
-    // on a refinery.
-    struct Standing {
-        x: (f32, f32),
-        y: (f32, f32),
-        anchor: Vec2,
-        last_row: f32,
-        adjust: f32,
-        depth: f32,
-        refinery: bool,
-        cell: (i32, i32),
-        size: (i32, i32),
-    }
-    let standing: Vec<Standing> = sim
-        .0
-        .buildings()
-        .iter()
-        .filter_map(|building| {
-            let art = view.building_art.get(building.kind as usize)?;
-            let level = sim.0.map.level(building.cell.0, building.cell.1) as i32;
-            let point = scene_point(view.origin, building.cell.0 * LEPTONS_PER_CELL, building.cell.1 * LEPTONS_PER_CELL, level);
-            let (w, h) = (building.size.0 as f32, building.size.1 as f32);
-            let art_cache = &mut view.art;
-            let body = (*view.body_boxes.entry(building.kind).or_insert_with(|| {
-                art_cache.building(&files, &art.art, 0, None, level, false).map(|body| (body.offset, body.width, body.height))
-            }))?;
-            struct Box2 {
-                offset: (i32, i32),
-                width: u32,
-                height: u32,
-            }
-            let body = Box2 { offset: body.0, width: body.1, height: body.2 };
-            let last_row = point.y + (body.offset.1 + body.height as i32) as f32;
-            let row = building_row(building);
-            Some(Standing {
-                x: (point.x + (body.offset.0 as f32).min(-30.0 * h), point.x + ((body.offset.0 + body.width as i32) as f32).max(30.0 * w)),
-                y: (point.y + body.offset.1 as f32, last_row.max(point.y + 15.0 * (w + h))),
-                anchor: point + Vec2::new(30.0 * (w - h) - art.zshape_move.0 as f32, 15.0 * (w + h - 2.0) - art.zshape_move.1 as f32),
-                last_row,
-                adjust: art.normal_z_adjust as f32,
-                depth: 2.0 + row * DEPTH_PER_ROW,
-                refinery: sim.0.building_types.get(building.kind as usize).is_some_and(|kind| kind.refinery),
-                cell: building.cell,
-                size: building.size,
-            })
-        })
-        .collect();
-    let among = |x: f32, top: f32, bottom: f32, unit: &ra2_sim::Unit, mut depth: f32| -> f32 {
-        let cell = unit.cell();
-        for building in &standing {
-            if x < building.x.0 || x > building.x.1 || bottom < building.y.0 || top > building.y.1 {
-                continue;
-            }
-            let on_it = (building.cell.0..building.cell.0 + building.size.0).contains(&cell.0)
-                && (building.cell.1..building.cell.1 + building.size.1).contains(&cell.1);
-            let a = if unit.stats.infantry {
-                -12.0
-            } else if unit.tethered {
-                -3.0
-            } else if unit.stats.harvester && building.refinery && on_it {
-                -14.0
-            } else {
-                -1.0
-            };
-            let line = 0.75 * (building.last_row + 10.7 - building.adjust + a) + 0.25 * building.anchor.y - (x - building.anchor.x).abs() / 4.0;
-            let step = DEPTH_PER_ROW / 40.0;
-            if bottom > line {
-                depth = depth.max(building.depth + step * 36.0);
-            } else {
-                depth = depth.min(building.depth - step / 2.0);
-            }
-        }
-        depth
-    };
-    mut sprites: Query<(Entity, &UnitSprite, &mut Sprite, &mut Transform, Option<&mut Depth>), Without<FlyerShadow>>,
-    mut shadows: Query<(Entity, &FlyerShadow, &mut Sprite, &mut Transform), Without<UnitSprite>>,
-) {
-    let view = &mut *view;
-    // What flies
-    // casts a shadow on the ground straight under it.
-    let mut shadowed: Vec<u32> = Vec::new();
-    for (entity, shadow, mut sprite, mut transform) in &mut shadows {
-        let Some(unit) = sim.0.unit(shadow.0).filter(|unit| sim.0.altitude(unit) > 0) else {
-            commands.entity(entity).despawn();
-            continue;
-        };
-        shadowed.push(unit.id);
-        let cell = unit.cell();
-        let level = sim.0.map.level(cell.0, cell.1) as i32;
-        let direction = (((unit.facing >> 2) + 1) >> 1) & 31;
-        let kind = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k));
-        let (Some(kind), Some((model, _))) = (kind, view.looks.get(&unit.id)) else {
-            continue;
-        };
-        let key = (model.clone(), if unit.stats.infantry { 0 } else { direction });
-        let art = &mut view.art;
-        let half = kind.considered_aircraft;
-        let image = view.shadow_images.entry(key).or_insert_with_key(|key| {
-            let (width, height, rgba, middle) = if unit.stats.infantry {
-                let drawn = art.soldier_shadow(&files)?;
-                let middle = Vec2::new(drawn.offset.0 as f32 + drawn.width as f32 / 2.0, drawn.offset.1 as f32 + drawn.height as f32 / 2.0);
-                (drawn.width, drawn.height, drawn.rgba, middle)
-            } else {
-                let drawn = art.flyer_shadow(&files, &key.0, key.1 << 3, half)?;
-                let middle = Vec2::new(drawn.width as f32 / 2.0 - drawn.origin.0 as f32, drawn.height as f32 / 2.0 - drawn.origin.1 as f32);
-                (drawn.width, drawn.height, drawn.rgba, middle)
-            };
-            let image = Image::new(
-                Extent3d { width, height, depth_or_array_layers: 1 },
-                TextureDimension::D2,
-                rgba,
-                TextureFormat::Rgba8UnormSrgb,
-                RenderAssetUsages::RENDER_WORLD,
-            );
-            Some((images.add(image), middle))
-        });
-        if let Some((handle, middle)) = image {
-            if sprite.image != *handle {
-                sprite.image = handle.clone();
-            }
-            let centre = scene_point(view.origin, unit.x, unit.y, level) + *middle - slope_up(&sim.0, unit);
-            transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW);
-        }
-    }
-    for unit in sim.0.units() {
-        if sim.0.altitude(unit) > 0 && !shadowed.contains(&unit.id) {
-            commands.spawn((DespawnOnExit(Screen::InGame), FlyerShadow(unit.id), Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
-        }
-    }
     // A vehicle that has appeared since the start (a building packing up).
     let tick = sim.0.current_tick();
     if tick != view.walk_tick {
@@ -1287,16 +1142,6 @@ fn show_units(
                 };
                 cast.insert(unit.id, (key, point, 1.0 + (row + 0.95) * DEPTH_PER_ROW));
             }
-            // A soldier on the ground is
-            // tested against the ground's depth with an adjustment of -10, its
-            // own (-1 less the pixels of its height) and -2.
-            let shown = match terrain_depth.as_ref().filter(|_| up.y == 0.0) {
-                Some(ground) => behind_ground(ground, &mut view.masked, &mut images, handle, centre, level, -13 - 15 * level),
-                None => handle.clone(),
-            };
-            if sprite.image != shown {
-                sprite.image = shown;
-            let centre = scene_point(view.origin, unit.x, unit.y, level) + *middle - up - slope_up(&sim.0, unit);
             // A soldier is tested against the depth
             // with an adjustment of -10, -2 and, on the ground, his own -1; all
             // less the pixels of his height.
@@ -1359,16 +1204,6 @@ fn show_units(
                 let frames = view.art.frame_count(&files, model);
                 cast.insert(unit.id, ((format!("shp:{model}:{}", frame + frames / 2), 0), point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
             }
-            let shown = match terrain_depth.as_ref() {
-                Some(ground) => behind_ground(ground, &mut view.masked, &mut images, handle, centre, level, -3 - 15 * level),
-                None => handle.clone(),
-            };
-            if sprite.image != shown {
-                sprite.image = shown;
-            }
-            let depth = 2.0 + ((cell.0 + cell.1) as f32 + 0.9) * DEPTH_PER_ROW;
-            transform.translation = Vec3::new(centre.x, -centre.y, among(centre.x, centre.y - 24.0, centre.y + 24.0, unit, depth));
-            let centre = scene_point(view.origin, unit.x, unit.y, level) + *middle - slope_up(&sim.0, unit);
             // Its own adjustment and -2.
             let height = 15 * level + slope_up(&sim.0, unit).y as i32;
             set_depth(&mut commands, entity, depth, Depth::Upright { adjust: ground_adjust(&sim.0, unit) - 2 - height, write: false });
@@ -1376,7 +1211,7 @@ fn show_units(
                 sprite.image = handle.clone();
             }
             let depth = 2.0 + ((cell.0 + cell.1) as f32 + 0.9) * DEPTH_PER_ROW;
-            transform.translation = Vec3::new(centre.x.round(), -centre.y.round(), depth);
+            transform.translation = Vec3::new(centre.x, -centre.y, depth);
             continue;
         }
         // A miner emptying itself is drawn as its
@@ -1430,7 +1265,7 @@ fn show_units(
                 let base = tipped.as_ref().unwrap_or(model);
                 let (half_width, half_length) = view.art.half_extents(&files, model.split_once('@').map_or(model.as_str(), |(name, _)| name));
                 let hundredths = |angle: f32| (angle * 100.0).round() as i32 * 10;
-                Some(format!("{base}@k{}_{}_{half_width}_{half_length}", hundredths(rocking.roll), hundredths(rocking.pitch)))
+                Some(format!("{base}@w{}_{}_{half_width}_{half_length}", hundredths(rocking.roll), hundredths(rocking.pitch)))
             }
             None => tipped,
         };
@@ -1438,7 +1273,7 @@ fn show_units(
         let direction = (((unit.facing >> 2) + 1) >> 1) & 31;
         // A rocking vehicle is drawn rolled and pitched
         // about its own axes.
-        let rocked = view.rocks.get(&unit.id).and_then(|rock| rock.mark(direction << 3)).map(|mark| format!("{model}{mark}"));
+        let rocked = view.drone_rocks.get(&unit.id).and_then(|rock| rock.mark(direction << 3)).map(|mark| format!("{model}{mark}"));
         let model = rocked.as_ref().unwrap_or(model);
         // The turret's facing in 32 steps.
         let charge_turrets = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map_or(0, |kind| kind.charge_turrets);
@@ -1452,7 +1287,7 @@ fn show_units(
         let key = (if frame == 0 { model.clone() } else { format!("{model}#{frame}") }, direction, turret.map(|t| t.0 + 32 * which), *palette, level);
         // Rocked pictures are let go now and then.
         if view.images.len() > 2000 {
-            view.images.retain(|key, _| !key.0.contains("@k"));
+            view.images.retain(|key, _| !key.0.contains("@w"));
         }
         let image = view.images.entry(key).or_insert_with(|| {
             let drawn = view.art.vehicle(&files, model, direction << 3, turret.map(|(dir, offset)| (dir << 3, offset, which)), *palette, level)?;
@@ -1564,26 +1399,6 @@ fn show_units(
     }
 }
 
-/// The picture to show for a unit on the ground at a place: its own, or a copy
-/// with the pixels the ground hides taken out.
-// See `crate::depth`.
-#[allow(clippy::too_many_arguments)]
-fn behind_ground(
-    depth: &crate::depth::TerrainDepth,
-    masked: &mut HashMap<(bevy::asset::AssetId<Image>, i32, i32), Handle<Image>>,
-    images: &mut Assets<Image>,
-    handle: &Handle<Image>,
-    centre: Vec2,
-    level: i32,
-    adjust: i32,
-) -> Handle<Image> {
-    let Some((width, height)) = images.get(handle).map(|image| (image.width() as i32, image.height() as i32)) else {
-        return handle.clone();
-    };
-    let corner = (centre - Vec2::new(width as f32, height as f32) / 2.0).round().as_ivec2();
-    let bottom = corner.y + height - 1;
-    let Some(mask) = depth.hidden(corner.x, corner.y, width, height, level, |row| crate::depth::upright(bottom, adjust, row)) else {
-        return handle.clone();
 /// A unit's own depth adjustment on the ground: -3 while it leaves its
 /// factory, -14 for a miner on a refinery, otherwise -1.
 fn ground_adjust(sim: &World, unit: &ra2_sim::Unit) -> i32 {
@@ -2041,11 +1856,10 @@ fn show_bridges(mut commands: Commands, sim: Res<Sim>, files: Res<GameFiles>, mu
             if let Some((handle, centre)) = part_image(view, &files, &mut images, &key) {
                 let centre = snapped(anchor, centre);
                 let mut spawned = commands.spawn((DespawnOnExit(Screen::InGame), BridgeSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, z)));
-                // A high bridge is lit as four levels up.
-                if !shadow {
-                    spawned.insert(Lit { cell, level, rule: LightRule::Ground { raise: if high { 4 } else { 0 } } });
                 if !shadow {
                     spawned.insert(deck.clone());
+                    // A high bridge is lit as four levels up.
+                    spawned.insert(Lit { cell, level, rule: LightRule::Ground { raise: if high { 4 } else { 0 } } });
                 }
             }
         }
@@ -2332,11 +2146,10 @@ fn show_walls(
                     Sprite::from_image(handle),
                     Transform::from_xyz(centre.x, -centre.y, z),
                 ));
-                if !shadow {
-                    spawned.insert(Lit { cell, level, rule: LightRule::Object { extra: 0 } });
                 // A wall is an overlay drawn with the ground, flat by default.
                 if !shadow {
                     spawned.insert(Depth::Flat { adjust: -2 - 15 * level, write: true });
+                    spawned.insert(Lit { cell, level, rule: LightRule::Object { extra: 0 } });
                 }
             }
         }
@@ -2353,7 +2166,7 @@ fn light_world(sim: Res<Sim>, storm: Option<ResMut<StormLight>>, light: Option<R
     let tick = world.current_tick();
     // RA2_STORM=tick shows the storm's light from that tick on, for checks.
     let forced = std::env::var("RA2_STORM").ok().and_then(|t| t.trim().parse::<u64>().ok()).is_some_and(|from| tick >= from);
-    let raging = forced || world.storm.as_ref().is_some_and(|storm| storm.started.is_some());
+    let raging = forced || world.storm_active();
     if storm.0 != raging {
         storm.0 = raging;
     }
@@ -2790,16 +2603,11 @@ fn show_corpses(
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
     light: Option<Res<WorldLight>>,
-    mut corpses: Query<(Entity, &Corpse, &mut Sprite, &mut Transform, Option<&Lit>)>,
+    mut corpses: Query<(Entity, &Corpse, &mut Sprite, &mut Transform, Option<&mut Depth>, Option<&Lit>)>,
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
-    for (entity, corpse, mut sprite, mut transform, lit_now) in &mut corpses {
-    mut corpses: Query<(Entity, &Corpse, &mut Sprite, &mut Transform, Option<&mut Depth>)>,
-) {
-    let view = &mut *view;
-    let tick = sim.0.current_tick();
-    for (entity, corpse, mut sprite, mut transform, depth) in &mut corpses {
+    for (entity, corpse, mut sprite, mut transform, depth, lit_now) in &mut corpses {
         let stage = tick.saturating_sub(corpse.began) as usize;
         let point = scene_point_3d(view.origin, corpse.at);
         if stage >= corpse.count {
@@ -3187,10 +2995,10 @@ fn show_effects(
                     let direction = ((((unit.facing as usize) >> 4) + 1) >> 1) & 7;
                     let name = look.anims[direction.min(look.anims.len() - 1)].clone();
                     let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 1.5) * DEPTH_PER_ROW;
-                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), depth);
+                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 }
                 let weight = (unit.stats.kind as usize).checked_sub(1).and_then(|k| sim.0.unit_types.get(k)).map_or(1.0, |k| k.weight) as f32;
-                view.rocks.entry(host).or_default().push(unit.facing, side as f32, 1.5, weight);
+                view.drone_rocks.entry(host).or_default().push(unit.facing, side as f32, 1.5, weight);
             }
             Event::Erased { at } => {
                 let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 1.5) * DEPTH_PER_ROW;
@@ -3305,9 +3113,8 @@ fn show_effects(
                             start(&mut commands, &mut cues, view, &name, point(cell, 5), None, depth(cell));
                         }
                         if let (Some(name), Some(from)) = (key("ChronoBlast"), from) {
-                            start(&mut commands, &mut cues, view, &name, point(from, 5), depth(from));
-                            radar_events.raise(13, from, tick);
                             start(&mut commands, &mut cues, view, &name, point(from, 5), None, depth(from));
+                            radar_events.raise(13, from, tick);
                         }
                         radar_events.raise(13, cell, tick);
                         cues.write(Cue::Eva("EVA_ChronosphereActivated"));
@@ -3320,7 +3127,7 @@ fn show_effects(
             Event::NukeLaunched { at, cell, .. } => {
                 if let Some(name) = crate::audio::rules_sound(&files, "NukeTakeOff") {
                     let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
-                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), depth);
+                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 }
                 let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
                 let target = scene_point_3d(view.origin, (x, y, sim.0.ground_z(x, y)));
@@ -3330,7 +3137,7 @@ fn show_effects(
             // The fireball where it came down.
             Event::NukeLanded { at } => {
                 let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
-                start(&mut commands, &mut cues, view, "NUKEBALL", scene_point_3d(view.origin, at), depth);
+                start(&mut commands, &mut cues, view, "NUKEBALL", scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 radar_events.raise(13, (at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL)), tick);
             }
             // `StormSound` and the message as the storm breaks; the warning
@@ -3375,7 +3182,7 @@ fn show_effects(
                 let key = if matches!(event, Event::Wake { .. }) { "Wake" } else { "ChronoSparkle1" };
                 if let Some(name) = crate::audio::rules_sound(&files, key) {
                     let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
-                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), depth);
+                    start(&mut commands, &mut cues, view, &name, scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 }
             }
             // Another house's super weapon
@@ -3706,7 +3513,7 @@ impl Rock {
     /// hundredths of a radian, with the body's facing.
     fn mark(&self, facing: u8) -> Option<String> {
         let (roll, pitch) = ((self.roll * 100.0).round() as i32, (self.pitch * 100.0).round() as i32);
-        (roll != 0 || pitch != 0).then(|| format!("@k{roll}_{pitch}_{facing}"))
+        (roll != 0 || pitch != 0).then(|| format!("@q{roll}_{pitch}_{facing}"))
     }
 }
 
@@ -3720,7 +3527,7 @@ fn rock_units(sim: Res<Sim>, mut view: ResMut<UnitView>) {
             rock.step();
         }
     }
-    view.rocks.retain(|id, rock| !rock.still() && sim.0.unit(*id).is_some());
+    view.drone_rocks.retain(|id, rock| !rock.still() && sim.0.unit(*id).is_some());
 }
 
 /// A spark flying from a bitten vehicle.

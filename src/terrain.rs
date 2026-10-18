@@ -291,14 +291,14 @@ pub struct Placement {
     /// for a building the nearest cell of its foundation.
     pub cell: (i32, i32),
     pub kind: PlacementKind,
-    /// How it takes the light of `light_cell`, if at all.
-    pub light: Option<crate::lighting::LightRule>,
-    pub light_cell: (i32, i32),
     /// How its pixels' depths are worked out.
     pub depth: Option<crate::depth::Depth>,
     /// For a tile, its base depth: that of the top of its cell's box at level
     /// 0, less 30; its pixels add their depth bytes.
     pub ground: Option<i32>,
+    /// How it takes the light of `light_cell`, if at all.
+    pub light: Option<crate::lighting::LightRule>,
+    pub light_cell: (i32, i32),
 }
 
 /// One cell of the map as the simulation sees it.
@@ -802,38 +802,12 @@ impl UnitArt {
     ) -> Option<voxel::VoxelSprite> {
         // A name ending "@p<n>" is the model with its nose raised n sixteenths
         // of a right angle (a rocket climbing or diving); "@r<n>" is the model
-        // standing on a cell with that ramp; "@k<n>" the model rolled n
-        // thousandths of a radian about its length (an aircraft banking);
-        // "@b<old>_<thirds>" with a ramp is
-        // the model that many thirds of the way there from another ramp's tilt.
-        let (image, marks) = image.split_once('@').unwrap_or((image, ""));
-        let (mut pitch, mut roll, mut ramp, mut from) = (0.0, 0.0, 0u8, None);
-        let (mut pitch, mut ramp, mut from, mut rock) = (0.0, 0u8, None, None);
-        for mark in marks.split('@') {
-            match mark.split_at_checked(1) {
-                // "@k<roll>_<pitch>_<facing>": rocked, in hundredths of a
-                // radian, about the axes of a body with that facing.
-                Some(("k", angles)) => {
-                    let parts: Vec<i32> = angles.split('_').filter_map(|n| n.parse().ok()).collect();
-                    if let [roll, rock_pitch, body] = parts[..] {
-                        rock = Some(voxel::rock_matrix(roll as f32 / 100.0, rock_pitch as f32 / 100.0, body as u8));
-                    }
-                }
-                Some(("p", steps)) => pitch = steps.parse::<i32>().unwrap_or(0) as f32 * std::f32::consts::FRAC_PI_2 / 16.0,
-                Some(("k", thousandths)) => roll = thousandths.parse::<i32>().unwrap_or(0) as f32 / 1000.0,
-                Some(("r", number)) => ramp = number.parse().unwrap_or(0),
-                Some(("b", blend)) => from = blend.split_once('_').and_then(|(old, thirds)| Some((old.parse().ok()?, thirds.parse().ok()?))),
-                _ => {}
-            }
-        }
-        let tilt = match (voxel::slope_matrix(ramp, from), rock) {
-            (Some(slope), Some(rock)) => Some(std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| slope[i][k] * rock[k][j]).sum()))),
-            (slope, rock) => slope.or(rock),
-        };
         // standing on a cell with that ramp; "@b<old>_<thirds>" with it is
         // the model that many thirds of the way there from another ramp's tilt;
-        // "@k<roll>_<pitch>_<half width>_<half length>" is the model rocked
-        // (angles in thousandths of a radian).
+        // "@w<roll>_<pitch>_<half width>_<half length>" is the model rocked
+        // (angles in thousandths of a radian); "@k<n>" rolled n thousandths of a
+        // radian about its length (an aircraft banking); "@q<roll>_<pitch>_<facing>"
+        // rocked in hundredths about the axes of a body with that facing.
         let (image, pose) = marks(image);
         let model = self.models.entry(image.to_owned()).or_insert_with(|| {
             let vxl = Vxl::parse(files.get(&format!("{image}.vxl"))?)?;
@@ -845,7 +819,6 @@ impl UnitArt {
         let palette = palette
             .and_then(|index| self.owner_palettes.get(index))
             .unwrap_or(&self.base_palette);
-        voxel::render(vxl, hva.as_ref(), self.vpl.as_ref(), &self.normals, palette, facing, light, self.hva_frame, pitch, roll, tilt)
         voxel::render(vxl, hva.as_ref(), self.vpl.as_ref(), &self.normals, palette, facing, light, self.hva_frame, pose)
     }
 
@@ -876,13 +849,20 @@ impl UnitArt {
 /// they give it.
 fn marks(image: &str) -> (&str, voxel::Pose) {
     let (image, marks) = image.split_once('@').unwrap_or((image, ""));
-    let (mut pitch, mut ramp, mut from, mut rock) = (0.0, 0u8, None, None);
+    let (mut pitch, mut roll, mut ramp, mut from, mut rock, mut shake) = (0.0, 0.0, 0u8, None, None, None);
     for mark in marks.split('@') {
         match mark.split_at_checked(1) {
             Some(("p", steps)) => pitch = steps.parse::<i32>().unwrap_or(0) as f32 * std::f32::consts::FRAC_PI_2 / 16.0,
+            Some(("k", thousandths)) => roll = thousandths.parse::<i32>().unwrap_or(0) as f32 / 1000.0,
             Some(("r", number)) => ramp = number.parse().unwrap_or(0),
             Some(("b", blend)) => from = blend.split_once('_').and_then(|(old, thirds)| Some((old.parse().ok()?, thirds.parse().ok()?))),
-            Some(("k", angles)) => {
+            Some(("q", angles)) => {
+                let parts: Vec<i32> = angles.split('_').filter_map(|n| n.parse().ok()).collect();
+                if let [roll, rock_pitch, body] = parts[..] {
+                    shake = Some(voxel::rock_matrix(roll as f32 / 100.0, rock_pitch as f32 / 100.0, body as u8));
+                }
+            }
+            Some(("w", angles)) => {
                 let numbers: Vec<f32> = angles.split('_').filter_map(|n| n.parse().ok()).collect();
                 if let [roll, pitch, half_width, half_length] = numbers[..] {
                     rock = Some(voxel::Rock { roll: roll / 1000.0, pitch: pitch / 1000.0, half_width, half_length });
@@ -891,7 +871,11 @@ fn marks(image: &str) -> (&str, voxel::Pose) {
             _ => {}
         }
     }
-    (image, voxel::Pose { pitch, tilt: voxel::slope_matrix(ramp, from), rock })
+    let tilt = match (voxel::slope_matrix(ramp, from), shake) {
+        (Some(slope), Some(shake)) => Some(std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| slope[i][k] * shake[k][j]).sum()))),
+        (slope, shake) => slope.or(shake),
+    };
+    (image, voxel::Pose { pitch, roll, tilt, rock })
 }
 
 impl UnitArt {
@@ -1583,6 +1567,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             layer: Layer::Terrain,
             cell: cell_xy,
             kind: PlacementKind::Tile,
+            depth: None,
+            ground: base,
             light: Some(crate::lighting::LightRule::Ground { raise: 0 }),
             light_cell: cell_xy,
         });
@@ -1593,24 +1579,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 tile_anims.push((anim.clone(), (x + CELL_WIDTH / 2 + offset.0, y + CELL_HEIGHT / 2 + offset.1), cell_xy));
             }
         }
-        // The tile's depth, for hiding units behind raised ground.
-        // DATA: a tile without depth data is taken as flat (29 less the row).
-        let flat_top = y + 15 * level;
-        let shape = *depth_tiles.entry((index, variant, tile.sub_tile, false)).or_insert_with(|| {
-            let mut z = vec![None; (CELL_WIDTH * CELL_HEIGHT) as usize];
-            for row in 0..CELL_HEIGHT as u32 {
-                let (start, length) = diamond_row(row, CELL_WIDTH as u32, CELL_HEIGHT as u32);
-                for col in start..start + length {
-                    let at = (row * CELL_WIDTH as u32 + col) as usize;
-                    z[at] = Some(cell.z.as_ref().map_or((29 - row as i32).max(0) as u8, |z| z[at]));
-                }
-            }
-            depth.add_tile(crate::depth::DepthTile { width: CELL_WIDTH, height: CELL_HEIGHT, z })
-        });
-        depth.place(shape, x, y, flat_top, level, false);
-            depth: None,
-            ground: base,
-        });
 
         if let Some(extra) = &cell.extra {
             // The tile is drawn in one call with one
@@ -1638,10 +1606,10 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 layer: Layer::Terrain,
                 cell: cell_xy,
                 kind: PlacementKind::TileExtra,
-                light: Some(crate::lighting::LightRule::Ground { raise: 0 }),
-                light_cell: cell_xy,
                 depth: None,
                 ground: base,
+                light: Some(crate::lighting::LightRule::Ground { raise: 0 }),
+                light_cell: cell_xy,
             });
         }
     }
@@ -1892,10 +1860,10 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     layer: Layer::Shadow,
                     cell: object.sort_cell,
                     kind: PlacementKind::Shadow,
-                    light: None,
-                    light_cell: object.cell,
                     depth: None,
                     ground: None,
+                    light: None,
+                    light_cell: object.cell,
                 });
             }
         }
@@ -1929,13 +1897,13 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             layer: Layer::Object,
             cell: object.sort_cell,
             kind: object.kind,
-            light: light_rule,
-            light_cell: object.cell,
             depth: Some(match object.stand {
                 (true, adjust, write) => crate::depth::Depth::Flat { adjust: adjust - 15 * level, write },
                 (false, adjust, write) => crate::depth::Depth::Upright { adjust: adjust - 15 * level, write },
             }),
             ground: None,
+            light: light_rule,
+            light_cell: object.cell,
         });
 
         // An animated object's image is its stage, and
@@ -2411,9 +2379,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 (motion, [exact("ExpireAnim"), exact("BounceAnim"), exact("TrailerAnim")])
             });
             let anim = AnimType { bouncer, ..anim };
-            // Only the ones that mark the ground need their picture's size.
-            let size = if anim.scorch || anim.crater {
-                find_shape(files, &anim.image, theater.extension, theater.letter).map_or((0, 0), |shp| (shp.width as i32, shp.height as i32))
             // Only the ones that mark the ground need their largest picture:
             // the first of the greatest width times height (30 by 30 without
             // art).
@@ -3235,6 +3200,18 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             *entry |= flags;
         }
     }
+    // `CliffBackImpassability=2`: clear ground, water, beach and ice with a cell
+    // four or more levels higher among six of its neighbours (one row and one
+    // column up, the two side diagonals, and one and two cells down the
+    // screen) is rock: the foot of a cliff.
+    let cliff_back = object_rules.rules.as_ref().and_then(|rules| rules.get("General", "CliffBackImpassability")).and_then(|v| v.split(';').next()?.trim().parse::<i32>().ok()) == Some(2);
+    let levels: HashMap<(i32, i32), i32> = ground.iter().map(|&(cell, _, level)| (cell, level as i32)).collect();
+    let below_cliff = |cell: (i32, i32), level: u8| {
+        cliff_back
+            && [(0, -1), (-1, 0), (2, 2), (1, 1), (-1, 1), (1, -1)]
+                .iter()
+                .any(|&(dx, dy)| levels.get(&(cell.0 + dx, cell.1 + dy)).copied().unwrap_or(0) >= level as i32 + 4)
+    };
     let cells = ground
         .iter()
         .map(|&(cell, terrain_type, level)| SceneCell {
@@ -3261,7 +3238,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 } else if ore_cells_set.contains(&cell) {
                     Land::Tiberium
                 } else {
-                    match terrain_type {
+                    let land = match terrain_type {
                         1..=4 => Land::Ice,
                         5 => Land::Tunnel,
                         6 => Land::Railroad,
@@ -3271,6 +3248,11 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         11 | 12 => Land::Road,
                         14 => Land::Rough,
                         _ => Land::Clear,
+                    };
+                    if matches!(land, Land::Clear | Land::Water | Land::Beach | Land::Ice) && below_cliff(cell, level) {
+                        Land::Rock
+                    } else {
+                        land
                     }
                 }
             },
