@@ -288,6 +288,7 @@ enum Waiting {
 
 /// Where arranging a game has got to on this machine.
 #[derive(Default)]
+#[allow(clippy::large_enum_variant)]
 enum Phase {
     #[default]
     Idle,
@@ -360,11 +361,10 @@ impl Game for Lockstep<'_> {
     fn apply(&mut self, house: u8, order: &[u8]) {
         // An order the house may not give, or that cannot be read, is dropped
         // on every machine alike.
-        if let Ok(order) = bincode::deserialize::<Order>(order) {
-            if self.0.order_as(house, order) {
+        if let Ok(order) = bincode::deserialize::<Order>(order)
+            && self.0.order_as(house, order) {
                 self.1.push((self.0.current_tick(), order));
             }
-        }
     }
 
     fn tick(&mut self) {
@@ -428,7 +428,7 @@ impl Plugin for NetPlugin {
 /// Arranges a game from the menus: the host's lobby, or a joiner's place in it.
 fn arrange(mut commands: Commands, mut start: NonSendMut<NetStart>, mut lobby: ResMut<Lobby>, mut setup: ResMut<GameSetup>, mut next: ResMut<NextState<Screen>>) {
     let lobby = &mut *lobby;
-    let mut say = |status: &mut String, text: String| {
+    let say = |status: &mut String, text: String| {
         if *status != text {
             info!("network: {text}");
             *status = text;
@@ -896,7 +896,7 @@ fn step(
         }
     }
     let now = time.elapsed().as_millis() as u64;
-    let mut tell = |text: String, said: &mut Option<String>, status: &mut MessageWriter<crate::bar::Status>| {
+    let tell = |text: String, said: &mut Option<String>, status: &mut MessageWriter<crate::bar::Status>| {
         if said.as_ref() != Some(&text) {
             info!("network: {text}");
             status.write(crate::bar::Status::Text(text.clone()));

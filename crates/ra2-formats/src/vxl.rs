@@ -155,11 +155,7 @@ impl Vpl {
     pub fn parse(data: &[u8]) -> Option<Self> {
         let count = u32_at(data, 8)?;
         let tables = data.get(16 + 768..)?;
-        let sections = tables
-            .chunks_exact(256)
-            .take(count)
-            .map(|chunk| chunk.try_into().unwrap())
-            .collect::<Vec<[u8; 256]>>();
+        let sections: Vec<[u8; 256]> = tables.as_chunks::<256>().0.iter().take(count).copied().collect();
         (sections.len() == count && count > 0).then_some(Self { sections })
     }
 }

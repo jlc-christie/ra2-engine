@@ -62,6 +62,7 @@ const SELECTED: Color = Color::srgb_u8(255, 0, 0);
 const LIST_ROW_HEIGHT: f32 = 18.0;
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Screen {
     #[default]
     MainMenu,
@@ -120,7 +121,6 @@ enum MenuAction {
 #[derive(Component)]
 struct Slot {
     index: usize,
-    button: bool,
     frames: std::sync::Arc<Vec<Handle<Image>>>,
     was_pressed: bool,
 }
@@ -473,7 +473,7 @@ impl Shell {
             let pcx = pcx.unwrap_or_else(|| panic!("missing or bad {name}"));
             let rgba = pcx
                 .rgb
-                .chunks_exact(3)
+                .as_chunks::<3>().0.iter()
                 .flat_map(|c| match c {
                     [255, 0, 255] => [0, 0, 0, 0],
                     _ => [c[0], c[1], c[2], 255],
@@ -490,7 +490,7 @@ impl Shell {
         if !self.pics.contains_key(&key) {
             let data = self.files.get(&format!("{id}.map")).or_else(|| self.files.get(&format!("{id}.mpr")))?;
             let (w, h, rgb) = ra2_formats::map::preview(data)?;
-            let rgba: Vec<u8> = rgb.chunks_exact(3).take((w * h) as usize).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
+            let rgba: Vec<u8> = rgb.as_chunks::<3>().0.iter().take((w * h) as usize).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
             let image = Image::new(
                 bevy::render::render_resource::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 bevy::render::render_resource::TextureDimension::D2,
@@ -629,10 +629,10 @@ impl Painter<'_> {
         for index in 0..SLOT_COUNT {
             let y = SIDEBAR_TOP_HEIGHT + SLOT_HEIGHT * index as f32;
             p.spawn(picture(&slot, SIDEBAR_X, y));
-            let slot_state = |button: bool| Slot { index, button, frames: frames.clone(), was_pressed: false };
+            let slot_state = || Slot { index, frames: frames.clone(), was_pressed: false };
             let Some((_, label, action)) = buttons.iter().find(|(slot, ..)| *slot == index)
             else {
-                p.spawn((place(button_x, y, BUTTON_WIDTH, SLOT_HEIGHT), ImageNode::new(gone.clone()), slot_state(false)));
+                p.spawn((place(button_x, y, BUTTON_WIDTH, SLOT_HEIGHT), ImageNode::new(gone.clone()), slot_state()));
                 continue;
             };
             let text = self.shell.string(label);
@@ -641,7 +641,7 @@ impl Painter<'_> {
                 Button,
                 Hovered::default(),
                 *action,
-                slot_state(true),
+                slot_state(),
                 ClicksOnPress,
                 place(button_x, y, BUTTON_WIDTH, SLOT_HEIGHT),
                 ImageNode::new(gone.clone()),
@@ -905,7 +905,7 @@ fn spawn_load_screen(
         <[u8; 3]>::try_from(parts.get(..3)?).ok()
     });
     let colour = crate::colors::hsv_to_rgb(hsv.unwrap_or([164, 255, 255]));
-    let mut painter = Painter { shell: &mut shell, images: &mut images };
+    let painter = Painter { shell: &mut shell, images: &mut images };
     let line_height = painter.shell.font.height as f32;
     let darken = |p: &mut ChildSpawnerCommands, x: f32, y: f32, width: f32, height: f32| {
         p.spawn((place(x - 4.0, y - 4.0, width + 8.0, height + 8.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
@@ -1286,7 +1286,6 @@ fn spawn_internet(mut commands: Commands, mut shell: ResMut<Shell>, mut images: 
 /// Typing changes the address on the Network screen; the lobby's map and mode
 /// are kept in step between the machines; and a network screen is drawn again
 /// when what it shows has changed.
-#[allow(clippy::too_many_arguments)]
 fn network_screens(
     mut keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut lobby: ResMut<crate::net::Lobby>,
@@ -1361,12 +1360,11 @@ fn network_screens(
         // The host's choice of map and mode is the game's.
         LobbyMode::Hosting if crate::net::auto_host() => {}
         LobbyMode::Hosting => {
-            if let Some(map) = shell.maps.get(choice.selected) {
-                if lobby.map != map.id || lobby.max_players != map.max_players {
+            if let Some(map) = shell.maps.get(choice.selected)
+                && (lobby.map != map.id || lobby.max_players != map.max_players) {
                     lobby.map = map.id.clone();
                     lobby.max_players = map.max_players;
                 }
-            }
             if let Some(rules) = shell.mode_rules.get(choice.mode).filter(|rules| **rules != lobby.mode_rules) {
                 lobby.mode_rules = rules.clone();
             }
@@ -1427,11 +1425,10 @@ fn run_meter(time: Res<Time<Real>>, mut meters: Query<(&mut Meter, &mut ImageNod
     for (mut meter, mut image) in &mut meters {
         let began = *meter.began.get_or_insert(now);
         let frame = ((now - began) / 0.091) as usize % meter.frames.len().max(1);
-        if let Some(handle) = meter.frames.get(frame) {
-            if image.image != *handle {
+        if let Some(handle) = meter.frames.get(frame)
+            && image.image != *handle {
                 image.image = handle.clone();
             }
-        }
     }
 }
 
@@ -1626,7 +1623,6 @@ impl Painter<'_> {
     // high; the dialog's art behind; text three in; a colour list's rows filled
     // with the colour, inset by two; a scroll bar 20 wide when there are more
     // items than rows.
-    #[allow(clippy::too_many_arguments)]
     fn drop_list(
         &mut self,
         p: &mut ChildSpawnerCommands,
@@ -1960,8 +1956,8 @@ fn spawn_skirmish(
 
         // The open list goes on last, over everything.
         // Seven rows for countries, nine for colours.
-        if let Some((combo, scroll)) = open {
-            if let Some((_, area)) = lists.iter().find(|(which, _)| *which == combo) {
+        if let Some((combo, scroll)) = open
+            && let Some((_, area)) = lists.iter().find(|(which, _)| *which == combo) {
                 match combo {
                     Combo::Level(_) => painter.drop_list(p, combo, *area, &levels, 4, scroll),
                     Combo::Country(_) => painter.drop_list(p, combo, *area, &countries, 7, scroll),
@@ -1969,7 +1965,6 @@ fn spawn_skirmish(
                     Combo::Resolution => {}
                 }
             }
-        }
     });
 }
 
@@ -2351,7 +2346,6 @@ fn start_slide(
 // click is heard as the button goes down.
 // The mouse resting on a button
 // does not light it; frame 3 belongs to a blink only the network lobby starts.
-#[allow(clippy::too_many_arguments)]
 fn slot_frames(
     mut slots: Query<(Has<Pressed>, &Hovered, &mut Slot, &mut ImageNode, Option<&Children>), Without<SlotText>>,
     empty: Query<(&mut Slot, &mut ImageNode), (Without<Hovered>, Without<SlotText>)>,
@@ -2422,7 +2416,6 @@ fn slot_frames(
 /// Carries out the action a button was pressed for, once the buttons have slid out.
 // The whole slide is the slots plus nine
 // steps.
-#[allow(clippy::too_many_arguments)]
 fn finish_leaving(
     mut slide: ResMut<Slide>,
     time: Res<Time<Real>>,
@@ -2507,7 +2500,6 @@ fn finish_leaving(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn on_menu_action(
     activate: On<Activate>,
     actions: Query<(&MenuAction, Has<Slot>)>,

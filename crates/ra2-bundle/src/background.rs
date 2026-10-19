@@ -100,7 +100,6 @@ fn font() -> Option<FontVec> {
 
 /// Writes a line of text, its left edge (or its middle, when `centred`) at
 /// `x` and its baseline at `y`, in points.
-#[allow(clippy::too_many_arguments)]
 fn text(image: &mut RgbaImage, font: &FontVec, s: f32, words: &str, size: f32, x: f32, y: f32, rgb: [u8; 3], centred: bool) {
     let scaled = font.as_scaled(PxScale::from(size * s));
     let width: f32 = words.chars().map(|c| scaled.h_advance(scaled.glyph_id(c))).sum();

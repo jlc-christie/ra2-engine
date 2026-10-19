@@ -140,11 +140,10 @@ impl World {
     // building destroyed (not sold) leaves one at its centre, money if
     // `CrateBeneathIsMoney`, whether or not crates are on.
     pub(crate) fn crate_from_building(&mut self, kind: u16, centre: (i32, i32)) {
-        if let Some((beneath, money)) = self.building_types.get(kind as usize).map(|kind| (kind.crate_beneath, kind.crate_beneath_money)) {
-            if beneath {
+        if let Some((beneath, money)) = self.building_types.get(kind as usize).map(|kind| (kind.crate_beneath, kind.crate_beneath_money))
+            && beneath {
                 self.place_crate_near(centre, money.then_some(MONEY));
             }
-        }
     }
 
     /// A crate at or near a cell, holding something chosen or not.

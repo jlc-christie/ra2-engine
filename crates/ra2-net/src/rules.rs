@@ -140,11 +140,7 @@ pub struct Timing {
 /// The host's TIMING computation, line for
 /// line as in the notes.
 pub fn timing(i: TimingInput) -> Timing {
-    let mut fps = if i.worst_process == 0 {
-        60
-    } else {
-        (1000 / i.worst_process).max(1)
-    };
+    let mut fps = 1000u32.checked_div(i.worst_process).map_or(60, |fps| fps.max(1));
     fps = fps.min(fps_cap(i.speed));
     let fsr = match i.kind {
         NetKind::Lan => i.frame_send_rate.max(1),

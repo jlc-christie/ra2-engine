@@ -588,7 +588,7 @@ impl World {
                     continue;
                 }
                 self.units[index].chrono = Some(Warp { sink: Some(depth), ..warp });
-                if tick % 4 == 0 {
+                if tick.is_multiple_of(4) {
                     let (x, y) = (self.units[index].x, self.units[index].y);
                     let (rx, ry) = (self.random_below(341) as i32 - 170, self.random_below(341) as i32 - 170);
                     let at = (x + rx, y + ry, self.ground_z(x, y));
@@ -665,7 +665,7 @@ impl World {
         }
         // Held by a time weapon or jumping, a unit
         // gives off a sparkle every 24th frame.
-        if tick % 24 == 0 {
+        if tick.is_multiple_of(24) {
             let sparkling: Vec<(i32, i32, i32)> = self
                 .units
                 .iter()
@@ -735,11 +735,11 @@ impl World {
                         storm.clouds_until = storm.clouds_until.max(tick + life as u64);
                         world.events.push(Event::Cloud { cell, kind: kind as u8 });
                     };
-                    if rules.hit_delay > 0 && tick % rules.hit_delay as u64 == 0 {
+                    if rules.hit_delay > 0 && tick.is_multiple_of(rules.hit_delay as u64) {
                         let centre = storm.cell;
                         cloud(self, &mut storm, centre);
                     }
-                    if rules.scatter_delay > 0 && tick % rules.scatter_delay as u64 == 0 {
+                    if rules.scatter_delay > 0 && tick.is_multiple_of(rules.scatter_delay as u64) {
                         for _ in 0..3 {
                             let span = rules.spread.max(1) as u32;
                             let cell = (storm.cell.0 + self.random_below(span) as i32 - rules.spread / 2, storm.cell.1 + self.random_below(span) as i32 - rules.spread / 2);

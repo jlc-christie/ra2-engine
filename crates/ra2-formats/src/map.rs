@@ -149,7 +149,7 @@ impl Map {
 
         let raw = lzo_blocks(&packed_section(&ini, "IsoMapPack5")?)?;
         let tiles = raw
-            .chunks_exact(ISO_TILE_LEN)
+            .as_chunks::<ISO_TILE_LEN>().0.iter()
             .map(|r| IsoTile {
                 x: i16::from_le_bytes([r[0], r[1]]),
                 y: i16::from_le_bytes([r[2], r[3]]),

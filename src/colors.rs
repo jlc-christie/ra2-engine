@@ -18,7 +18,7 @@ const TABLE_SIZE: i32 = 8192;
 // The angle is scaled to 16384 steps per turn and truncated, halved rounding odd
 // values up, and looked up in an 8192-entry table of single-precision sines.
 fn table_sin(angle: f64, quarter_turns: i32) -> f64 {
-    let steps = (angle * 2607.594_482_421_875) as i32;
+    let steps = (angle * 2_607.594_482_421_875) as i32;
     let mut index = (steps / 2).rem_euclid(TABLE_SIZE) + quarter_turns * (TABLE_SIZE / 4);
     if steps & 1 != 0 {
         index += 1;

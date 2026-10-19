@@ -7,3 +7,6 @@ description = "Builds the game into a Mac app and a disk image to hand to player
 [dependencies]
 ab_glyph = "0.2.32"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true

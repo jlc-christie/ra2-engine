@@ -447,7 +447,7 @@ impl Session {
 
         // Every 128 frames each player queues its average processing
         // time per frame over the window.
-        if frame % rules::PROCESS_TIME_PERIOD == 0 && self.process_frames > 0 {
+        if frame.is_multiple_of(rules::PROCESS_TIME_PERIOD) && self.process_frames > 0 {
             let average = self.process_ms / u64::from(self.process_frames);
             self.process_ms = 0;
             self.process_frames = 0;
@@ -461,7 +461,7 @@ impl Session {
         // the low byte of Frame is 0, once more than 4 commands have been sent, and only if
         // every player's processing time is known.
         if self.is_host()
-            && frame % rules::TIMING_PERIOD == 0
+            && frame.is_multiple_of(rules::TIMING_PERIOD)
             && self.sent > rules::TIMING_MIN_SENT
             && let Some(worst_process) = self.worst_process()
         {
@@ -489,7 +489,7 @@ impl Session {
         // roundup(Frame + MaxAhead, FrameSendRate), appended to the local do list and sent
         // under a header with that frame, this frame's check value, the running count and
         // the delay.
-        if frame % self.frame_send_rate == 0 {
+        if frame.is_multiple_of(self.frame_send_rate) {
             let stamp = rules::stamp(frame, self.max_ahead, self.frame_send_rate);
             let mut orders = Vec::with_capacity(self.out.len());
             for (body, forced) in self.out.drain(..) {
@@ -882,11 +882,10 @@ impl Session {
                         self.peers[index].round_trip = Some(u64::from(round_trip));
                     }
                 }
-                Msg::Vote { target } => {
-                    if !self.votes.contains(&(from, target)) {
+                Msg::Vote { target }
+                    if !self.votes.contains(&(from, target)) => {
                         self.votes.push((from, target));
                     }
-                }
                 // Lobby traffic has no meaning once the game runs.
                 _ => {}
             }

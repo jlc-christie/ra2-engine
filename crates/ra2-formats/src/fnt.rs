@@ -30,7 +30,7 @@ impl Font {
         let table_end = HEADER_LEN + TABLE_LEN * 2;
         let table = data
             .get(HEADER_LEN..table_end)?
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         let glyphs = data.get(table_end..table_end + count * glyph_len)?.to_vec();

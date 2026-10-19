@@ -32,7 +32,6 @@ pub const PAGE_SIZE: u32 = 2048;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PaletteKind {
     Iso,
-    Theater,
     Unit,
 }
 
@@ -106,7 +105,6 @@ impl Theater {
     fn palette(&self, kind: PaletteKind) -> &Palette {
         match kind {
             PaletteKind::Iso => &self.iso_palette,
-            PaletteKind::Theater => &self.theater_palette,
             PaletteKind::Unit => &self.unit_palette,
         }
     }
@@ -252,14 +250,10 @@ pub enum PlacementKind {
     Tile,
     /// The part of a tile's art that rises above its cell.
     TileExtra,
-    /// Ore or gems.
-    Ore,
     /// Any other overlay: rocks, bridges, walls, fences.
     Overlay,
     /// A building placed by the map.
     Structure,
-    /// A foot soldier, civilian or animal placed by the map.
-    Infantry,
     /// A tree, lamp post, ore drill or other `[Terrain]` object.
     TerrainObject,
     Shadow,
@@ -581,8 +575,6 @@ pub struct BuildingInfo {
     pub ui_name: String,
     /// art.ini `Height`, in levels: how tall its selection box is.
     pub height: i32,
-    /// Whether it has a `Factory` entry.
-    pub factory: bool,
     /// The vehicle it packs up into (`UndeploysInto`), as it would be spawned.
     pub undeploys: Option<UnitSpawn>,
     pub sim: ra2_sim::BuildingType,
@@ -743,17 +735,6 @@ impl UnitArt {
             rgba: frame_rgba(frame, palette, [1000; 3]),
             offset: (frame.x as i32 - shp.width as i32 / 2, frame.y as i32 - shp.height as i32 / 2),
         })
-    }
-
-    /// How many frames a building's or animation's art has.
-    /// The size in pixels of a shape's whole picture.
-    pub fn shape_size(&mut self, files: &GameFiles, art: &str) -> (i32, i32) {
-        let (extension, letter) = (self.extension, self.letter);
-        self.shapes
-            .entry(art.to_owned())
-            .or_insert_with(|| find_shape(files, art, extension, letter))
-            .as_ref()
-            .map_or((0, 0), |shp| (shp.width as i32, shp.height as i32))
     }
 
     pub fn frame_count(&mut self, files: &GameFiles, art: &str) -> usize {
@@ -1049,8 +1030,6 @@ pub struct Scene {
     pub enemies: Vec<Enemy>,
     /// Each house's palette in `UnitArt`, by owner.
     pub house_palettes: Vec<Option<usize>>,
-    /// The player's start cell and each house's base unit type, by owner.
-    pub base_units: Vec<Option<u16>>,
     pub building_types: Vec<BuildingInfo>,
     pub unit_types: Vec<UnitInfo>,
     pub infantry_spawns: Vec<InfantrySpawn>,
@@ -1576,11 +1555,10 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         });
         // A tile's animation is started on the cell of its template it
         // attaches to, at the cell's middle on the ground moved by its offset.
-        if let Some((anim, offset, attaches)) = theater.tile_anims.get(&(index as usize)) {
-            if tile.sub_tile == *attaches {
+        if let Some((anim, offset, attaches)) = theater.tile_anims.get(&(index as usize))
+            && tile.sub_tile == *attaches {
                 tile_anims.push((anim.clone(), (x + CELL_WIDTH / 2 + offset.0, y + CELL_HEIGHT / 2 + offset.1), cell_xy));
             }
-        }
 
         if let Some(extra) = &cell.extra {
             // The tile is drawn in one call with one
@@ -1824,7 +1802,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             // The map loader does not place an overlay
             // whose type has no art, so those are skipped without complaint. Base
             // RA2 has no art for the `TIB2_` and `TIB3_` ore types some maps name.
-            if !matches!(object.kind, PlacementKind::Ore | PlacementKind::Overlay) {
+            if object.kind != PlacementKind::Overlay {
                 missing_objects += 1;
                 note_missing(object.art.clone());
             }
@@ -1847,8 +1825,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         // the same point as the art.
         let shadow = shp.frames.get(object.frame + shp.frames.len() / 2);
         let mut shadow_index = None;
-        if let Some(shadow) = shadow {
-            if shadow.width > 0 && shadow.height > 0 {
+        if let Some(shadow) = shadow
+            && shadow.width > 0 && shadow.height > 0 {
                 let entry = *art
                     .entry(ArtKey::Shadow(object.art.clone(), object.frame))
                     .or_insert_with(|| {
@@ -1868,17 +1846,12 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     light_cell: object.cell,
                 });
             }
-        }
 
         if frame.width == 0 || frame.height == 0 {
             continue;
         }
         use crate::lighting::LightRule;
         let light_rule = match (object.kind, object.palette) {
-            // Ore and gems are drawn at full brightness
-            // with a global palette, not lit by their cell.
-            (PlacementKind::Ore, _) => None,
-            (PlacementKind::Infantry, _) => Some(LightRule::Object { extra: light_setup.extra_infantry }),
             (_, PaletteKind::Unit) => Some(LightRule::Object { extra: 0 }),
             _ => Some(LightRule::Ground { raise: object.light_levels }),
         };
@@ -2033,7 +2006,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                                 rules.get("General", &format!("Prerequisite{entry}"))
                             });
                             match group {
-                                Some(members) => members.split(',').filter_map(|m| building_index(m)).collect(),
+                                Some(members) => members.split(',').filter_map(&building_index).collect(),
                                 None => building_index(entry).into_iter().collect(),
                             }
                         })
@@ -2042,7 +2015,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 .unwrap_or_default();
             let yes = |key: &str| get(key).is_some_and(|v| matches!(v.trim().to_lowercase().as_str(), "yes" | "true" | "1"));
             let list = |key: &str| -> Vec<u16> {
-                get(key).map(|list| list.split(',').filter_map(|m| building_index(m)).collect()).unwrap_or_default()
+                get(key).map(|list| list.split(',').filter_map(&building_index).collect()).unwrap_or_default()
             };
             let ui_name = get("UIName").map_or_else(String::new, |name| name.trim().to_owned());
             // DATA: art.ini `Buildup`. Half its frames
@@ -2114,7 +2087,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     .and_then(|art| art.get(&image, "Height"))
                     .and_then(|v| v.trim().parse::<i32>().ok())
                     .unwrap_or(2),
-                factory: get("Factory").is_some_and(|v| !v.trim().is_empty()),
                 undeploys: None,
                 art: image,
                 sim: ra2_sim::BuildingType {
@@ -2233,9 +2205,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     // DATA: the keys. How each
                     // is used; see `World::may_build`.
                     tech_level: number("TechLevel").unwrap_or(-1),
-                    owners: get("Owner").map_or(0, &country_mask),
-                    required_houses: get("RequiredHouses").map(&country_mask),
-                    forbidden_houses: get("ForbiddenHouses").map(&country_mask),
+                    owners: get("Owner").map_or(0, country_mask),
+                    required_houses: get("RequiredHouses").map(country_mask),
+                    forbidden_houses: get("ForbiddenHouses").map(country_mask),
                     prerequisite_override: list("PrerequisiteOverride"),
                     build_limit: number("BuildLimit"),
                     factory: get("Factory").and_then(|kind| match kind.trim().to_lowercase().as_str() {
@@ -2250,8 +2222,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     water_bound: yes("WaterBound"),
                     naval: yes("Naval"),
                     // DATA: `Wall=yes`, with the overlay it becomes named by `ToOverlay=`.
-                    wall_overlay: Some(get("ToOverlay").map_or(name.as_str(), str::trim))
-                        .filter(|_| yes("Wall"))
+                    wall_overlay: yes("Wall")
+                        .then(|| get("ToOverlay").map_or(name.as_str(), str::trim))
                         .and_then(|overlay| {
                             object_rules.overlay_names.iter().position(|n| n.eq_ignore_ascii_case(overlay))
                         })
@@ -2293,11 +2265,10 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     // And those the crates show (`[Powerups]`, the second value).
     if let Some(rules) = object_rules.rules.as_ref() {
         for name in ra2_sim::powerups::NAMES {
-            if let Some(anim) = rules.get("Powerups", name).and_then(|v| v.split(',').nth(1).map(|a| a.split(';').next().unwrap_or("").trim().to_owned())) {
-                if !anim.is_empty() && !anim.eq_ignore_ascii_case("none") {
+            if let Some(anim) = rules.get("Powerups", name).and_then(|v| v.split(',').nth(1).map(|a| a.split(';').next().unwrap_or("").trim().to_owned()))
+                && !anim.is_empty() && !anim.eq_ignore_ascii_case("none") {
                     wanted_anims.borrow_mut().push(anim);
                 }
-            }
         }
     }
     // And those that debris shows as it flies and ends.
@@ -2309,11 +2280,10 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 continue;
             }
             for key in ["ExpireAnim", "BounceAnim", "TrailerAnim"] {
-                if let Some(next) = art.get_exact(&name, key).map(|v| v.split(';').next().unwrap_or("").trim().to_uppercase()).filter(|v| !v.is_empty()) {
-                    if wanted.insert(next.clone()) {
+                if let Some(next) = art.get_exact(&name, key).map(|v| v.split(';').next().unwrap_or("").trim().to_uppercase()).filter(|v| !v.is_empty())
+                    && wanted.insert(next.clone()) {
                         queue.push(next);
                     }
-                }
             }
         }
     }
@@ -2488,7 +2458,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             // DATA: `DeploysInto` names a building type.
             let deploys = rules
                 .and_then(|rules| rules.get(kind, "DeploysInto"))
-                .and_then(|building| building_index(building));
+                .and_then(building_index);
             let voice = |key: &str| {
                 rules
                     .and_then(|rules| rules.get(kind, key))
@@ -2543,7 +2513,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         speed: number("Speed").map_or(defaults.speed, |v| v as i32),
                         rot: number("ROT").map_or(defaults.rot, |v| v as i32),
                         accelerates: rules
-                            .and_then(|rules| rules.get(&unit.kind, "Accelerates"))
+                            .and_then(|rules| rules.get(unit.kind, "Accelerates"))
                             .map_or(defaults.accelerates, |v| {
                                 matches!(v.trim().to_lowercase().as_str(), "yes" | "true" | "1")
                             }),
@@ -2671,7 +2641,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         .map(|entry| {
                             let entry = entry.trim();
                             match rules.and_then(|rules| rules.get("General", &format!("Prerequisite{entry}"))) {
-                                Some(members) => members.split(',').filter_map(|m| building_index(m)).collect(),
+                                Some(members) => members.split(',').filter_map(&building_index).collect(),
                                 None => building_index(entry).into_iter().collect(),
                             }
                         })
@@ -2770,15 +2740,15 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                             .is_some_and(|list| list.split(',').any(|entry| entry.trim().eq_ignore_ascii_case(name))),
                         ..made.stats
                     },
-                    dock: get("Dock").map(|list| list.split(',').filter_map(|m| building_index(m)).collect()).unwrap_or_default(),
+                    dock: get("Dock").map(|list| list.split(',').filter_map(&building_index).collect()).unwrap_or_default(),
                     cost: number("Cost").unwrap_or(0),
                     tech_level: number("TechLevel").unwrap_or(-1),
-                    owners: get("Owner").map_or(0, &country_mask),
-                    required_houses: get("RequiredHouses").map(&country_mask),
-                    forbidden_houses: get("ForbiddenHouses").map(&country_mask),
+                    owners: get("Owner").map_or(0, country_mask),
+                    required_houses: get("RequiredHouses").map(country_mask),
+                    forbidden_houses: get("ForbiddenHouses").map(country_mask),
                     prerequisites,
                     prerequisite_override: get("PrerequisiteOverride")
-                        .map(|list| list.split(',').filter_map(|m| building_index(m)).collect())
+                        .map(|list| list.split(',').filter_map(&building_index).collect())
                         .unwrap_or_default(),
                     build_limit: number("BuildLimit"),
                     requires_stolen_tech: if yes("RequiresStolenSovietTech") { 1 } else if yes("RequiresStolenAlliedTech") { 2 } else { 0 },
@@ -3635,7 +3605,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         map_smudges,
         tile_anims,
         ai_rules,
-        base_units: Vec::new(),
         player_country: player.country as u8,
         player_side,
         tech_level,

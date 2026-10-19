@@ -61,6 +61,7 @@ pub struct Recording {
 /// Plays a saved game's recording through, headless, up to a tick (or as far
 /// as the save if `to` is past it). For finding out how a game came to be as
 /// it was saved.
+#[cfg(test)]
 pub fn replay(files: &crate::files::GameFiles, save: &SaveFile, to: u64) -> Result<ra2_sim::World, String> {
     let recording = save.recording.as_ref().ok_or("the save has no recording")?;
     let mut world = crate::game::match_world(files, &save.setup).ok_or("the map could not be set up")?;
@@ -127,7 +128,7 @@ pub fn list() -> Vec<Entry> {
             current.then(|| Entry { path: entry.path(), description, modified: entry.metadata().and_then(|data| data.modified()).unwrap_or(std::time::UNIX_EPOCH) })
         })
         .collect();
-    found.sort_by(|a, b| b.modified.cmp(&a.modified));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.modified));
     found
 }
 

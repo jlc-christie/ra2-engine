@@ -182,11 +182,10 @@ impl World {
         let free = |b: &crate::Building| {
             b.owner == unit.owner && b.buildup.is_none() && docks.contains(&b.kind) && b.docks.iter().any(|slot| slot.is_none() || *slot == Some(unit.id))
         };
-        if let Some(home) = home.filter(|_| unit.stats.plane.is_some_and(|p| p.airport_bound)) {
-            if self.buildings.iter().any(|b| b.id == home && free(b)) {
+        if let Some(home) = home.filter(|_| unit.stats.plane.is_some_and(|p| p.airport_bound))
+            && self.buildings.iter().any(|b| b.id == home && free(b)) {
                 return Some(home);
             }
-        }
         self.buildings
             .iter()
             .filter(|b| free(b))
@@ -215,15 +214,14 @@ impl World {
     }
 
     fn unlink(&mut self, plane: &mut Plane, id: u32) {
-        if let Some(building) = plane.contact.take() {
-            if let Some(b) = self.buildings.iter_mut().find(|b| b.id == building) {
+        if let Some(building) = plane.contact.take()
+            && let Some(b) = self.buildings.iter_mut().find(|b| b.id == building) {
                 for slot in &mut b.docks {
                     if *slot == Some(id) {
                         *slot = None;
                     }
                 }
             }
-        }
     }
 
     fn floor(&self, x: i32, y: i32) -> i32 {
@@ -265,11 +263,10 @@ impl World {
     // lets go of the pad's slot.
     fn set_goal(&mut self, index: usize, plane: &mut Plane, goal: Option<Goal>) {
         let id = self.units[index].id;
-        if let Some(contact) = plane.contact {
-            if goal.is_some() && goal != Some(Goal::Building(contact)) {
+        if let Some(contact) = plane.contact
+            && goal.is_some() && goal != Some(Goal::Building(contact)) {
                 self.unlink(plane, id);
             }
-        }
         plane.goal = goal;
         let coord = match goal {
             None => None,
@@ -458,15 +455,14 @@ impl World {
                 }
                 let unit = &self.units[index];
                 let armed = unit.stats.fighter.primary.is_some();
-                if armed && plane.ammo < stats.ammo && plane.contact.is_none() {
-                    if let Some(dock) = self.find_pad(unit, plane.home).filter(|&dock| self.link(plane, id, dock)) {
+                if armed && plane.ammo < stats.ammo && plane.contact.is_none()
+                    && let Some(dock) = self.find_pad(unit, plane.home).filter(|&dock| self.link(plane, id, dock)) {
                         plane.mission = Mission::Enter;
                         plane.state = 0;
                         self.set_goal(index, plane, Some(Goal::Building(dock)));
                         self.units[index].arms.target = None;
                         return 1;
                     }
-                }
                 // Settled on its pad short of
                 // ammunition or health, the pad puts it to sleep to see to it.
                 let unit = &self.units[index];
@@ -930,11 +926,10 @@ impl World {
                     plane.ammo -= 1;
                 }
             }
-            if let Some(target) = self.units[index].arms.target {
-                if !self.alive(target) || self.in_air(target) {
+            if let Some(target) = self.units[index].arms.target
+                && (!self.alive(target) || self.in_air(target)) {
                     self.units[index].arms.target = None;
                 }
-            }
             if !plane.crashing && self.units[index].health > 0 && self.tick >= plane.wake {
                 let wait = self.plane_mission(index, &mut plane);
                 plane.wake = self.tick + wait;
@@ -980,7 +975,7 @@ impl World {
         let weapon = fighter.primary.and_then(|mount| self.weapons.get(mount.weapon as usize)).cloned();
         let (rof, range) = weapon.map_or((1, 0), |weapon| (weapon.rof.max(1) as u64, weapon.range));
         let cell_of_target = |world: &Self, target: Aim| world.aim_point(target).map(|point| (point.0.div_euclid(crate::LEPTONS_PER_CELL), point.1.div_euclid(crate::LEPTONS_PER_CELL)));
-        let mut shoot = |world: &mut Self, plane: &mut Plane, target: Aim| {
+        let shoot = |world: &mut Self, plane: &mut Plane, target: Aim| {
             let mut arms = world.units[index].arms;
             let facing = world.direction_to((at.0, at.1), target).unwrap_or((body as u16) << 8);
             let which = world.select_weapon(&fighter, target);
@@ -1018,11 +1013,10 @@ impl World {
                 });
                 if near {
                     plane.state = 4;
-                } else if let Some(cell) = cell_of_target(self, target) {
-                    if !plane.heading_for(cell) || !plane.is_moving() {
+                } else if let Some(cell) = cell_of_target(self, target)
+                    && (!plane.heading_for(cell) || !plane.is_moving()) {
                         self.set_goal(index, plane, Some(Goal::Cell(cell.0, cell.1)));
                     }
-                }
                 1
             }
             4 => {
@@ -1078,11 +1072,6 @@ impl World {
             }
             _ => 1,
         }
-    }
-
-    /// Gives an aircraft's locomotor a cell to fly to.
-    pub(crate) fn plane_fly_to(&mut self, index: usize, plane: &mut Plane, cell: (i32, i32)) {
-        self.set_goal(index, plane, Some(Goal::Cell(cell.0, cell.1)));
     }
 
     /// The player's order to an aircraft to go somewhere.

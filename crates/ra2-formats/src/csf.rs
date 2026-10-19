@@ -46,7 +46,7 @@ impl Csf {
                 // Text is UTF-16 with every byte inverted.
                 let units: Vec<u16> = r
                     .bytes(len * 2)?
-                    .chunks_exact(2)
+                    .as_chunks::<2>().0.iter()
                     .map(|c| !u16::from_le_bytes([c[0], c[1]]))
                     .collect();
                 if tag == b"WRTS" {

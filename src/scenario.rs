@@ -237,14 +237,13 @@ fn a_war_factory_builds_tanks_that_come_out_and_can_be_driven() {
     let mut seen_inside = false;
     for _ in 0..4000 {
         game.run(1);
-        if let Some(unit) = game.world.units().get(before) {
-            if unit.tethered {
+        if let Some(unit) = game.world.units().get(before)
+            && unit.tethered {
                 seen_inside = true;
                 let cell = unit.cell();
                 assert!((factory.0..factory.0 + 5).contains(&cell.0) && (factory.1..factory.1 + 3).contains(&cell.1), "{cell:?}");
                 assert_eq!(unit.facing, 0x40);
             }
-        }
     }
     assert!(seen_inside);
     let made: Vec<u32> = game.world.units().iter().filter(|u| u.owner == PLAYER && !known.contains(&u.id)).map(|unit| unit.id).collect();
@@ -343,7 +342,7 @@ fn units_go_to_their_factory_s_rally_point() {
         game.world.order(Order::Rally { building: factory, x: goal.0, y: goal.1 });
     }
     let known: Vec<u32> = game.world.units().iter().map(|u| u.id).collect();
-    let before = known.len();
+    let _before = known.len();
     for name in ["MTNK", "E1"] {
         let unit = game.units.iter().position(|n| n == name).unwrap() as u16;
         game.world.order(Order::BuildUnit { house: PLAYER, unit });
@@ -550,7 +549,7 @@ fn factories_keep_turning_units_out_whatever_they_are() {
     let barracks = game.world.buildings().iter().find(|b| b.owner == PLAYER && b.size == (3, 2)).map(|b| b.id).unwrap();
     game.world.order(Order::Rally { building: barracks, x: goal.0, y: goal.1 });
     let known: Vec<u32> = game.world.units().iter().map(|u| u.id).collect();
-    let before = known.len();
+    let _before = known.len();
     let id = |game: &Scenario, name: &str| game.units.iter().position(|n| n == name).unwrap() as u16;
     for _ in 0..5 {
         let unit = id(&game, "E1");
@@ -905,7 +904,7 @@ fn a_harrier_is_built_on_a_pad_flies_out_fires_and_comes_home_to_reload() {
     assert!(game.world.buildable_units(PLAYER).contains(&harrier), "the Harrier is not offered");
     game.world.houses[PLAYER as usize].credits = 50_000;
     let known: Vec<u32> = game.world.units().iter().map(|u| u.id).collect();
-    let before = known.len();
+    let _before = known.len();
     for _ in 0..5 {
         game.world.order(Order::BuildUnit { house: PLAYER, unit: harrier });
     }
@@ -1033,7 +1032,7 @@ fn the_computer_house_deploys_its_base_vehicle_and_both_sides_get_starting_units
     let mine = game.world.units().iter().find(|u| u.owner == PLAYER).map(|u| u.cell()).unwrap();
     assert!((vehicle.1 .0 - mine.0).abs() + (vehicle.1 .1 - mine.1).abs() > 20, "the two start too close: {mine:?} {:?}", vehicle.1);
     let known: Vec<u32> = game.world.units().iter().map(|u| u.id).collect();
-    let before = known.len();
+    let _before = known.len();
     game.world.create_starting_units(10);
     let (ours, theirs) = (
         game.world.units().iter().filter(|u| !known.contains(&u.id) && u.owner == PLAYER).count(),
@@ -1666,13 +1665,12 @@ fn a_tech_airport_gives_a_second_paradrop() {
     let mut told = None;
     for _ in 0..1500 {
         game.run(1);
-        if told.is_none() {
-            if let Some(unit) = game.world.units().iter().find(|u| u.falling.is_some()).map(|u| u.id) {
+        if told.is_none()
+            && let Some(unit) = game.world.units().iter().find(|u| u.falling.is_some()).map(|u| u.id) {
                 told = Some(unit);
                 game.world.order(Order::Deploy { unit });
                 assert_eq!(game.world.unit(unit).unwrap().stance, ra2_sim::combat::Stance::Standing);
             }
-        }
     }
     assert_eq!(soldiers(&game), before + 6);
     let first = game.world.unit(told.expect("nobody fell")).unwrap();
@@ -3602,7 +3600,7 @@ fn advance(game: &mut Scenario) {
         battle(game);
     }
     game.world.tick();
-    if game.world.current_tick() % 7 == 0 {
+    if game.world.current_tick().is_multiple_of(7) {
         game.world.take_events();
     }
 }

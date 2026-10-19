@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 ra2-formats = { version = "0.1.0", path = "../ra2-formats" }
+
+[lints]
+workspace = true

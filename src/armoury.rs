@@ -268,7 +268,6 @@ impl Armoury {
         let projectile = self.projectile(rules, projectile_name);
         let warhead = self.warhead(rules, warhead_name);
         let colour = |key: &str| triple(get(key)).map_or([0; 3], |(r, g, b)| [r as u8, g as u8, b as u8]);
-        let defaults = Weapon::default();
         self.weapons.push(Weapon {
             damage: number("Damage").unwrap_or(0),
             rof: number("ROF").unwrap_or(0),
@@ -294,7 +293,6 @@ impl Armoury {
             ambient_damage: get("AmbientDamage").and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(0),
             rad_level: get("RadLevel").and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(0),
             suicide: yes(get("Suicide"), false),
-            ..defaults
         });
         self.weapon_looks.push(WeaponLook {
             name: name.to_owned(),
@@ -479,7 +477,7 @@ impl Armoury {
 
     /// An elite's weapons: `ElitePrimary` and `EliteSecondary`.
     pub fn elite(&mut self, rules: &Ini, art: Option<&Ini>, name: &str, image: &str) -> (Option<Mount>, Option<Mount>) {
-        let mut mount = |armoury: &mut Self, key: &str, flh: [&str; 2]| -> Option<Mount> {
+        let mount = |armoury: &mut Self, key: &str, flh: [&str; 2]| -> Option<Mount> {
             let weapon = armoury.weapon(rules, rules.get(name, key)?.trim())?;
             let point = flh.iter().find_map(|key| triple(art.and_then(|art| art.get(image, key))));
             Some(Mount { weapon, flh: point.unwrap_or((0, 0, 0)) })
@@ -538,7 +536,7 @@ impl Armoury {
         let art_get = |key: &str| art.and_then(|art| art.get(image, key));
         let defaults = Fighter::default();
         let is_building = rules.section("BuildingTypes").iter().any(|(_, entry)| entry.trim().eq_ignore_ascii_case(name));
-        let mut mount = |armoury: &mut Self, key: &str, flh: &str| -> Option<Mount> {
+        let mount = |armoury: &mut Self, key: &str, flh: &str| -> Option<Mount> {
             let weapon = armoury.weapon(rules, get(key)?.trim())?;
             Some(Mount { weapon, flh: triple(art_get(flh)).unwrap_or((0, 0, 0)) })
         };

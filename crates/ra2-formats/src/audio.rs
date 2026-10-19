@@ -66,7 +66,7 @@ impl AudioIndex {
         let samples = if entry.flags & FLAG_ADPCM != 0 {
             decode_ima_adpcm(data, channels, entry.block)
         } else if entry.flags & FLAG_PCM != 0 {
-            data.chunks_exact(2).map(|pair| i16::from_le_bytes([pair[0], pair[1]])).collect()
+            data.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes([pair[0], pair[1]])).collect()
         } else {
             return None;
         };
@@ -179,7 +179,7 @@ impl Pcm {
             } else if id == b"data" {
                 let (tag, channels, rate, block) = format?;
                 let samples = match tag {
-                    1 => body.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect(),
+                    1 => body.as_chunks::<2>().0.iter().map(|p| i16::from_le_bytes([p[0], p[1]])).collect(),
                     0x11 => decode_ima_adpcm(body, channels as usize, block),
                     _ => return None,
                 };

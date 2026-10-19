@@ -10,3 +10,6 @@ crc32fast = "1.5.2"
 lzo = "0.1.4"
 memmap2 = "0.9.11"
 num-bigint = "0.5.1"
+
+[lints]
+workspace = true

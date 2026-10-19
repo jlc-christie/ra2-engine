@@ -309,10 +309,7 @@ impl Directory {
         let mut ids: Vec<usize> = self.conns.keys().copied().collect();
         ids.sort_unstable();
         for id in ids {
-            loop {
-                let Some(bytes) = self.conns.get_mut(&id).and_then(|conn| conn.link.poll()) else {
-                    break;
-                };
+            while let Some(bytes) = self.conns.get_mut(&id).and_then(|conn| conn.link.poll()) {
                 handled += 1;
                 if let Some(message) = ToServer::decode(&bytes) {
                     self.handle(id, message);

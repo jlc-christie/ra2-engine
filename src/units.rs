@@ -31,17 +31,12 @@ pub struct BuildCatalog(pub Vec<CatalogEntry>);
 pub struct CatalogEntry {
     /// The type's name in rules.ini.
     pub name: String,
-    /// Art of its build-up animation.
-    pub buildup: Option<String>,
-    /// Art name, and the file name of the sidebar picture.
-    pub art: String,
+    /// The file name of the sidebar picture.
     pub cameo: String,
     /// Key of its name in the string table.
     pub ui_name: String,
     /// How tall its selection box is, in levels.
     pub height: i32,
-    /// Whether it produces things (`Factory`), so can be made the primary one.
-    pub factory: bool,
     pub construction_yard: bool,
 }
 
@@ -65,9 +60,6 @@ pub struct SuperCatalog(pub Vec<(String, String, String)>);
 /// The building type the player is choosing a spot for, if any.
 #[derive(Resource, Default)]
 pub struct Placing(pub Option<u16>);
-
-/// How close to a vehicle's centre a click must be to select it, in pixels.
-pub(crate) const PICK_RADIUS: f32 = 22.0;
 
 /// The running simulation.
 #[derive(Resource)]
@@ -582,12 +574,9 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
         world.building_types.push(info.sim);
         catalog.push(CatalogEntry {
             name: info.name,
-            buildup: info.buildup,
-            art: info.art,
             cameo: info.cameo,
             ui_name: info.ui_name,
             height: info.height,
-            factory: info.factory,
             construction_yard,
         });
     }
@@ -643,7 +632,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
         .collect();
     world.splash_anims = scene.armoury.splashes.iter().map(number).collect();
     let known = |name: &str| Some(number(&name.to_owned())).filter(|&at| at != ra2_sim::smudge::NO_ANIM);
-    world.super_rules.nuke_ball.1 = known("NUKEBALL");
+    world.super_rules.nuke_ball.1 = Some("NUKEBALL").and_then(known);
     world.super_rules.storm.bolt_explosion = scene.bolt_explosion.as_deref().and_then(known);
     for (warhead, look) in world.warheads.iter_mut().zip(&scene.armoury.warhead_looks) {
         warhead.anim_list = look.anims.iter().map(number).collect();
@@ -801,10 +790,10 @@ pub fn setup(
         looks,
         voices,
         kinds,
-        slam_sound: crate::audio::rules_sound(&files, "BuildingSlam"),
-        click_sound: crate::audio::rules_sound(&files, "GenericClick"),
-        scold_sound: crate::audio::rules_sound(&files, "ScoldSound"),
-        sell_sound: crate::audio::rules_sound(&files, "SellSound"),
+        slam_sound: crate::audio::rules_sound(files, "BuildingSlam"),
+        click_sound: crate::audio::rules_sound(files, "GenericClick"),
+        scold_sound: crate::audio::rules_sound(files, "ScoldSound"),
+        sell_sound: crate::audio::rules_sound(files, "SellSound"),
         building_art,
         anim_types,
         anim_names,
@@ -870,28 +859,26 @@ pub fn debug_orders(sim: &mut Sim) {
     if let (Some(at), Some(building)) = (
         std::env::var("RA2_HOLD_AT").ok().and_then(|n| n.trim().parse::<u64>().ok()),
         std::env::var("RA2_BUILD").ok().and_then(|n| n.trim().parse::<u16>().ok()),
-    ) {
-        if sim.0.current_tick() == at {
+    )
+        && sim.0.current_tick() == at {
             sim.give(Order::Suspend { house: local(), building });
         }
-    }
     // RA2_UNDEPLOY_AT=building,tick,x,y packs a building up at a tick and sends its
     // vehicle to a cell.
     if let Ok(spec) = std::env::var("RA2_UNDEPLOY_AT") {
         let spec: Vec<i64> = spec.split(',').filter_map(|n| n.trim().parse().ok()).collect();
-        if let [building, at, x, y] = spec[..] {
-            if sim.0.current_tick() as i64 == at {
+        if let [building, at, x, y] = spec[..]
+            && sim.0.current_tick() as i64 == at {
                 info!("RA2_UNDEPLOY_AT: building {building}, can undeploy: {}", sim.0.can_undeploy(building as u32));
                 sim.give(Order::Undeploy { building: building as u32, x: x as i32, y: y as i32 });
             }
-        }
     }
     // RA2_DEPLOY_AT=unit,tick deploys a unit at a later tick, for checking deployment
     // after a move without a mouse.
     if let Ok(spec) = std::env::var("RA2_DEPLOY_AT") {
         let spec: Vec<u64> = spec.split(',').filter_map(|n| n.trim().parse().ok()).collect();
-        if let [unit, at] = spec[..] {
-            if sim.0.current_tick() == at {
+        if let [unit, at] = spec[..]
+            && sim.0.current_tick() == at {
                 let unit = unit as u32;
                 info!(
                     "RA2_DEPLOY_AT: unit {unit} at {:?}, can deploy: {}, in the way: {:?}",
@@ -904,7 +891,6 @@ pub fn debug_orders(sim: &mut Sim) {
                 }
                 sim.give(Order::Deploy { unit });
             }
-        }
     }
 }
 
@@ -1621,7 +1607,7 @@ fn show_buildings(
                 // once it has been fired.
                 let charged = art.charged_anim_time;
                 let near = sim.0.building_types.get(building.kind as usize).and_then(|kind| kind.super_weapon).and_then(|index| sim.0.houses.get(building.owner as usize)?.supers.get(index as usize)).is_some_and(|state| {
-                    state.granted && !(charged < if state.ready { 0.0 } else { state.left as f32 / 900.0 })
+                    state.granted && charged >= if state.ready { 0.0 } else { state.left as f32 / 900.0 }
                 });
                 if charged <= 990.0 {
                     match (clock.super_stage, near) {
@@ -1936,12 +1922,11 @@ fn show_ore(
         // Ore that came during play shows the
         // picture it drew then, one of its kind's twelve.
         // DATA: rules.ini `[OverlayTypes]`: TIB01 to TIB12 and GEM01 to GEM12.
-        if !view.ore_art.contains_key(&cell) {
-            if let Some(picture) = sim.0.map.ore_picture(cell.0, cell.1) {
+        if !view.ore_art.contains_key(&cell)
+            && let Some(picture) = sim.0.map.ore_picture(cell.0, cell.1) {
                 let family = if sim.0.map.ore_at(cell.0, cell.1).is_some_and(|(kind, _)| kind == 1) { "gem" } else { "tib" };
                 view.ore_art.insert(cell, format!("{family}{:02}", picture + 1));
             }
-        }
         let Some(art) = view.ore_art.get(&cell) else {
             continue;
         };
@@ -2433,8 +2418,8 @@ fn auto_build(
     // RA2_BASE=GAPOWR;GAREFN;GAWALL@30,92 puts those buildings down as soon as the
     // player's first building stands: at the cell given, or wherever each first fits; for looking at
     // buildings without playing through a build order.
-    if !*based {
-        if let Ok(names) = std::env::var("RA2_BASE") {
+    if !*based
+        && let Ok(names) = std::env::var("RA2_BASE") {
             let yard = sim.0.buildings().iter().find(|b| b.owner == local() && b.buildup.is_none()).map(|b| b.cell);
             if let Some(yard) = yard {
                 *based = true;
@@ -2467,7 +2452,6 @@ fn auto_build(
                 }
             }
         }
-    }
     // RA2_SUPER='0@40,90@300;3@30,95@400;4@50,95@420' charges the player's
     // super weapon of that kind (if granted) and fires it at the cell at the
     // tick, for looking at super weapons; after a kind 3 the destination is
@@ -2845,7 +2829,6 @@ pub(crate) fn scene_point_3d(origin: Vec2, (x, y, z): (i32, i32, i32)) -> Vec2 {
 // entry (the splash list at 35 on water for `Conventional` ones); a dying vehicle
 // or building plays one of its `Explosion` animations and its `DieSound`; an
 // animation's own sound is heard as it starts.
-#[allow(clippy::too_many_arguments)]
 fn show_effects(
     mut commands: Commands,
     mut sim: ResMut<Sim>,
@@ -2874,7 +2857,7 @@ fn show_effects(
     };
     // An animation is upright, tested 2 nearer than the ground at its height
     // (in pixels, where it is known).
-    let mut start = |commands: &mut Commands, cues: &mut MessageWriter<Cue>, view: &UnitView, name: &str, at: Vec2, height: Option<i32>, depth: f32| {
+    let start = |commands: &mut Commands, cues: &mut MessageWriter<Cue>, view: &UnitView, name: &str, at: Vec2, height: Option<i32>, depth: f32| {
         let name = name.to_uppercase();
         let Some(anim) = view.anim_types.get(&name) else {
             return;
@@ -3125,11 +3108,10 @@ fn show_effects(
             // side. `YuriMindControlSound` at the
             // victim.
             Event::BombPlanted { target, house } => {
-                if house == local() {
-                    if let Some(at) = sim.0.aim_point(target) {
+                if house == local()
+                    && let Some(at) = sim.0.aim_point(target) {
                         cues.write_batch(crate::audio::rules_sound(&files, "BombAttachSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
                     }
-                }
             }
             Event::MindControlled { victim, .. } => {
                 if let Some(at) = sim.0.aim_point(ra2_sim::combat::Aim::Unit(victim)) {
@@ -3652,7 +3634,6 @@ struct DebrisSprite(u32);
 // Not original behaviour: a model is turned about the upright only, where
 // the engine tumbles it about a random axis; the loop's rate is not the
 // type's `RandomRate`.
-#[allow(clippy::too_many_arguments)]
 fn show_debris(
     mut commands: Commands,
     sim: Res<Sim>,
@@ -3723,11 +3704,10 @@ fn show_debris(
             let centre = snapped(point, middle);
             transform.translation = Vec3::new(centre.x, -centre.y, depth);
         }
-        if lay && trailer != ra2_sim::smudge::NO_ANIM && tick % every == 0 {
-            if let Some(name) = view.anim_names.get(trailer as usize).cloned() {
+        if lay && trailer != ra2_sim::smudge::NO_ANIM && tick.is_multiple_of(every)
+            && let Some(name) = view.anim_names.get(trailer as usize).cloned() {
                 commands.spawn((DespawnOnExit(Screen::InGame), Effect { anim: name, began: tick, at: point, depth: depth - 0.0001 }, Sprite::default()));
             }
-        }
     }
     for piece in world.debris() {
         if !seen.contains(&piece.id) {

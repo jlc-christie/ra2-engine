@@ -129,9 +129,8 @@ fn resize_for_checks(mut frame: Local<u32>, mut windows: Query<&mut Window, With
     let Some((w, h)) = size.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))) else {
         return;
     };
-    if at.parse::<u32>().ok() == Some(*frame) {
-        if let Ok(mut window) = windows.single_mut() {
+    if at.parse::<u32>().ok() == Some(*frame)
+        && let Ok(mut window) = windows.single_mut() {
             window.resolution.set(w, h);
         }
-    }
 }

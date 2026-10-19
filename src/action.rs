@@ -254,13 +254,11 @@ fn infantry_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Ac
     }
     // An `Agent` over an enemy's `Spyable` building
     // goes in.
-    if fighter.agent && !mods.ctrl {
-        if let Target::Building(building) = object {
-            if world.entry_action(unit.id, building) == Some(Entry::Infiltrate) {
+    if fighter.agent && !mods.ctrl
+        && let Target::Building(building) = object
+            && world.entry_action(unit.id, building) == Some(Entry::Infiltrate) {
                 return Action::Capture;
             }
-        }
-    }
     // Step 4: an engineer never shows the attack cursor.
     if fighter.engineer && a == Action::Attack {
         return Action::NoMove;
@@ -274,13 +272,11 @@ fn infantry_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Ac
     // let through here.
     let armed = fighter.primary.is_some() || fighter.secondary.is_some();
     let attack = a == Action::Attack || (armed && matches!(a, Action::NoMove | Action::None));
-    if attack && fighter.c4 {
-        if let Target::Building(building) = object {
-            if world.entry_action(unit.id, building) == Some(Entry::Sabotage) {
+    if attack && fighter.c4
+        && let Target::Building(building) = object
+            && world.entry_action(unit.id, building) == Some(Entry::Sabotage) {
                 return Action::Sabotage;
             }
-        }
-    }
     // An attack with a weapon
     // that has `SabotageCursor` (the chrono commando's and the SEAL's charge)
     // shows the charge-planting cursor and is an attack all the same.
@@ -295,11 +291,10 @@ fn infantry_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Ac
     if fighter.deployer && unit.stance != Stance::Standing {
         match a {
             Action::Move => return Action::NoMove,
-            Action::Attack => {
-                if !fighter.deploy_fire || world.attack_action(unit.id, aim_of(object), mods.ctrl) != Some(true) {
+            Action::Attack
+                if (!fighter.deploy_fire || world.attack_action(unit.id, aim_of(object), mods.ctrl) != Some(true)) => {
                     return Action::NoMove;
                 }
-            }
             _ => {}
         }
     }
@@ -308,11 +303,10 @@ fn infantry_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Ac
         a = Action::None;
     }
     // Step 14: a friendly transport.
-    if a != Action::NoEnter {
-        if let Some(entered) = transport(world, unit, object, a) {
+    if a != Action::NoEnter
+        && let Some(entered) = transport(world, unit, object, a) {
             a = entered;
         }
-    }
     finish(world, a, object)
 }
 
@@ -347,11 +341,10 @@ fn vehicle_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Act
     }
     // An aircraft over one of its side's pad
     // buildings with room for it.
-    if let (true, Target::Building(id)) = (unit.plane.is_some(), object) {
-        if world.can_dock(unit.id, id) {
+    if let (true, Target::Building(id)) = (unit.plane.is_some(), object)
+        && world.can_dock(unit.id, id) {
             return Action::Enter;
         }
-    }
     // Step 5.
     if let Some(entered) = transport(world, unit, object, a) {
         return entered;
@@ -442,14 +435,13 @@ pub fn for_cell(world: &World, me: Target, cell: (i32, i32), mods: Mods) -> Acti
                 return Action::GuardArea;
             }
             // Ctrl: fire on the ground itself.
-            if mods.ctrl {
-                if let Some(in_range) = world.attack_action(id, Aim::Cell(cell.0, cell.1), true) {
+            if mods.ctrl
+                && let Some(in_range) = world.attack_action(id, Aim::Cell(cell.0, cell.1), true) {
                     if dug_in && !(fighter.deploy_fire && in_range) {
                         return Action::NoMove;
                     }
                     return Action::Attack;
                 }
-            }
             if !world.map.in_playfield(cell.0, cell.1) {
                 return Action::NoMove;
             }

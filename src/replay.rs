@@ -48,9 +48,9 @@ fn replay() {
                     eprintln!("REPLAY {tick}: house {house} defeated (event)");
                 }
             }
-            for house in 0..world.houses.len() {
-                if world.houses[house].defeated && !down[house] {
-                    down[house] = true;
+            for (house, (state, down)) in world.houses.iter().zip(down.iter_mut()).enumerate() {
+                if state.defeated && !*down {
+                    *down = true;
                     eprintln!("REPLAY {tick}: house {house} defeated (flag)");
                 }
             }
@@ -93,11 +93,10 @@ fn replay() {
         }
     }
     // REPLAY_DUMP=1 prints the followed unit in full at the end.
-    if let (Some(id), Some(_)) = (watch, std::env::var_os("REPLAY_DUMP")) {
-        if let Some(unit) = world.unit(id) {
+    if let (Some(id), Some(_)) = (watch, std::env::var_os("REPLAY_DUMP"))
+        && let Some(unit) = world.unit(id) {
             eprintln!("REPLAY dump {unit:#?}");
         }
-    }
     // REPLAY_CELL=x,y prints the ground round a cell: passable, track speed,
     // overlay, movement zone 2 (tracked vehicles), level.
     if let Some((cx, cy)) = std::env::var("REPLAY_CELL").ok().and_then(|text| {
@@ -134,11 +133,10 @@ fn replay() {
             saved.order(ra2_sim::Order::Move { unit: unit as u32, x, y });
             for tick in 0..400 {
                 saved.tick();
-                if tick % 50 == 0 {
-                    if let Some(u) = saved.unit(unit as u32) {
+                if tick % 50 == 0
+                    && let Some(u) = saved.unit(unit as u32) {
                         eprintln!("REPLAY loaded +{tick}: unit {unit} at {:?} dest {:?}", u.cell(), u.destination());
                     }
-                }
             }
             return;
         }

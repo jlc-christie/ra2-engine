@@ -233,10 +233,9 @@ fn foundation_pixels(scale: f32, (w, h): (i32, i32)) -> Vec<(i32, i32)> {
     pixels
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update(
     mut radar: ResMut<Radar>,
-    mut sim: ResMut<Sim>,
+    sim: ResMut<Sim>,
     view: Res<UnitView>,
     ground: Res<RadarGround>,
     files: Res<GameFiles>,
@@ -345,7 +344,7 @@ fn update(
     // pixel wider all round.
     let (pw, ph) = (ow + 2, oh + 2);
     let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    let mut put = |rgba: &mut [u8], x: i32, y: i32, colour: [u8; 3]| {
+    let put = |rgba: &mut [u8], x: i32, y: i32, colour: [u8; 3]| {
         if (0..ow).contains(&x) && (0..oh).contains(&y) {
             let at = (((y + 1) * pw + x + 1) * 4) as usize;
             rgba[at..at + 4].copy_from_slice(&[colour[0], colour[1], colour[2], 255]);
@@ -436,7 +435,7 @@ fn update(
         box_y = oh - box_h - 1;
     }
     let line = crate::hud::TEXT;
-    let mut outline = |rgba: &mut [u8], x0: i32, y0: i32, w: i32, h: i32, inner: bool| {
+    let outline = |rgba: &mut [u8], x0: i32, y0: i32, w: i32, h: i32, inner: bool| {
         let mut dot = |x: i32, y: i32| {
             if inner {
                 put(rgba, x, y, line);

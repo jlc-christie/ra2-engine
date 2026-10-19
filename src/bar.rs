@@ -211,7 +211,6 @@ fn setup(mut commands: Commands, files: Res<GameFiles>, mut images: ResMut<Asset
 // A button acts when the mouse is let go over it; the
 // team buttons also take the right button; the planning button stays down while
 // its mode is on; the thumb hides and shows the buttons, with the button sound.
-#[allow(clippy::too_many_arguments)]
 fn buttons(
     mouse: Res<ButtonInput<MouseButton>>,
     pointer: Res<Pointer>,
@@ -234,13 +233,12 @@ fn buttons(
     let thumb_x = if bar.open { bar.thumb_open_x } else { bar.thumb_shut_x };
     let on_thumb = over.is_some_and(|at| at.x >= thumb_x && at.x < thumb_x + 28.0);
     for button in [MouseButton::Left, MouseButton::Right] {
-        if mouse.just_pressed(button) {
-            if let Some(slot) = slot_over.filter(|&slot| button == MouseButton::Left || BUTTONS[slot].1 == "team") {
+        if mouse.just_pressed(button)
+            && let Some(slot) = slot_over.filter(|&slot| button == MouseButton::Left || BUTTONS[slot].1 == "team") {
                 bar.held = Some((slot, button));
             }
-        }
-        if mouse.just_released(button) {
-            if let Some((slot, held)) = bar.held.filter(|(_, held)| *held == button) {
+        if mouse.just_released(button)
+            && let Some((slot, held)) = bar.held.filter(|(_, held)| *held == button) {
                 bar.held = None;
                 if slot_over == Some(slot) {
                     match (BUTTONS[slot].1, held) {
@@ -272,7 +270,6 @@ fn buttons(
                     }
                 }
             }
-        }
     }
     if mouse.just_released(MouseButton::Left) && on_thumb {
         bar.open = !bar.open;
@@ -302,7 +299,6 @@ fn buttons(
 // At most six lines 19 pixels apart, the oldest dropped to make room; a command's
 // status line stays 240 sixteenths-of-a-second-ish ticks (16 ms each: 3.84 s of
 // real time) and is added silently; the rest close up at once when one goes.
-#[allow(clippy::too_many_arguments)]
 fn messages(
     mut commands: Commands,
     mut incoming: MessageReader<Status>,

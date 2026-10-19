@@ -73,8 +73,8 @@ impl Mix {
                 .get(key_end..key_end + header_len)
                 .ok_or_else(|| bad("truncated index"))?
                 .to_vec();
-            for block in header.chunks_exact_mut(8) {
-                cipher.decrypt_block(block.try_into().unwrap());
+            for block in header.as_chunks_mut::<8>().0 {
+                cipher.decrypt_block(block.into());
             }
             (header[..6 + count * 12].to_vec(), key_end + header_len)
         } else {
@@ -88,7 +88,7 @@ impl Mix {
         };
 
         let mut entries = HashMap::new();
-        for entry in index[6..].chunks_exact(12) {
+        for entry in index[6..].as_chunks::<12>().0 {
             let id = u32::from_le_bytes(entry[0..4].try_into().unwrap());
             let offset = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as usize;
             let size = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;

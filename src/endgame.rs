@@ -59,7 +59,6 @@ impl Plugin for EndGamePlugin {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn watch(
     mut commands: Commands,
     sim: Res<Sim>,
