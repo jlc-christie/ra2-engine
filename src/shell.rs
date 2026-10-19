@@ -466,6 +466,19 @@ impl Shell {
         })
     }
 
+    /// A shape drawn in a house colour: palette entries 16 to 31 become the
+    /// colour's shades.
+    fn shp_in_colour(&mut self, images: &mut Assets<Image>, name: &str, palette: &str, frame: usize, hsv: [u8; 3]) -> Pic {
+        self.cached(images, format!("{name}/{palette}/{frame}/{hsv:?}"), |shell| {
+            let shp = shell.files.get(name).and_then(Shp::parse);
+            let shp = shp.unwrap_or_else(|| panic!("missing or bad {name}"));
+            let pal = shell.files.get(palette).and_then(Palette::parse);
+            let mut pal = pal.unwrap_or_else(|| panic!("missing or bad {palette}"));
+            pal.0[16..32].copy_from_slice(&crate::colors::remap_shades(hsv));
+            (shp.width as u32, shp.height as u32, shp.frame_rgba(frame, &pal))
+        })
+    }
+
     /// A dialog widget image. Pure magenta is transparent.
     fn pcx(&mut self, images: &mut Assets<Image>, name: &str) -> Pic {
         self.cached(images, name.to_owned(), |shell| {
@@ -959,18 +972,23 @@ fn spawn_load_screen(
                     // past the bar. The row is the taller of the bar plus 6 and
                     // the text, plus 4.
                     let player_name = if lobby.name.is_empty() { painter.shell.string("GUI:Player") } else { lobby.name.clone() };
-                    let player_colour = rules
+                    let player_hsv = rules
                         .as_ref()
                         .and_then(|rules| rules.get("Colors", crate::terrain::PLAYER_COLOURS[setup.options.colour.clamp(0, 7) as usize]))
-                        .and_then(|value| <[u8; 3]>::try_from(value.split(',').filter_map(|part| part.trim().parse().ok()).collect::<Vec<u8>>().get(..3)?).ok())
-                        .map_or([255, 255, 255], crate::colors::hsv_to_rgb);
-                    let bar = painter.shell.shp(painter.images, "progbarm.shp", "mpls.pal", 0);
+                        .and_then(|value| <[u8; 3]>::try_from(value.split(',').filter_map(|part| part.trim().parse().ok()).collect::<Vec<u8>>().get(..3)?).ok());
+                    let player_colour = player_hsv.map_or([255, 255, 255], crate::colors::hsv_to_rgb);
+                    // The bar's art is all house-colour shades.
+                    let bar = match player_hsv {
+                        Some(hsv) => painter.shell.shp_in_colour(painter.images, "progbarm.shp", "mpls.pal", 0, hsv),
+                        None => painter.shell.shp(painter.images, "progbarm.shp", "mpls.pal", 0),
+                    };
                     let name = painter.shell.text(painter.images, &player_name, player_colour);
                     let row = (bar.size.y + 6.0).max(name.size.y) + 4.0;
                     let (x, y) = (16.0, 321.0);
                     p.spawn((place(x, y, bar.size.x + name.size.x + 36.0, row + 1.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
                     let (bar_x, bar_y) = (x + 5.0, y + ((row - 6.0 - bar.size.y) / 2.0).floor());
-                    let [r, g, b] = player_colour;
+                    // The inside not yet loaded, in the darkest of the colour's shades.
+                    let [r, g, b] = player_hsv.map_or([0, 0, 0], |hsv| crate::colors::remap_shades(hsv)[15]);
                     p.spawn((place(bar_x + 3.0, bar_y + 3.0, bar.size.x, bar.size.y), BackgroundColor(Color::srgb_u8(r, g, b))));
                     // Not original behaviour: the map loads at once here, so
                     // the bar fills over the time the screen is shown.

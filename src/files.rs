@@ -417,3 +417,4 @@ impl GameText {
         self.strings.as_ref().and_then(|strings| strings.get(key)).unwrap_or(key).to_owned()
     }
 }
+
