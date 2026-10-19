@@ -579,7 +579,7 @@ fn shortcuts(
                 } else {
                     selection.0 = members;
                     if let Some(Target::Unit(id)) = selection.0.first().copied() {
-                        cues.write_batch(view.voices.get(&id).and_then(|voices| voices.0.clone()).map(Cue::Sound));
+                        cues.write_batch(view.voice(&sim.0, id, false).map(Cue::Sound));
                     }
                 }
             }
@@ -625,7 +625,7 @@ fn shortcuts(
         // The first
         // unit selected answers as for a click.
         if let Some(Target::Unit(id)) = selection.0.first().copied() {
-            cues.write_batch(view.voices.get(&id).and_then(|voices| voices.0.clone()).map(Cue::Sound));
+            cues.write_batch(view.voice(&sim.0, id, false).map(Cue::Sound));
         }
         state.last_group = Some((group, tick));
     }
@@ -916,7 +916,7 @@ fn clicks(
                 selection.0.push(target);
                 if !spoke {
                     spoke = true;
-                    let voice = view.voices.get(&id).and_then(|voices| voices.0.clone());
+                    let voice = view.voice(&sim.0, id, false);
                     cues.write_batch(voice.map(Cue::Sound));
                 }
             }
@@ -979,7 +979,7 @@ fn clicks(
         (Action::Select, Some(object)) => {
             selection.0 = vec![object];
             if let Target::Unit(id) = object {
-                let voice = view.voices.get(&id).and_then(|voices| voices.0.clone());
+                let voice = view.voice(&sim.0, id, false);
                 cues.write_batch(voice.map(Cue::Sound));
             }
             return;
@@ -1085,7 +1085,7 @@ fn clicks(
             last_order.0 = Some(sim.0.current_tick());
             if let (false, Target::Unit(unit)) = (spoke, me) {
                 spoke = true;
-                let voice = view.voices.get(&unit).and_then(|voices| voices.1.clone());
+                let voice = view.voice(&sim.0, unit, true);
                 cues.write_batch(voice.map(Cue::Sound));
             }
         }
