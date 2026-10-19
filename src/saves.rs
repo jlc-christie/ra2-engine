@@ -84,17 +84,23 @@ pub fn write(path: &Path, save: &SaveFile) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    std::fs::write(path, bytes).map_err(|error| error.to_string())
+    // Written beside it and then put in its place, so a save being written
+    // over is never left half old and half new.
+    let part = path.with_extension("part");
+    std::fs::write(&part, bytes).map_err(|error| error.to_string())?;
+    std::fs::rename(&part, path).map_err(|error| error.to_string())
 }
 
 pub fn read(path: &Path) -> Result<SaveFile, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let body = bytes.strip_prefix(MAGIC).ok_or("not a saved game")?;
-    let save: SaveFile = bincode::deserialize(body).map_err(|error| error.to_string())?;
-    if save.format != FORMAT {
-        return Err(format!("saved by another version (format {})", save.format));
+    // The format number comes first, so another version's save is told apart
+    // before its body is read.
+    let format = body.get(..4).map(|four| u32::from_le_bytes([four[0], four[1], four[2], four[3]])).ok_or("cut short")?;
+    if format != FORMAT {
+        return Err(format!("saved by another version (format {format})"));
     }
-    Ok(save)
+    bincode::deserialize(body).map_err(|error| error.to_string())
 }
 
 /// A save as the lists show it.
@@ -117,14 +123,25 @@ pub fn list() -> Vec<Entry> {
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("sav")))
         .filter_map(|entry| {
-            // Only the front of the file is read: the format and what it is called.
+            // Only the front of the file is read: the header up to the start of
+            // the simulation's state.
             let mut reader = std::io::BufReader::new(std::fs::File::open(entry.path()).ok()?);
             let mut magic = [0u8; 8];
             reader.read_exact(&mut magic).ok()?;
+            if &magic != MAGIC {
+                return None;
+            }
             let (format, description): (u32, String) = bincode::deserialize_from(&mut reader).ok()?;
+            if format != FORMAT {
+                return None;
+            }
+            let _: (u64, u64, MatchSetup, u8, (f32, f32)) = bincode::deserialize_from(&mut reader).ok()?;
             // A save whose simulation is of another shape cannot be loaded;
-            // it is left out. Its number is the first four bytes of the state.
-            let current = (&magic == MAGIC && format == FORMAT) && read(&entry.path()).ok().is_some_and(|save| save.state.get(..4) == Some(&ra2_sim::snapshot::FORMAT.to_le_bytes()[..]));
+            // it is left out. Its number is the first four bytes of the state,
+            // after the state's length.
+            let mut state = [0u8; 12];
+            reader.read_exact(&mut state).ok()?;
+            let current = state[8..] == ra2_sim::snapshot::FORMAT.to_le_bytes();
             current.then(|| Entry { path: entry.path(), description, modified: entry.metadata().and_then(|data| data.modified()).unwrap_or(std::time::UNIX_EPOCH) })
         })
         .collect();
@@ -369,6 +386,24 @@ mod tests {
         std::fs::write(&path, b"not a save").unwrap();
         assert!(read(&path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_list_shows_only_saves_whose_simulation_can_be_loaded() {
+        let folder = std::env::temp_dir().join(format!("ra2-rust-save-list-{}", std::process::id()));
+        let setup = || MatchSetup { map: "mp03t4".into(), map_name: "Anytown".into(), options: crate::game::Options::default(), max_players: 4, mode_rules: "MPBattle.ini".into() };
+        let mut state = ra2_sim::snapshot::FORMAT.to_le_bytes().to_vec();
+        state.extend([1, 2, 3]);
+        let current = SaveFile { format: FORMAT, description: "now".into(), tick: 1, digest: 0, setup: setup(), local: 1, camera: (0.0, 0.0), state, recording: None };
+        let old = SaveFile { format: FORMAT, description: "old".into(), tick: 1, digest: 0, setup: setup(), local: 1, camera: (0.0, 0.0), state: vec![0, 0, 0, 0], recording: None };
+        write(&folder.join("SAVE0001.SAV"), &current).unwrap();
+        write(&folder.join("SAVE0002.SAV"), &old).unwrap();
+        // SAFETY: no other test reads RA2_SAVES.
+        unsafe { std::env::set_var("RA2_SAVES", &folder) };
+        let listed: Vec<String> = list().into_iter().map(|entry| entry.description).collect();
+        unsafe { std::env::remove_var("RA2_SAVES") };
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(listed, ["now"]);
     }
 }
 
