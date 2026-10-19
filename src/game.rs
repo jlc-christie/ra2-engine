@@ -381,6 +381,11 @@ pub(crate) fn load_map(
     );
 
     let mut built = crate::units::build_world(&files, &mut scene);
+    // RA2_NOSHROUD=1 turns the shroud off for checks; never in a network game,
+    // where it is shared state.
+    if seat.is_none() && std::env::var_os("RA2_NOSHROUD").is_some() {
+        built.world.map.shroud_on = false;
+    }
     let built_levels: std::collections::HashMap<(i32, i32), i32> =
         scene.placements.iter().map(|p| p.light_cell).map(|cell| (cell, built.world.map.level(cell.0, cell.1) as i32)).collect();
     commands.insert_resource(std::mem::take(&mut scene.radar_ground));

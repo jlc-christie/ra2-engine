@@ -361,7 +361,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build, announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
+                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>),
@@ -502,9 +502,8 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
     for &(cell, kind) in &scene.map_smudges {
         world.map.place_smudge(cell, kind);
     }
-    // DATA: `[MultiplayerDialogSettings] Shroud=yes`. RA2_NOSHROUD=1 turns it off
-    // for checks.
-    world.map.shroud_on = std::env::var("RA2_NOSHROUD").is_err();
+    // DATA: `[MultiplayerDialogSettings] Shroud=yes`.
+    world.map.shroud_on = true;
     world.chrono = scene.chrono;
     let upkeep = &scene.upkeep;
     world.refund_percent = upkeep.refund_percent;
