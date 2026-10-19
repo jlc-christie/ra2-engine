@@ -91,10 +91,8 @@ pub(crate) struct UnitView {
     art: UnitArt,
     /// Scene pixel of cell (0, 0)'s corner at height 0.
     pub(crate) origin: Vec2,
-    /// Model and owner palette of each unit, by unit id.
-    looks: HashMap<u32, (String, Option<usize>)>,
-    /// What each unit says when selected and when sent somewhere, by unit id.
-    pub(crate) voices: HashMap<u32, (Option<String>, Option<String>)>,
+    /// The palettes the map gave the units it placed, for those no house owns.
+    placed_palettes: HashMap<u32, Option<usize>>,
     /// Model and voices of vehicle types that can appear during play.
     kinds: Vec<Kind>,
     /// `BuildingSlam`: the sound of a building going down.
@@ -316,6 +314,21 @@ impl UnitView {
         self.house_palettes.get(owner as usize).copied().flatten()
     }
 
+    /// The palette a unit is drawn in: its house's, or for one no house owns,
+    /// the one the map gave it.
+    fn unit_palette(&self, id: u32, owner: u8) -> Option<usize> {
+        match self.placed_palettes.get(&id) {
+            Some(&palette) if owner == 0 => palette,
+            _ => self.palette_of(owner),
+        }
+    }
+
+    /// What a unit of a type says when selected and when sent somewhere.
+    pub(crate) fn voice(&self, world: &World, id: u32, moving: bool) -> Option<String> {
+        let kind = world.unit(id).and_then(|unit| (unit.stats.kind as usize).checked_sub(1)).and_then(|kind| self.kinds.get(kind))?;
+        if moving { kind.voice_move.clone() } else { kind.voice_select.clone() }
+    }
+
     /// The palette a house's things are drawn with.
     pub(crate) fn house_palette(&self, owner: u8) -> Option<&ra2_formats::pal::Palette> {
         self.art.owner_palette(self.palette_of(owner))
@@ -345,7 +358,7 @@ impl UnitView {
 
     /// The colour a unit or building shows in on the radar.
     pub(crate) fn radar_colour_unit(&self, id: u32, owner: u8) -> [u8; 3] {
-        self.art.owner_colour(if owner == 0 { self.looks.get(&id).and_then(|look| look.1) } else { self.palette_of(owner) })
+        self.art.owner_colour(self.unit_palette(id, owner))
     }
 
     /// A building's: its owner's colour, or for a neutral one the colour of
@@ -402,9 +415,8 @@ pub struct BuiltWorld {
     ore_art: HashMap<(i32, i32), String>,
     /// Model and voices of vehicle types that can appear during play.
     kinds: Vec<Kind>,
-    /// Model and palette, and voices, of each starting unit by id.
-    looks: HashMap<u32, (String, Option<usize>)>,
-    voices: HashMap<u32, (Option<String>, Option<String>)>,
+    /// The palette the map gave each unit it placed, by id.
+    placed_palettes: HashMap<u32, Option<usize>>,
 }
 
 /// Makes the simulation for a freshly built scene, taking what it needs out of it.
@@ -591,12 +603,10 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
             construction_yard,
         });
     }
-    let mut looks = HashMap::new();
-    let mut voices = HashMap::new();
+    let mut placed_palettes = HashMap::new();
     for spawn in std::mem::take(&mut scene.unit_spawns) {
         let id = world.add_unit(spawn.cell, spawn.facing, spawn.stats, spawn.owner);
-        voices.insert(id, (spawn.voice_select, spawn.voice_move));
-        looks.insert(id, (spawn.image, spawn.palette));
+        placed_palettes.insert(id, spawn.palette);
     }
     // The foot soldiers the map starts with.
     for soldier in std::mem::take(&mut scene.infantry_spawns) {
@@ -605,9 +615,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
         };
         let stats = kind.stats;
         if let Some(id) = world.add_infantry(soldier.cell, soldier.spot, soldier.facing, stats, crate::terrain::NEUTRAL) {
-            let kind = &kinds[soldier.kind as usize];
-            voices.insert(id, (kind.voice_select.clone(), kind.voice_move.clone()));
-            looks.insert(id, (kind.image.clone(), soldier.palette));
+            placed_palettes.insert(id, soldier.palette);
         }
     }
     // The buildings the map starts with.
@@ -709,8 +717,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
         world,
         catalog,
         kinds,
-        looks,
-        voices,
+        placed_palettes,
         building_art,
         anim_types: std::mem::take(&mut scene.anim_types),
         building_palettes,
@@ -734,8 +741,7 @@ pub fn setup(
         catalog,
         unit_catalog,
         kinds,
-        looks,
-        voices,
+        placed_palettes,
         building_art,
         anim_types,
         anim_names,
@@ -752,9 +758,6 @@ pub fn setup(
     commands.insert_resource(UnitCatalog(unit_catalog));
     commands.insert_resource(SuperCatalog(super_catalog));
     commands.insert_resource(Placing::default());
-    for &id in looks.keys() {
-        commands.spawn((DespawnOnExit(Screen::InGame), UnitSprite(id), Sprite::default()));
-    }
 
     // RA2_MOVE=unit,x,y orders a unit to a cell at the start, for checking movement
     // without a mouse. Several orders can be given, separated by semicolons.
@@ -798,8 +801,7 @@ pub fn setup(
     commands.insert_resource(UnitView {
         art,
         origin: Vec2::new(origin.0 as f32, origin.1 as f32),
-        looks,
-        voices,
+        placed_palettes,
         kinds,
         slam_sound: rules.sound("BuildingSlam"),
         click_sound: rules.sound("GenericClick"),
@@ -971,14 +973,6 @@ fn show_units(
         if drawn.contains(&unit.id) {
             continue;
         }
-        if !view.looks.contains_key(&unit.id) {
-            let Some(kind) = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)) else {
-                continue;
-            };
-            let palette = view.palette_of(unit.owner);
-            view.voices.insert(unit.id, (kind.voice_select.clone(), kind.voice_move.clone()));
-            view.looks.insert(unit.id, (kind.image.clone(), palette));
-        }
         commands.spawn((DespawnOnExit(Screen::InGame), UnitSprite(unit.id), Sprite::default()));
     }
     for (entity, unit_sprite, mut sprite, mut transform, depth) in &mut sprites {
@@ -987,17 +981,13 @@ fn show_units(
             commands.entity(entity).despawn();
             continue;
         };
-        // A unit that has changed sides (a mind taken, or given back) takes its
-        // new house's colours.
-        if unit.owner != 0 {
-            let wanted = view.palette_of(unit.owner);
-            if let Some(look) = view.looks.get_mut(&unit_sprite.0).filter(|look| look.1 != wanted) {
-                look.1 = wanted;
-            }
-        }
-        let Some((model, palette)) = view.looks.get(&unit_sprite.0) else {
+        // A unit that has changed sides (a mind taken, or given back) shows
+        // its new house's colours.
+        let Some(kind) = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)) else {
             continue;
         };
+        let (model, palette) = (kind.image.clone(), view.unit_palette(unit.id, unit.owner));
+        let (model, palette) = (&model, &palette);
         // A
         // disguised unit that does not show its true self is drawn as the type
         // it imitates, in the colours of the house it imitates.
@@ -3254,7 +3244,7 @@ fn show_sinking(
         let Some(model) = (ship.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map(|k| k.image.clone()) else {
             continue;
         };
-        let palette = view.looks.get(&ship.id).map_or_else(|| view.palette_of(ship.owner), |look| look.1);
+        let palette = view.unit_palette(ship.id, ship.owner);
         let cell = (ship.x.div_euclid(LEPTONS_PER_CELL), ship.y.div_euclid(LEPTONS_PER_CELL));
         let level = world.map.level(cell.0, cell.1) as i32;
         let direction = (((ship.facing >> 2) + 1) >> 1) & 31;
