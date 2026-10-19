@@ -381,7 +381,7 @@ impl Game for Lockstep<'_> {
     // A player who quits or
     // is dropped has their house destroyed.
     fn destroy_house(&mut self, house: u8) {
-        self.0.destroy_house_for_tests(house);
+        self.0.destroy_house(house);
     }
 }
 
