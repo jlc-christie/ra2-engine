@@ -221,16 +221,22 @@ struct Ramp {
 
 /// Gives each unit on the map an entity and takes it away when the unit goes
 /// (dies, deploys, or boards something).
-fn mirror_units(mut commands: Commands, sim: Res<Sim>, mut entities: ResMut<UnitEntities>) {
+fn mirror_units(mut commands: Commands, sim: Res<Sim>, mut entities: ResMut<UnitEntities>, shadows: Query<&ShadowSprite>) {
     entities.0.retain(|&id, &mut entity| {
         let here = sim.0.unit(id).is_some();
         if !here {
+            if let Ok(shadow) = shadows.get(entity) {
+                commands.entity(shadow.0).despawn();
+            }
             commands.entity(entity).despawn();
         }
         here
     });
     for unit in sim.0.units() {
-        entities.0.entry(unit.id).or_insert_with(|| commands.spawn((DespawnOnExit(Screen::InGame), SimUnit(unit.id), WalkCounter::default(), Sprite::default())).id());
+        entities.0.entry(unit.id).or_insert_with(|| {
+            let shadow = commands.spawn((DespawnOnExit(Screen::InGame), UnitShadow, Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0), Visibility::Hidden)).id();
+            commands.spawn((DespawnOnExit(Screen::InGame), SimUnit(unit.id), WalkCounter::default(), ShadowSprite(shadow), Sprite::default())).id()
+        });
     }
 }
 
@@ -313,9 +319,13 @@ impl Rocking {
     }
 }
 
-/// The shadow a unit casts, by the unit's id.
+/// The sprite of the shadow a unit casts.
 #[derive(Component)]
-struct UnitShadow(u32);
+struct UnitShadow;
+
+/// A unit's shadow sprite, made and taken away with it.
+#[derive(Component)]
+struct ShadowSprite(Entity);
 
 /// A shadow's picture: a shape's frame drawn dark ("shp:<art>:<frame>"), or a
 /// model's section on a ramp at a direction.
@@ -950,13 +960,13 @@ fn show_units(
     files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
-    mut sprites: Query<(Entity, &SimUnit, &mut Sprite, &mut Transform, Option<&mut Depth>, &mut WalkCounter, Option<&mut Rocking>, Option<&Rock>, Option<&mut Ramp>), Without<UnitShadow>>,
-    mut shadows: Query<(Entity, &UnitShadow, &mut Sprite, &mut Transform, &mut Visibility), Without<SimUnit>>,
+    mut sprites: Query<(Entity, &SimUnit, &mut Sprite, &mut Transform, Option<&mut Depth>, &mut WalkCounter, Option<&mut Rocking>, Option<&Rock>, Option<&mut Ramp>, &ShadowSprite), Without<UnitShadow>>,
+    mut shadows: Query<(Entity, &mut Sprite, &mut Transform, &mut Visibility), (With<UnitShadow>, Without<SimUnit>)>,
 ) {
     let view = &mut *view;
     // The shadow each unit casts this frame: picture, where its draw point is,
     // and its depth.
-    let mut cast: HashMap<u32, (ShadowKey, Vec2, f32)> = HashMap::new();
+    let mut cast: HashMap<Entity, (ShadowKey, Vec2, f32)> = HashMap::new();
     // A vehicle that has appeared since the start (a building packing up).
     let tick = sim.0.current_tick();
     if tick != view.walk_tick {
@@ -993,7 +1003,7 @@ fn show_units(
         }
         view.walk_tick = tick;
     }
-    for (entity, sim_unit, mut sprite, mut transform, depth, counter, rocking, rock, ramp_seen) in &mut sprites {
+    for (entity, sim_unit, mut sprite, mut transform, depth, counter, rocking, rock, ramp_seen, shadow) in &mut sprites {
         let Some(unit) = sim.0.unit(sim_unit.0) else {
             continue;
         };
@@ -1148,7 +1158,7 @@ fn show_units(
                 } else {
                     ("infshdw".to_owned(), 0)
                 };
-                cast.insert(unit.id, (key, point, 1.0 + (row + 0.95) * DEPTH_PER_ROW));
+                cast.insert(shadow.0, (key, point, 1.0 + (row + 0.95) * DEPTH_PER_ROW));
             }
             // A soldier is tested against the depth
             // with an adjustment of -10, -2 and, on the ground, his own -1; all
@@ -1210,7 +1220,7 @@ fn show_units(
             let centre = snapped(point, *middle);
             if casts_shadow {
                 let frames = view.art.frame_count(&files, model);
-                cast.insert(unit.id, ((format!("shp:{model}:{}", frame + frames / 2), 0), point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
+                cast.insert(shadow.0, ((format!("shp:{model}:{}", frame + frames / 2), 0), point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
             }
             // Its own adjustment and -2.
             let height = 15 * level + slope_up(&sim.0, unit).y as i32;
@@ -1343,7 +1353,7 @@ fn show_units(
             let ramp = if unit.on_bridge { 0 } else { sim.0.map.ramp(cell.0, cell.1) };
             let base = model.split_once('@').map_or(model.as_str(), |(base, _)| base);
             let key = (format!("{base}@s{section}{}@r{ramp}", if half { "h" } else { "" }), direction);
-            cast.insert(unit.id, (key, point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
+            cast.insert(shadow.0, (key, point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
         }
         // A vehicle's picture is tested
         // against the depth with its own adjustment, less the pixels of its
@@ -1363,12 +1373,8 @@ fn show_units(
         }
         transform.translation = Vec3::new(centre.x, -centre.y, depth);
     }
-    for (entity, shadow, mut sprite, mut transform, mut visibility) in &mut shadows {
-        if sim.0.unit(shadow.0).is_none() {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        let Some((key, point, depth)) = cast.remove(&shadow.0) else {
+    for (entity, mut sprite, mut transform, mut visibility) in &mut shadows {
+        let Some((key, point, depth)) = cast.remove(&entity) else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -1409,9 +1415,6 @@ fn show_units(
         *visibility = Visibility::Inherited;
         let centre = snapped(point, *middle);
         transform.translation = Vec3::new(centre.x, -centre.y, depth);
-    }
-    for id in cast.into_keys() {
-        commands.spawn((DespawnOnExit(Screen::InGame), UnitShadow(id), Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
     }
 }
 
