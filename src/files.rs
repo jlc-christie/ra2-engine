@@ -398,3 +398,22 @@ impl Rules {
             .unwrap_or_default()
     }
 }
+
+/// The game's font and string table, read once. The data check makes sure both
+/// are there.
+#[derive(Resource)]
+pub struct GameText {
+    pub font: Option<ra2_formats::fnt::Font>,
+    pub strings: Option<ra2_formats::csf::Csf>,
+}
+
+impl GameText {
+    pub fn read(files: &GameFiles) -> Self {
+        GameText { font: files.get("game.fnt").and_then(ra2_formats::fnt::Font::parse), strings: files.get("ra2.csf").and_then(ra2_formats::csf::Csf::parse) }
+    }
+
+    /// A string by its key, or the key where there is none.
+    pub fn text(&self, key: &str) -> String {
+        self.strings.as_ref().and_then(|strings| strings.get(key)).unwrap_or(key).to_owned()
+    }
+}

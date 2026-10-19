@@ -4,9 +4,7 @@
 //! Not original behaviour: every button of the original does something.
 
 use bevy::prelude::*;
-use ra2_formats::fnt::Font;
 
-use crate::files::GameFiles;
 
 /// Shows a line for a few seconds.
 #[derive(Message, Clone)]
@@ -38,9 +36,8 @@ impl Plugin for NoticePlugin {
 fn show(
     mut commands: Commands,
     mut notices: MessageReader<Notice>,
-    files: Res<GameFiles>,
+    text: Res<crate::files::GameText>,
     mut images: ResMut<Assets<Image>>,
-    mut font: Local<Option<Option<Font>>>,
     old: Query<Entity, With<NoticeBox>>,
     time: Res<Time<Real>>,
 ) {
@@ -48,8 +45,7 @@ fn show(
         return;
     };
     info!("notice: {}", notice.0);
-    let font = font.get_or_insert_with(|| files.get("game.fnt").and_then(Font::parse));
-    let Some(font) = font.as_ref() else {
+    let Some(font) = text.font.as_ref() else {
         return;
     };
     for entity in &old {

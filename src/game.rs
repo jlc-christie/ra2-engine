@@ -281,6 +281,7 @@ pub(crate) fn load_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut ground: ResMut<Assets<crate::depth::GroundMaterial>>,
     rules: Res<crate::files::Rules>,
+    game_text: Res<crate::files::GameText>,
 ) {
     // A random country or colour is settled now, or for the country, on the
     // loading screen before.
@@ -426,8 +427,7 @@ pub(crate) fn load_map(
     if let Some((x, y)) = std::env::var("RA2_CRATE").ok().and_then(|v| v.split_once(',').and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))) {
         built.world.put_crate_for_tests((x, y), 0xff);
     }
-    let strings = files.get("ra2.csf").and_then(ra2_formats::csf::Csf::parse);
-    let label = |key: &str| strings.as_ref().and_then(|strings| strings.get(key)).unwrap_or(key).to_owned();
+    let label = |key: &str| game_text.text(key);
     let mut names = vec![String::new(), label("GUI:Player")];
     names.extend(rows.iter().enumerate().map(|(n, row)| if row.level >= crate::net::HUMAN_ROW { format!("{} {}", label("GUI:Player"), n + 2) } else { label(["GUI:AIHard", "GUI:AINormal", "GUI:AIEasy"][row.level.clamp(0, 2) as usize]) }));
     // The player goes by the name they gave; in a network game, so do the others.

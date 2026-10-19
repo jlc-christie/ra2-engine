@@ -6,8 +6,6 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use ra2_formats::csf::Csf;
-use ra2_formats::fnt::Font;
 
 use crate::audio::Cue;
 use crate::cursor::{self, Pointer, WantedCursor};
@@ -189,7 +187,7 @@ fn run_menu(
     mouse: Res<ButtonInput<MouseButton>>,
     pointer: Res<Pointer>,
     window: Single<&Window, With<PrimaryWindow>>,
-    (files, rules): (Res<GameFiles>, Res<crate::files::Rules>),
+    (files, rules, game_text): (Res<GameFiles>, Res<crate::files::Rules>, Res<crate::files::GameText>),
     mut images: ResMut<Assets<Image>>,
     mut wanted: ResMut<WantedCursor>,
     mut next_screen: ResMut<NextState<Screen>>,
@@ -345,9 +343,8 @@ fn run_menu(
         return;
     }
 
-    let font = files.get("game.fnt").and_then(Font::parse);
-    let strings = files.get("ra2.csf").and_then(Csf::parse);
-    let text = |key: &str| strings.as_ref().and_then(|strings| strings.get(key)).unwrap_or(key).to_owned();
+    let font = game_text.font.as_ref();
+    let text = |key: &str| game_text.text(key);
     let (width, height) = (window.width(), window.height());
     let side = width - SIDEBAR_WIDTH;
     commands

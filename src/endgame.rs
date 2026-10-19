@@ -65,6 +65,7 @@ fn watch(
     view: Res<UnitView>,
     names: Res<HouseNames>,
     files: Res<GameFiles>,
+    text: Res<crate::files::GameText>,
     time: Res<Time<Real>>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut images: ResMut<Assets<Image>>,
@@ -80,14 +81,14 @@ fn watch(
         *progress = Progress::default();
     }
     progress.told.resize(world.houses.len(), false);
-    let strings = files.get("ra2.csf").and_then(ra2_formats::csf::Csf::parse);
+    let strings = text.strings.as_ref();
     let name_of = |house: usize| names.0.get(house).cloned().unwrap_or_default();
     // "%s has been defeated!" for 540 frames, with
     // the announcer: "player defeated", or "you have lost" for the player.
     for house in 1..world.houses.len() {
         if world.houses[house].defeated && !progress.told[house] {
             progress.told[house] = true;
-            let text = strings.as_ref().and_then(|strings| strings.get("TXT_PLAYER_DEFEATED")).unwrap_or("%s has been defeated!").replacen("%s", &name_of(house), 1);
+            let text = strings.and_then(|strings| strings.get("TXT_PLAYER_DEFEATED")).unwrap_or("%s has been defeated!").replacen("%s", &name_of(house), 1);
             info!("{text}");
             status.write(crate::bar::Status::Long(text, view.house_colour(house as u8)));
             cues.write(Cue::Eva(if house == local() as usize { "EVA_YouHaveLost" } else { "EVA_PlayerDefeated" }));
