@@ -2629,7 +2629,17 @@ impl World {
     }
 
     pub fn unit(&self, id: u32) -> Option<&Unit> {
-        self.units.iter().find(|unit| unit.id == id)
+        self.unit_at(id).map(|index| &self.units[index])
+    }
+
+    /// Where a building is in the list, which is kept in id order.
+    pub(crate) fn building_at(&self, id: u32) -> Option<usize> {
+        self.buildings.binary_search_by_key(&id, |building| building.id).ok()
+    }
+
+    /// Where a unit is in the list, which is kept in id order.
+    pub(crate) fn unit_at(&self, id: u32) -> Option<usize> {
+        self.units.binary_search_by_key(&id, |unit| unit.id).ok()
     }
 
     pub fn buildings(&self) -> &[Building] {
@@ -3268,7 +3278,7 @@ impl World {
                     let flyer = self.units.iter().position(|u| u.id == id && u.jet.is_some());
                     if let (Some(rally), Some(flyer)) = (rally, flyer) {
                         self.send(flyer, rally);
-                    } else if let (Some(rally), Some(unit)) = (rally, self.units.iter_mut().find(|u| u.id == id)) {
+                    } else if let (Some(rally), Some(unit)) = (rally, self.unit_at(id).map(|at| &mut self.units[at])) {
                         unit.dest = Some(out);
                         unit.rally = Some(rally);
                     }
@@ -3278,7 +3288,7 @@ impl World {
             }
         } else {
             let id = self.add_unit(inside, facing, stats, house);
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                 unit.dest = Some(out);
             }
             Exit::Out
@@ -3329,7 +3339,7 @@ impl World {
 
     /// A sold building's last moment: the money, and it is gone.
     fn finish_sale(&mut self, id: u32) {
-        let Some(index) = self.buildings.iter().position(|b| b.id == id) else {
+        let Some(index) = self.building_at(id) else {
             return;
         };
         let building = self.demolish(index);
@@ -3539,7 +3549,7 @@ impl World {
             passenger.drop_path();
             passenger.arms = combat::Arms::default();
             let mode = self.kind_of(&passenger).map_or(0, |kind| kind.ifv_mode);
-            if let Some(at) = self.units.iter().position(|u| u.id == wanted) {
+            if let Some(at) = self.unit_at(wanted) {
                 let gun = self.kind_of(&self.units[at]).filter(|kind| kind.gunner).and_then(|kind| kind.gunner_weapons.get(mode).copied());
                 let transport = &mut self.units[at];
                 if transport.cargo.is_empty() && gun.is_some() {
@@ -3609,7 +3619,7 @@ impl World {
             // transport's own place in the list.
             let transport = self.units[index].id;
             self.put_back(passenger);
-            let Some(index) = self.units.iter().position(|u| u.id == transport) else {
+            let Some(index) = self.unit_at(transport) else {
                 continue;
             };
             // With the transport's own sound.
@@ -3627,7 +3637,7 @@ impl World {
     // Factories of vehicles, soldiers and aircraft,
     // cloning vats and repair depots.
     pub fn has_rally_point(&self, building: u32) -> bool {
-        self.buildings.iter().find(|b| b.id == building).and_then(|b| self.building_types.get(b.kind as usize)).is_some_and(|kind| {
+        self.building_at(building).map(|at| &self.buildings[at]).and_then(|b| self.building_types.get(b.kind as usize)).is_some_and(|kind| {
             matches!(kind.factory, Some(Factory::Unit | Factory::Infantry | Factory::Aircraft)) || kind.cloning || kind.unit_repair
         })
     }
@@ -3677,7 +3687,7 @@ impl World {
     // west and set to mining; if that fails, on a free cell near the building;
     // if that fails too its price is handed back.
     fn grand_opening(&mut self, id: u32) {
-        let Some(building) = self.buildings.iter().find(|b| b.id == id) else {
+        let Some(building) = self.building_at(id).map(|at| &self.buildings[at]) else {
             return;
         };
         // A `RevealToAll` building shows itself to
@@ -3696,7 +3706,7 @@ impl World {
                 self.events.push(combat::Event::SuperDetected { owner, index, cell: centre });
             }
         }
-        let Some(building) = self.buildings.iter().find(|b| b.id == id) else {
+        let Some(building) = self.building_at(id).map(|at| &self.buildings[at]) else {
             return;
         };
         let Some(free) = self.building_types.get(building.kind as usize).and_then(|kind| kind.free_unit) else {
@@ -4208,7 +4218,7 @@ impl World {
                         self.buildings[index].unload = Some(unload);
                         continue;
                     }
-                    match self.units.iter_mut().find(|u| u.id == unload.unit) {
+                    match self.unit_at(unload.unit).map(|at| &mut self.units[at]) {
                         Some(unit) => {
                             unit.drive = Some(Drive {
                                 selector: tracks::FACTORY_EXIT,
@@ -4519,7 +4529,7 @@ impl World {
     /// Sets a unit's health, for tests.
     #[doc(hidden)]
     pub fn units_mut_for_tests(&mut self, unit: u32, health: i32) {
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit) {
+        if let Some(unit) = self.unit_at(unit).map(|at| &mut self.units[at]) {
             unit.health = health;
         }
     }
@@ -4528,7 +4538,7 @@ impl World {
     #[doc(hidden)]
     pub fn disguise_for_tests(&mut self, unit: u32, look: (u16, u8)) {
         let tick = self.tick;
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit) {
+        if let Some(unit) = self.unit_at(unit).map(|at| &mut self.units[at]) {
             unit.disguise = Some(look);
             unit.disguised_at = tick;
         }
@@ -4546,7 +4556,7 @@ impl World {
     /// Makes a building all but indestructible, for tests.
     #[doc(hidden)]
     pub fn harden_building_for_tests(&mut self, building: u32) {
-        if let Some(building) = self.buildings.iter_mut().find(|b| b.id == building) {
+        if let Some(building) = self.building_at(building).map(|at| &mut self.buildings[at]) {
             building.health = 50_000_000;
         }
     }
@@ -4554,7 +4564,7 @@ impl World {
     /// Hands a building to another house with no ceremony, for tests.
     #[doc(hidden)]
     pub fn give_building_for_tests(&mut self, building: u32, house: u8) {
-        if let Some(building) = self.buildings.iter_mut().find(|b| b.id == building) {
+        if let Some(building) = self.building_at(building).map(|at| &mut self.buildings[at]) {
             building.owner = house;
         }
     }
@@ -4600,7 +4610,7 @@ impl World {
             }
             // Any order ends a guard of the ground round a post; the next
             // place it is left at becomes the post.
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                 unit.post = None;
             }
         }
@@ -4611,7 +4621,7 @@ impl World {
                 // zone does not reach is swapped for a free cell near it that it
                 // does, the choice among equals turning on the frame number; with
                 // none, the order comes to nothing.
-                let Some(index) = self.units.iter().position(|u| u.id == unit) else {
+                let Some(index) = self.unit_at(unit) else {
                     return;
                 };
                 if self.units[index].tethered {
@@ -4689,7 +4699,7 @@ impl World {
                     return;
                 }
                 let unit = self.units[index].id;
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit) {
+                if let Some(unit) = self.unit_at(unit).map(|at| &mut self.units[at]) {
                     unit.deploying = false;
                     unit.dest = Some((x, y));
                     unit.drop_path();
@@ -4702,7 +4712,7 @@ impl World {
                 // The route is dropped and the unit
                 // deploys once it has stopped; see `try_deploy`.
                 let tick = self.tick;
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit) {
+                if let Some(unit) = self.unit_at(unit).map(|at| &mut self.units[at]) {
                     // A transport with
                     // anyone aboard lets them out.
                     if !unit.cargo.is_empty() {
@@ -4757,7 +4767,7 @@ impl World {
                 if !self.can_undeploy(building) {
                     return;
                 }
-                let Some(index) = self.buildings.iter().position(|b| b.id == building) else {
+                let Some(index) = self.building_at(building) else {
                     return;
                 };
                 // The building first plays its build-up
@@ -4773,7 +4783,7 @@ impl World {
                 if !self.can_board(unit, transport) {
                     return;
                 }
-                let Some(index) = self.units.iter().position(|u| u.id == unit) else {
+                let Some(index) = self.unit_at(unit) else {
                     return;
                 };
                 let Some(cell) = self.unit(transport).map(Unit::cell) else {
@@ -4795,13 +4805,13 @@ impl World {
             Order::Enter { unit, building } => {
                 // The Capture mission, with the
                 // building as where to go.
-                let Some(index) = self.units.iter().position(|u| u.id == unit) else {
+                let Some(index) = self.unit_at(unit) else {
                     return;
                 };
                 if self.entry_action(unit, building).is_none() {
                     return;
                 }
-                let Some(target) = self.buildings.iter().find(|b| b.id == building) else {
+                let Some(target) = self.building_at(building).map(|at| &self.buildings[at]) else {
                     return;
                 };
                 let from = self.units[index].cell();
@@ -4820,7 +4830,7 @@ impl World {
             }
             Order::Aim { building, target } => {
                 // The Attack mission with the target.
-                if let Some(building) = self.buildings.iter_mut().find(|b| b.id == building) {
+                if let Some(building) = self.building_at(building).map(|at| &mut self.buildings[at]) {
                     building.arms.target = Some(target);
                     building.arms.attacking = true;
                 }
@@ -4861,7 +4871,7 @@ impl World {
                 }
                 // The Enter mission with the pad
                 // building as where to go.
-                if let Some(index) = self.units.iter().position(|u| u.id == unit)
+                if let Some(index) = self.unit_at(unit)
                     && self.can_dock(unit, building) {
                         self.plane_dock(index, building);
                     }
@@ -4869,7 +4879,7 @@ impl World {
             Order::Evacuate { building } => {
                 // The Unload mission of a
                 // building with soldiers in it puts them all out.
-                if let Some(index) = self.buildings.iter().position(|b| b.id == building) {
+                if let Some(index) = self.building_at(building) {
                     self.remove_occupants(index);
                 }
             }
@@ -4944,7 +4954,7 @@ impl World {
             Order::Rally { building, x, y } => {
                 // The point is the free cell nearest
                 // the one asked for, in the factory's own zone.
-                let Some(index) = self.buildings.iter().position(|b| b.id == building) else {
+                let Some(index) = self.building_at(building) else {
                     return;
                 };
                 if !self.has_rally_point(building) {
@@ -4961,7 +4971,7 @@ impl World {
                 // The primary one stops being so, with
                 // nothing promoted in its place; any other takes it from the rest
                 // of its kind.
-                let Some(index) = self.buildings.iter().position(|b| b.id == building) else {
+                let Some(index) = self.building_at(building) else {
                     return;
                 };
                 let (owner, kind) = (self.buildings[index].owner, self.buildings[index].kind);
@@ -4982,7 +4992,7 @@ impl World {
             Order::Harvest { unit, x, y } => {
                 // The Harvest mission with the cell as
                 // its destination.
-                let Some(index) = self.units.iter().position(|u| u.id == unit) else {
+                let Some(index) = self.unit_at(unit) else {
                     return;
                 };
                 if !self.units[index].stats.harvester || self.units[index].tethered {
@@ -4995,7 +5005,7 @@ impl World {
             }
             Order::Stop { unit } => {
                 // Target and destination go.
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit) {
+                if let Some(unit) = self.unit_at(unit).map(|at| &mut self.units[at]) {
                     // Its spawns lose
                     // their target and come home.
                     if let Some(spawner) = unit.spawner.as_mut() {
@@ -5010,7 +5020,7 @@ impl World {
             Order::Halt { building } => {
                 // The target goes;
                 // the mission is left as it is.
-                if let Some(building) = self.buildings.iter_mut().find(|b| b.id == building) {
+                if let Some(building) = self.building_at(building).map(|at| &mut self.buildings[at]) {
                     building.arms.target = None;
                     building.arms.attacking = false;
                     building.charge = None;
@@ -5400,7 +5410,7 @@ impl World {
             self.attack_blocker(id, cell);
         }
         for (id, cell) in entering {
-            if let Some(index) = self.units.iter().position(|u| u.id == id) {
+            if let Some(index) = self.unit_at(id) {
                 self.collect_crate(index, cell);
             }
         }
@@ -5517,7 +5527,7 @@ impl World {
     /// A unit with an enemy in the cell in its way fires on it, then goes on.
     // The object in the cell if it is not a friend.
     fn attack_blocker(&mut self, id: u32, cell: (i32, i32)) {
-        let Some(index) = self.units.iter().position(|u| u.id == id) else {
+        let Some(index) = self.unit_at(id) else {
             return;
         };
         let owner = self.units[index].owner;
@@ -5542,7 +5552,7 @@ impl World {
     // directions are tried starting from the one pointing away from it, nudged by -1, 0 or +1 at
     // random.
     fn scatter_unit_from(&mut self, id: u32, how: Scatter) {
-        let Some(index) = self.units.iter().position(|u| u.id == id) else {
+        let Some(index) = self.unit_at(id) else {
             return;
         };
         if self.units[index].is_moving() {
@@ -5638,7 +5648,7 @@ impl World {
     // the foundation's top cell, facing the deploy facing, with the building's
     // share of health, and drives to the cell.
     fn finish_packing(&mut self, building: u32, dest: (i32, i32)) {
-        let Some(index) = self.buildings.iter().position(|b| b.id == building) else {
+        let Some(index) = self.building_at(building) else {
             return;
         };
         let packed = self.buildings.remove(index);
@@ -5654,7 +5664,7 @@ impl World {
             return;
         };
         let id = self.add_unit((packed.cell.0 + 1, packed.cell.1 + 1), DEPLOY_FACING, stats, packed.owner);
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+        if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
             let health = packed.health as i64 * stats.strength as i64 / kind.strength.max(1) as i64;
             unit.health = (health as i32).max(1);
         }
@@ -5667,7 +5677,7 @@ impl World {
     // That order of events; the building
     // takes the unit's share of health.
     fn try_deploy(&mut self, id: u32) {
-        let Some(index) = self.units.iter().position(|u| u.id == id) else {
+        let Some(index) = self.unit_at(id) else {
             return;
         };
         if self.units[index].is_moving() {

@@ -29,7 +29,7 @@ impl World {
                 }
                 None => return,
             },
-            Aim::Building(id) => match self.buildings.iter().find(|b| b.id == id) {
+            Aim::Building(id) => match self.building_at(id).map(|at| &self.buildings[at]) {
                 Some(building) => {
                     let kind = self.building_types.get(building.kind as usize);
                     (building.owner, kind.map_or(0, |t| t.cost), !kind.is_some_and(|t| t.fighter.insignificant))
@@ -90,7 +90,7 @@ impl World {
             for aim in units.into_iter().map(Aim::Unit).chain(buildings.into_iter().map(Aim::Building)) {
                 let health = match aim {
                     Aim::Unit(id) => self.unit(id).map(|unit| unit.health),
-                    Aim::Building(id) => self.buildings.iter().find(|b| b.id == id).map(|b| b.health),
+                    Aim::Building(id) => self.building_at(id).map(|at| &self.buildings[at]).map(|b| b.health),
                     Aim::Cell(..) => None,
                 };
                 let Some(health) = health else {

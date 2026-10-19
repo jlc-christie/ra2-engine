@@ -218,7 +218,7 @@ impl World {
             // itself, else its own type and house. No damage.
             if let (Some(Aim::Unit(firer)), Aim::Unit(victim)) = (by, target) {
                 let look = self.unit(victim).filter(|unit| unit.stats.infantry).map(|unit| unit.disguise.unwrap_or((unit.stats.kind, unit.owner)));
-                if let (Some(look), Some(unit)) = (look, self.units.iter_mut().find(|u| u.id == firer)) {
+                if let (Some(look), Some(unit)) = (look, self.unit_at(firer).map(|at| &mut self.units[at])) {
                     unit.disguise = Some(look);
                     unit.disguised_at = self.tick;
                 }
@@ -238,7 +238,7 @@ impl World {
             // about. No damage is done: the branch leaves before the blast.
             if let (Some(Aim::Unit(charger)), Aim::Building(id)) = (by, target) {
                 let soldier = self.unit(charger).is_some_and(|unit| unit.stats.infantry);
-                if let Some(building) = self.buildings.iter_mut().find(|b| b.id == id).filter(|_| soldier) {
+                if let Some(building) = self.building_at(id).map(|at| &mut self.buildings[at]).filter(|_| soldier) {
                     building.chargers.retain(|other| *other != charger);
                     building.chargers.push(charger);
                 }
@@ -304,7 +304,7 @@ impl World {
         };
         let assault = fighter.secondary.and_then(|mount| self.weapons.get(mount.weapon as usize)).and_then(|weapon| self.warheads.get(weapon.warhead as usize)).is_some_and(|warhead| warhead.electric_assault);
         assault
-            && self.buildings.iter().find(|b| b.id == id).is_some_and(|building| {
+            && self.building_at(id).map(|at| &self.buildings[at]).is_some_and(|building| {
                 self.allied(house, building.owner) && self.building_types.get(building.kind as usize).is_some_and(|kind| kind.overpowerable)
             })
     }
@@ -499,12 +499,12 @@ impl World {
         if !free {
             return;
         }
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim) {
+        if let Some(unit) = self.unit_at(victim).map(|at| &mut self.units[at]) {
             unit.controlled_by = Some((controller, unit.owner));
             unit.owner = owner;
         }
         self.changed_sides(victim);
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
+        if let Some(unit) = self.unit_at(controller).map(|at| &mut self.units[at]) {
             unit.controls = Some(victim);
         }
         self.events.push(Event::MindControlled { controller, victim });
@@ -512,10 +512,10 @@ impl World {
 
     /// A controller lets go of whatever it holds, which goes back to its house.
     pub(crate) fn release_mind(&mut self, controller: u32) {
-        let Some(victim) = self.units.iter_mut().find(|u| u.id == controller).and_then(|unit| unit.controls.take()) else {
+        let Some(victim) = self.unit_at(controller).map(|at| &mut self.units[at]).and_then(|unit| unit.controls.take()) else {
             return;
         };
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim)
+        if let Some(unit) = self.unit_at(victim).map(|at| &mut self.units[at])
             && let Some((_, home)) = unit.controlled_by.take() {
                 unit.owner = home;
             }
@@ -527,7 +527,7 @@ impl World {
     // was aiming at it lets go; taken or let go, the same.
     pub(crate) fn changed_sides(&mut self, id: u32) {
         let me = Some(Aim::Unit(id));
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+        if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
             unit.arms.target = None;
             unit.arms.attacking = false;
             unit.arms.firing = 0;
@@ -571,7 +571,7 @@ impl World {
         if !self.can_infest(victim) {
             return false;
         }
-        let Some(index) = self.units.iter().position(|u| u.id == firer) else {
+        let Some(index) = self.unit_at(firer) else {
             return false;
         };
         let height = self.altitude(&self.units[index]) + self.ground_z(self.units[index].x, self.units[index].y);
@@ -610,7 +610,7 @@ impl World {
             let far = (d.0 * d.0 + d.1 * d.1 + d.2 * d.2).sqrt();
             if far <= leap.speed {
                 leap.biter.bite = Some((leap.weapon, self.tick));
-                if let Some(host) = self.units.iter_mut().find(|u| u.id == leap.target) {
+                if let Some(host) = self.unit_at(leap.target).map(|at| &mut self.units[at]) {
                     host.parasite.push(leap.biter);
                 }
                 continue;
@@ -864,7 +864,7 @@ impl World {
                 Some(unit) => (unit.owner, cost_of(self, unit.stats.kind) * [3, 2, 1][unit.rank() as usize]),
                 None => return,
             },
-            Aim::Building(id) => match self.buildings.iter().find(|b| b.id == id) {
+            Aim::Building(id) => match self.building_at(id).map(|at| &self.buildings[at]) {
                 Some(building) => (building.owner, self.building_types.get(building.kind as usize).map_or(0, |t| t.cost)),
                 None => return,
             },
@@ -879,7 +879,7 @@ impl World {
         let launcher = by.spawn_owner.filter(|_| by.stats.missile_spawn);
         let rules = self.veterancy;
         for id in [Some(killer), launcher].into_iter().flatten() {
-            let Some(index) = self.units.iter().position(|u| u.id == id) else {
+            let Some(index) = self.unit_at(id) else {
                 continue;
             };
             let own = cost_of(self, self.units[index].stats.kind).max(1) as f64;
@@ -996,13 +996,13 @@ impl World {
         // A victim that has gone is forgotten; a controller that has gone frees.
         let gone: Vec<u32> = self.units.iter().filter(|u| u.controls.is_some_and(|victim| self.unit(victim).is_none())).map(|u| u.id).collect();
         for id in gone {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                 unit.controls = None;
             }
         }
         let orphans: Vec<u32> = self.units.iter().filter(|u| u.controlled_by.is_some_and(|(controller, _)| self.unit(controller).is_none())).map(|u| u.id).collect();
         for id in orphans {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id)
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at])
                 && let Some((_, home)) = unit.controlled_by.take() {
                     unit.owner = home;
                     unit.arms.target = None;
@@ -1035,7 +1035,7 @@ impl World {
             self.blast_event(warhead, damage, point, false);
         }
         if let Some(controller) = dead.controlled_by.map(|(controller, _)| controller)
-            && let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
+            && let Some(unit) = self.unit_at(controller).map(|at| &mut self.units[at]) {
                 unit.controls = None;
             }
         if dead.controls.is_some() {

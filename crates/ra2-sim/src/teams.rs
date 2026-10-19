@@ -278,7 +278,7 @@ impl World {
             Aim::Unit(id) => self.unit(id).map_or((1, 0), |unit| {
                 (unit.stats.strength.max(1), (unit.stats.kind as usize).checked_sub(1).and_then(|k| self.unit_types.get(k)).map_or(0, |t| t.cost))
             }),
-            Aim::Building(id) => self.buildings.iter().find(|b| b.id == id).and_then(|b| self.building_types.get(b.kind as usize)).map_or((1, 0), |kind| (kind.strength.max(1), kind.cost)),
+            Aim::Building(id) => self.building_at(id).map(|at| &self.buildings[at]).and_then(|b| self.building_types.get(b.kind as usize)).map_or((1, 0), |kind| (kind.strength.max(1), kind.cost)),
             Aim::Cell(..) => return,
         };
         if by != owner {
@@ -295,7 +295,7 @@ impl World {
     /// The house's units answer an attack on one of its buildings.
     // Behaves as the original does, including its list of six.
     fn base_attacked(&mut self, building: u32, attacker: u32) {
-        let Some(victim) = self.buildings.iter().find(|b| b.id == building).cloned() else {
+        let Some(victim) = self.building_at(building).map(|at| &self.buildings[at]).cloned() else {
             return;
         };
         let Some(a) = self.unit(attacker).cloned() else {
@@ -397,7 +397,7 @@ impl World {
         }
         if answered > budget {
             let until = self.tick + self.team_data.defense_delay as u64;
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == attacker) {
+            if let Some(unit) = self.unit_at(attacker).map(|at| &mut self.units[at]) {
                 unit.rescue_until = until;
             }
         }
@@ -1129,7 +1129,7 @@ impl World {
                 other.members.retain(|&member| member != id);
                 other.dirty = true;
             }
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+        if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
             unit.team = Some(team.id);
             unit.initiated = first;
             unit.recruitable = recruitable;
@@ -1208,7 +1208,7 @@ impl World {
             }
             return flies;
         }
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+        if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
             unit.initiated = true;
         }
         true
@@ -1376,7 +1376,7 @@ impl World {
             _ => None,
         };
         for id in self.teams[at].members.clone() {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                 let aiming = unit.arms.target == Some(old);
                 let going = point.is_some() && unit.dest == point;
                 if aiming {
@@ -1565,7 +1565,7 @@ impl World {
             }
             let (health, strength) = match who {
                 Aim::Unit(id) => self.unit(id).map_or((0, 1), |u| (u.health, u.stats.strength.max(1))),
-                Aim::Building(id) => self.buildings.iter().find(|b| b.id == id).map_or((0, 1), |b| (b.health, self.building_types.get(b.kind as usize).map_or(1, |k| k.strength.max(1)))),
+                Aim::Building(id) => self.building_at(id).map(|at| &self.buildings[at]).map_or((0, 1), |b| (b.health, self.building_types.get(b.kind as usize).map_or(1, |k| k.strength.max(1)))),
                 Aim::Cell(..) => (0, 1),
             };
             v += -200.0 * health as f64 / strength as f64;
@@ -1574,7 +1574,7 @@ impl World {
             let mut value = (100_000.0 + v + -10.0 * (d - range_cells).max(0) as f64) as i64;
             // The category rules.
             if let Aim::Building(id) = who {
-                let Some(kind) = self.buildings.iter().find(|b| b.id == id).and_then(|b| self.building_types.get(b.kind as usize)) else {
+                let Some(kind) = self.building_at(id).map(|at| &self.buildings[at]).and_then(|b| self.building_types.get(b.kind as usize)) else {
                     continue;
                 };
                 if mask & 0x800 != 0 {
@@ -1672,7 +1672,7 @@ impl World {
         if team.members.len() != before {
             team.dirty = true;
             if !team.members.iter().any(|&id| self.unit(id).is_some_and(|u| u.initiated)) {
-                if let Some(unit) = team.members.first().and_then(|&id| self.units.iter_mut().find(|u| u.id == id)) {
+                if let Some(unit) = team.members.first().and_then(|&id| self.unit_at(id).map(|at| &mut self.units[at])) {
                     unit.initiated = true;
                 }
                 team.zone = None;
@@ -1725,7 +1725,7 @@ impl World {
             team.under = false;
             if team.reforming {
                 for &id in &team.members {
-                    if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                    if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                         unit.initiated = true;
                     }
                 }
@@ -1864,7 +1864,7 @@ impl World {
                     team.target = match (action, found) {
                         (46, Some(id)) => Some(Aim::Building(id)),
                         (_, Some(id)) => {
-                            let cell = self.buildings.iter().find(|b| b.id == id).map(|b| b.cell);
+                            let cell = self.building_at(id).map(|at| &self.buildings[at]).map(|b| b.cell);
                             let unit = seeker.and_then(|seeker| self.unit(seeker));
                             match (cell, unit) {
                                 (Some(cell), Some(unit)) => crate::nearby(&self.map, &self.claims, &self.spots, unit, cell, crate::Near::new(false, false, None), self.tick).map(|near| Aim::Cell(near.0, near.1)),
@@ -1939,7 +1939,7 @@ impl World {
                     Some(unit) => self.order(Order::Board { unit, transport }),
                     None => {
                         if kind.transports_return
-                            && let Some(unit) = self.units.iter_mut().find(|u| u.id == transport) {
+                            && let Some(unit) = self.unit_at(transport).map(|at| &mut self.units[at]) {
                                 unit.work.archive = Some(unit.cell());
                             }
                         team.next_mission = true;
@@ -1976,11 +1976,11 @@ impl World {
                 let air = self.air_transported(&force);
                 for id in team.members.clone() {
                     let carrier = self.unit(id).is_some_and(|u| self.carries(u) > 0 && (!air || u.plane.is_some()));
-                    let back = if carrier && kind.transports_return { self.units.iter_mut().find(|u| u.id == id).map(|u| u.work.archive.take()) } else { None };
+                    let back = if carrier && kind.transports_return { self.unit_at(id).map(|at| &mut self.units[at]).map(|u| u.work.archive.take()) } else { None };
                     let goes = back.is_some() || if carrier { matches!(argument, 2 | 3) } else { matches!(argument, 1 | 3) };
                     if goes {
                         team.members.retain(|&member| member != id);
-                        if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                        if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                             unit.team = None;
                         }
                     }

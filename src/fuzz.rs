@@ -157,6 +157,10 @@ struct Findings {
 
 fn check(world: &World, tick: u64, letting_out: &mut HashMap<u32, u64>, findings: &mut Findings) {
     let (width, height) = world.map.size();
+    // Units and buildings are looked up by id with a binary search.
+    if !world.units().windows(2).all(|pair| pair[0].id < pair[1].id) || !world.buildings().windows(2).all(|pair| pair[0].id < pair[1].id) {
+        findings.hard.push(format!("tick {tick}: units or buildings out of id order"));
+    }
     for (index, house) in world.houses.iter().enumerate() {
         if house.credits < 0 {
             findings.hard.push(format!("tick {tick}: house {index} has {} credits", house.credits));

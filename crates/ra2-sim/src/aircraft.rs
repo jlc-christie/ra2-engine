@@ -164,7 +164,7 @@ impl World {
     // The building's own point plus the docking offset of the slot the aircraft
     // holds; without a slot, the building's point.
     pub fn dock_point(&self, building: u32, plane: u32) -> Option<(i32, i32, i32)> {
-        let building = self.buildings.iter().find(|b| b.id == building)?;
+        let building = self.building_at(building).map(|at| &self.buildings[at])?;
         let kind = self.building_types.get(building.kind as usize)?;
         let (x, y) = (building.cell.0 * LEPTONS_PER_CELL + building.size.0 * 128, building.cell.1 * LEPTONS_PER_CELL + building.size.1 * 128);
         let slot = building.docks.iter().position(|slot| *slot == Some(plane));
@@ -199,7 +199,7 @@ impl World {
     /// Links an aircraft with a pad building, taking its first free slot.
     // The lowest empty slot; none, and it is refused.
     fn link(&mut self, plane: &mut Plane, id: u32, building: u32) -> bool {
-        let Some(b) = self.buildings.iter_mut().find(|b| b.id == building) else {
+        let Some(b) = self.building_at(building).map(|at| &mut self.buildings[at]) else {
             return false;
         };
         if !b.docks.contains(&Some(id)) {
@@ -215,7 +215,7 @@ impl World {
 
     fn unlink(&mut self, plane: &mut Plane, id: u32) {
         if let Some(building) = plane.contact.take()
-            && let Some(b) = self.buildings.iter_mut().find(|b| b.id == building) {
+            && let Some(b) = self.building_at(building).map(|at| &mut self.buildings[at]) {
                 for slot in &mut b.docks {
                     if *slot == Some(id) {
                         *slot = None;

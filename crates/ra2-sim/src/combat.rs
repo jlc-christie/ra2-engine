@@ -714,7 +714,7 @@ impl World {
         match who {
             Aim::Unit(id) => self.unit(id).map(|unit| unit.stats.fighter),
             Aim::Building(id) => {
-                let building = self.buildings.iter().find(|b| b.id == id)?;
+                let building = self.building_at(id).map(|at| &self.buildings[at])?;
                 self.building_types.get(building.kind as usize).map(|kind| kind.fighter)
             }
             Aim::Cell(..) => None,
@@ -724,7 +724,7 @@ impl World {
     pub fn owner_of(&self, who: Aim) -> Option<u8> {
         match who {
             Aim::Unit(id) => self.unit(id).map(|unit| unit.owner),
-            Aim::Building(id) => self.buildings.iter().find(|b| b.id == id).map(|b| b.owner),
+            Aim::Building(id) => self.building_at(id).map(|at| &self.buildings[at]).map(|b| b.owner),
             Aim::Cell(..) => None,
         }
     }
@@ -746,7 +746,7 @@ impl World {
             // On a bridge's deck it stands 416 leptons
             // (four levels) above the ground of its cell.
             Aim::Unit(id) => self.unit(id).map(|unit| (unit.x, unit.y, self.ground_z(unit.x, unit.y) + self.altitude(unit) + if unit.on_bridge { 4 * LEVEL_HEIGHT } else { 0 })),
-            Aim::Building(id) => self.buildings.iter().find(|b| b.id == id).map(|b| {
+            Aim::Building(id) => self.building_at(id).map(|at| &self.buildings[at]).map(|b| {
                 let (x, y) = (b.cell.0 * LEPTONS_PER_CELL + b.size.0 * 128, b.cell.1 * LEPTONS_PER_CELL + b.size.1 * 128);
                 (x, y, self.map.level(b.cell.0, b.cell.1) as i32 * LEVEL_HEIGHT)
             }),
@@ -895,7 +895,7 @@ impl World {
         };
         let mut limit = weapon.range + slant;
         if let Aim::Building(id) = target
-            && let Some(building) = self.buildings.iter().find(|b| b.id == id) {
+            && let Some(building) = self.building_at(id).map(|at| &self.buildings[at]) {
                 limit += (building.size.0 + building.size.1) * 64;
             }
         // For a firer in the air the distance is
@@ -1039,7 +1039,7 @@ impl World {
         // death weapon does the rest.
         if weapon.suicide {
             if let Aim::Unit(id) = by {
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                     unit.health = 0;
                     unit.died_by_suicide = true;
                 }
@@ -1054,7 +1054,7 @@ impl World {
         // hands the target to the unit's spawns.
         if weapon.spawner {
             if let Aim::Unit(id) = by
-                && let Some(spawner) = self.units.iter_mut().find(|u| u.id == id).and_then(|unit| unit.spawner.as_mut()) {
+                && let Some(spawner) = self.unit_at(id).map(|at| &mut self.units[at]).and_then(|unit| unit.spawner.as_mut()) {
                     spawner.set_target(target);
                 }
             arms.rearm_at = self.tick + weapon.rof.max(0) as u64 + (self.next_random() % 3) as u64;
@@ -1178,7 +1178,7 @@ impl World {
         self.events.push(Event::Fired { weapon: mount.weapon, at: from, to: aim, facing: (firing >> 8) as u8, by });
         if let Aim::Unit(id) = by {
             let (tick, blink) = (self.tick, weapon.fake_blink as u64);
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id).filter(|unit| unit.stats.fighter.disguise_when_still) {
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]).filter(|unit| unit.stats.fighter.disguise_when_still) {
                 unit.blinks_until = tick + blink;
             }
         }
@@ -1199,7 +1199,7 @@ impl World {
             // DATA: rules.ini `PrismSupportModifier`: each beam lent adds that
             // share to the firing tower's damage.
             Aim::Building(id) => {
-                let lent = self.buildings.iter().find(|b| b.id == id).map_or(0, |b| b.supports);
+                let lent = self.building_at(id).map(|at| &self.buildings[at]).map_or(0, |b| b.supports);
                 (damage as f64 * (1.0 + lent as f64 * self.ability_rules.prism_modifier)) as i32
             }
             _ => damage,
@@ -1358,11 +1358,11 @@ impl World {
             return false;
         }
         let (health, strength) = match victim {
-            Aim::Unit(id) => match self.units.iter_mut().find(|u| u.id == id) {
+            Aim::Unit(id) => match self.unit_at(id).map(|at| &mut self.units[at]) {
                 Some(unit) => (&mut unit.health, unit.stats.strength),
                 None => return false,
             },
-            Aim::Building(id) => match self.buildings.iter_mut().find(|b| b.id == id) {
+            Aim::Building(id) => match self.building_at(id).map(|at| &mut self.buildings[at]) {
                 Some(building) => {
                     let strength = self.building_types.get(building.kind as usize).map_or(1, |kind| kind.strength);
                     (&mut building.health, strength)
@@ -1395,7 +1395,7 @@ impl World {
             if let Aim::Unit(id) = victim {
                 let aloft = self.unit(id).is_some_and(|unit| self.altitude(unit) > 0 && unit.stats.jet.is_some_and(|jet| jet.crashable));
                 if aloft {
-                    if let Some(jet) = self.units.iter_mut().find(|u| u.id == id).and_then(|u| u.jet.as_mut()) {
+                    if let Some(jet) = self.unit_at(id).map(|at| &mut self.units[at]).and_then(|u| u.jet.as_mut()) {
                         jet.crashing = true;
                     }
                     return true;
@@ -1432,7 +1432,7 @@ impl World {
                 _ => false,
             };
             if hostile && fighter.can_retaliate && fighter.primary.is_some()
-                && let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                && let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                     let idle = unit.arms.target.is_none() && unit.dest.is_none() && unit.work.job == Job::Idle;
                     if idle && near {
                         unit.arms.target = Some(attacker);
@@ -1654,19 +1654,19 @@ impl World {
             return;
         }
         let points = match target {
-            Aim::Unit(id) => self.units.iter_mut().find(|u| u.id == id).map(|u| {
+            Aim::Unit(id) => self.unit_at(id).map(|at| &mut self.units[at]).map(|u| {
                 u.frozen.get_or_insert(u.stats.strength * 10);
             }),
             Aim::Building(id) => {
                 let types = &self.building_types;
-                self.buildings.iter_mut().find(|b| b.id == id).map(|b| {
+                self.building_at(id).map(|at| &mut self.buildings[at]).map(|b| {
                     b.frozen.get_or_insert(types.get(b.kind as usize).map_or(1, |k| k.strength) * 10);
                 })
             }
             Aim::Cell(..) => None,
         };
         if points.is_some()
-            && let Some(unit) = self.units.iter_mut().find(|u| u.id == firer) {
+            && let Some(unit) = self.unit_at(firer).map(|at| &mut self.units[at]) {
                 unit.arms.erasing = Some(target);
             }
     }
@@ -1958,7 +1958,7 @@ impl World {
             self.units[index].capture = None;
             self.units[index].enter_area = None;
             let unit = &self.units[index];
-            let Some(at) = self.buildings.iter().position(|b| b.id == target) else {
+            let Some(at) = self.building_at(target) else {
                 continue;
             };
             let building = &self.buildings[at];
@@ -1974,7 +1974,7 @@ impl World {
                 // soldier stays on the map and is sent off the building. One
                 // already wired just sends the soldier off.
                 Some(Entry::Treat) => {
-                    let Some(index) = self.units.iter().position(|u| u.id == id) else {
+                    let Some(index) = self.unit_at(id) else {
                         continue;
                     };
                     let hospital = self.building_types.get(self.buildings[at].kind as usize).is_some_and(|k| k.hospital);
@@ -2447,7 +2447,7 @@ impl World {
             reach -= 0x80;
         }
         if let Aim::Building(id) = target
-            && let Some(building) = self.buildings.iter().find(|b| b.id == id) {
+            && let Some(building) = self.building_at(id).map(|at| &self.buildings[at]) {
                 reach += (building.size.0 + building.size.1) * 64;
             }
         let mut reach = (reach as f64 - if unit.stats.infantry { 281.6 } else { 179.2 }) as i32;
@@ -3124,7 +3124,7 @@ impl World {
         for (who, death) in std::mem::take(&mut self.dying) {
             match who {
                 Aim::Unit(id) => {
-                    let Some(index) = self.units.iter().position(|u| u.id == id) else {
+                    let Some(index) = self.unit_at(id) else {
                         continue;
                     };
                     self.leave_dock(index);
@@ -3192,7 +3192,7 @@ impl World {
                     self.crate_from_unit(kind, (at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL)));
                 }
                 Aim::Building(id) => {
-                    let Some(index) = self.buildings.iter().position(|b| b.id == id) else {
+                    let Some(index) = self.building_at(id) else {
                         continue;
                     };
                     // Those inside are put out first.
