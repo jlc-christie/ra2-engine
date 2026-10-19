@@ -257,7 +257,7 @@ impl Plugin for GamePlugin {
             .add_systems(OnExit(Screen::InGame), reset_camera)
             .add_systems(
                 Update,
-                (scroll_camera.run_if(crate::pause::playing), animate_map).run_if(in_state(Screen::InGame)),
+                (scroll_camera.run_if(crate::pause::playing).in_set(crate::schedule::GameSet::Input), animate_map.in_set(crate::schedule::GameSet::View)).run_if(in_state(Screen::InGame)),
             );
     }
 }

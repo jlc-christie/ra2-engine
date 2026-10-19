@@ -175,7 +175,7 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         let respawn = app.register_system(spawn_sidebar);
         app.insert_resource(Respawn(respawn))
-            .add_systems(Update, relayout.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Hud>));
+            .add_systems(Update, relayout.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Hud>).in_set(crate::schedule::GameSet::Hud));
         // The sidebar's art depends on the player's side, which the map's set-up
         // settles.
         app.add_systems(OnEnter(Screen::InGame), spawn_sidebar.after(crate::game::load_map)).add_systems(
@@ -184,9 +184,10 @@ impl Plugin for HudPlugin {
                 .run_if(in_state(Screen::InGame))
                 .run_if(crate::pause::playing)
                 .run_if(resource_exists::<Hud>)
-                .run_if(resource_exists::<Sim>),
+                .run_if(resource_exists::<Sim>)
+                .in_set(crate::schedule::GameSet::Input),
         )
-        .add_systems(Update, mode_lights.run_if(in_state(Screen::InGame)).run_if(resource_exists::<crate::control::Mode>));
+        .add_systems(Update, mode_lights.run_if(in_state(Screen::InGame)).run_if(resource_exists::<crate::control::Mode>).in_set(crate::schedule::GameSet::Hud));
     }
 }
 

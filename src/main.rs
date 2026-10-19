@@ -23,6 +23,7 @@ mod net;
 mod notice;
 mod pause;
 mod saves;
+mod schedule;
 mod radar;
 #[cfg(test)]
 mod scenario;
@@ -70,7 +71,7 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugins((shell::ShellPlugin, game::GamePlugin, hud::HudPlugin, units::UnitsPlugin, debug::DebugPlugin, audio::AudioPlugin, cursor::CursorPlugin, control::ControlPlugin, pause::PausePlugin, radar::RadarPlugin, shroud::ShroudPlugin, beams::BeamsPlugin))
-        .add_plugins((video::VideoPlugin, bar::BarPlugin, endgame::EndGamePlugin, saves::SavesPlugin, net::NetPlugin, notice::NoticePlugin, depth::DepthPlugin))
+        .add_plugins((schedule::SchedulePlugin, video::VideoPlugin, bar::BarPlugin, endgame::EndGamePlugin, saves::SavesPlugin, net::NetPlugin, notice::NoticePlugin, depth::DepthPlugin))
         .run();
 }
 

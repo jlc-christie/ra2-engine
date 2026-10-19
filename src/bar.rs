@@ -113,8 +113,8 @@ impl Plugin for BarPlugin {
             .add_message::<Status>()
             .init_resource::<PlanningMode>()
             .add_systems(OnEnter(Screen::InGame), setup.after(crate::game::load_map))
-            .add_systems(Update, relayout.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Bar>))
-            .add_systems(Update, (buttons, messages).run_if(in_state(Screen::InGame)).run_if(resource_exists::<Bar>));
+            .add_systems(Update, relayout.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Bar>).in_set(crate::schedule::GameSet::Hud))
+            .add_systems(Update, (buttons.in_set(crate::schedule::GameSet::Input), messages.in_set(crate::schedule::GameSet::Hud)).run_if(in_state(Screen::InGame)).run_if(resource_exists::<Bar>));
     }
 }
 

@@ -212,7 +212,8 @@ impl Plugin for ControlPlugin {
                     .run_if(in_state(Screen::InGame))
                     .run_if(crate::pause::playing)
                     .run_if(resource_exists::<UnitView>)
-                    .run_if(resource_exists::<OverlayArt>),
+                    .run_if(resource_exists::<OverlayArt>)
+                    .in_set(crate::schedule::GameSet::Input),
             );
     }
 }
