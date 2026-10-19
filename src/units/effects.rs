@@ -65,11 +65,15 @@ fn combat_effects(
     mut cues: MessageWriter<Cue>,
     mut rng: ResMut<EffectRng>,
     rules: Res<crate::files::Rules>,
+    (entities, mut rocking): (Res<UnitEntities>, Query<(Option<&mut Rocking>, Option<&mut Rock>)>),
 ) {
     let Some(armoury) = armoury else {
         return;
     };
     let view = &mut *view;
+    // A unit first rocked this frame, held here until its component is added.
+    let mut new_rocking: HashMap<Entity, Rocking> = HashMap::new();
+    let mut new_rocks: HashMap<Entity, Rock> = HashMap::new();
     let tick = sim.0.current_tick();
     let mut pick = |count: usize| rng.pick(count);
     for SimEvent(event) in events.read().cloned() {
@@ -130,7 +134,13 @@ fn combat_effects(
                     continue;
                 };
                 let at = (unit.x, unit.y, sim.0.ground_z(unit.x, unit.y) + sim.0.altitude(unit));
-                view.rocks.entry(unit.id).or_default().push(at, from, strength, (unit.facing as u16) << 8, kind.weight);
+                if let Some(&entity) = entities.0.get(&unit.id) {
+                    let push = |rocking: &mut Rocking| rocking.push(at, from, strength, (unit.facing as u16) << 8, kind.weight);
+                    match rocking.get_mut(entity) {
+                        Ok((Some(mut rocking), _)) => push(&mut rocking),
+                        _ => push(new_rocking.entry(entity).or_default()),
+                    }
+                }
             }
             // The sim has chosen the explosion (by the damage carried) and
             // marked the ground under it; here it is only shown.
@@ -168,7 +178,13 @@ fn combat_effects(
                     start_anim(&mut commands, &mut cues, view, tick, &name, scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 }
                 let weight = (unit.stats.kind as usize).checked_sub(1).and_then(|k| sim.0.unit_types.get(k)).map_or(1.0, |k| k.weight) as f32;
-                view.drone_rocks.entry(host).or_default().push(unit.facing, side as f32, 1.5, weight);
+                if let Some(&entity) = entities.0.get(&host) {
+                    let push = |rock: &mut Rock| rock.push(unit.facing, side as f32, 1.5, weight);
+                    match rocking.get_mut(entity) {
+                        Ok((_, Some(mut rock))) => push(&mut rock),
+                        _ => push(new_rocks.entry(entity).or_default()),
+                    }
+                }
             }
             Event::Erased { at } => {
                 let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 1.5) * DEPTH_PER_ROW;
@@ -192,6 +208,12 @@ fn combat_effects(
             }
             _ => {}
         }
+    }
+    for (entity, rocking) in new_rocking {
+        commands.entity(entity).try_insert(rocking);
+    }
+    for (entity, rock) in new_rocks {
+        commands.entity(entity).try_insert(rock);
     }
 }
 

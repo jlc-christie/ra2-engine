@@ -120,13 +120,7 @@ pub(crate) struct UnitView {
     /// The art each ore cell is drawn with, and the sprites showing ore now, with
     /// the amount each shows.
     ore_art: HashMap<(i32, i32), String>,
-    /// The walk counters of sprite vehicles, by unit id, and the tick they were
-    /// last stepped on.
-    walk_counters: HashMap<u32, u32>,
-    /// Each vehicle's ramp, the one before it, and the tick it changed.
-    ramps: HashMap<u32, (u8, u8, u64)>,
-    /// Vehicles rocking from a blast.
-    rocks: HashMap<u32, Rocking>,
+    /// The tick the walk counters and blast rocks were last stepped on.
     walk_tick: u64,
     /// Shadows, by picture, with where each one's middle lies from the draw
     /// point.
@@ -153,8 +147,7 @@ pub(crate) struct UnitView {
     house_palettes: Vec<Option<usize>>,
     /// Drawn images by model, direction (0 to 31), palette and height level.
     images: HashMap<(String, u8, Option<u8>, Option<usize>, i32), Option<UnitImage>>,
-    /// Vehicles being rocked, by unit id, and the tick they were last stepped.
-    drone_rocks: HashMap<u32, Rock>,
+    /// The tick the drone rocks were last stepped on.
     rock_tick: u64,
     /// The crates drawn, and the shroud's count of changes when they were.
     crates_shown: Option<(Vec<((i32, i32), bool)>, u64)>,
@@ -205,12 +198,45 @@ struct BuildingArt {
 /// Art name, frame, palette, height level, shadow.
 type PartKey = (String, usize, Option<usize>, i32, bool);
 
+/// A unit's entity, by the simulation's id: its sprite, and what is kept about
+/// how it is shown.
 #[derive(Component)]
-struct UnitSprite(u32);
+pub(crate) struct SimUnit(pub(crate) u32);
+
+/// The entity of each unit on the map, by id.
+#[derive(Resource, Default)]
+pub(crate) struct UnitEntities(pub(crate) HashMap<u32, Entity>);
+
+/// A sprite vehicle's walk counter, or a model's animation counter.
+#[derive(Component, Default)]
+struct WalkCounter(u32);
+
+/// The ramp under a vehicle, the one before it, and the tick it changed.
+#[derive(Component)]
+struct Ramp {
+    now: u8,
+    before: u8,
+    since: u64,
+}
+
+/// Gives each unit on the map an entity and takes it away when the unit goes
+/// (dies, deploys, or boards something).
+fn mirror_units(mut commands: Commands, sim: Res<Sim>, mut entities: ResMut<UnitEntities>) {
+    entities.0.retain(|&id, &mut entity| {
+        let here = sim.0.unit(id).is_some();
+        if !here {
+            commands.entity(entity).despawn();
+        }
+        here
+    });
+    for unit in sim.0.units() {
+        entities.0.entry(unit.id).or_insert_with(|| commands.spawn((DespawnOnExit(Screen::InGame), SimUnit(unit.id), WalkCounter::default(), Sprite::default())).id());
+    }
+}
 
 /// A vehicle's rocking: its angles about its length and its width, in
 /// radians, and how fast each is changing a tick.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Component, Clone, Copy, Debug, Default)]
 struct Rocking {
     roll: f32,
     pitch: f32,
@@ -378,6 +404,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<Placing>()
             .add_message::<SimEvent>()
             .init_resource::<effects::EffectRng>()
+            .init_resource::<UnitEntities>()
             .add_systems(Update, publish_events.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).in_set(crate::schedule::GameSet::Events))
             .add_systems(
                 FixedUpdate,
@@ -385,7 +412,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (effects::effect_systems(), step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
+                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, (mirror_units, rock_units).chain(), show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (effects::effect_systems(), step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>)
@@ -821,14 +848,10 @@ pub fn setup(
         walls_shown: None,
         ore_art,
         shadow_images: HashMap::new(),
-        rocks: HashMap::new(),
-        walk_counters: HashMap::new(),
-        drone_rocks: HashMap::new(),
         rock_tick: 0,
         crates_shown: None,
         mirages_shown: None,
         crate_images: HashMap::new(),
-        ramps: HashMap::new(),
         walk_tick: 0,
         effect_images: HashMap::new(),
         ore_shown: None,
@@ -927,8 +950,8 @@ fn show_units(
     files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
-    mut sprites: Query<(Entity, &UnitSprite, &mut Sprite, &mut Transform, Option<&mut Depth>), Without<UnitShadow>>,
-    mut shadows: Query<(Entity, &UnitShadow, &mut Sprite, &mut Transform, &mut Visibility), Without<UnitSprite>>,
+    mut sprites: Query<(Entity, &SimUnit, &mut Sprite, &mut Transform, Option<&mut Depth>, &mut WalkCounter, Option<&mut Rocking>, Option<&Rock>, Option<&mut Ramp>), Without<UnitShadow>>,
+    mut shadows: Query<(Entity, &UnitShadow, &mut Sprite, &mut Transform, &mut Visibility), Without<SimUnit>>,
 ) {
     let view = &mut *view;
     // The shadow each unit casts this frame: picture, where its draw point is,
@@ -937,48 +960,41 @@ fn show_units(
     // A vehicle that has appeared since the start (a building packing up).
     let tick = sim.0.current_tick();
     if tick != view.walk_tick {
-        for now in view.walk_tick + 1..=tick.min(view.walk_tick + 8) {
-            for unit in sim.0.units() {
-                if unit.stats.infantry {
-                    continue;
-                }
-                // "moving" for a jumpjet is
-                // any state but on the ground or hovering.
-                let sheet = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).and_then(|k| k.sheet);
-                let moving = match unit.jet {
-                    Some(jet) => !matches!(jet.state, ra2_sim::flight::GROUNDED | ra2_sim::flight::HOVERING),
-                    None => unit.is_moving(),
-                };
-                let rate = match (sheet, moving) {
-                    (Some(sheet), true) => sheet.walk_rate,
-                    (Some(sheet), false) => sheet.idle_rate,
-                    (None, true) => 1,
-                    (None, false) => 0,
-                };
+        let ticks = view.walk_tick + 1..=tick.min(view.walk_tick + 8);
+        for (entity, sim_unit, _, _, _, mut counter, mut rocking, ..) in &mut sprites {
+            let Some(unit) = sim.0.unit(sim_unit.0) else {
+                continue;
+            };
+            // "moving" for a jumpjet is
+            // any state but on the ground or hovering.
+            let sheet = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).and_then(|k| k.sheet);
+            let moving = match unit.jet {
+                Some(jet) => !matches!(jet.state, ra2_sim::flight::GROUNDED | ra2_sim::flight::HOVERING),
+                None => unit.is_moving(),
+            };
+            let rate = match (sheet, moving) {
+                _ if unit.stats.infantry => 0,
+                (Some(sheet), true) => sheet.walk_rate,
+                (Some(sheet), false) => sheet.idle_rate,
+                (None, true) => 1,
+                (None, false) => 0,
+            };
+            for now in ticks.clone() {
                 if rate != 0 && now % rate == 0 {
-                    *view.walk_counters.entry(unit.id).or_insert(0) += 1;
+                    counter.0 += 1;
+                }
+                if let Some(rocking) = rocking.as_mut() {
+                    rocking.step();
                 }
             }
-            for rocking in view.rocks.values_mut() {
-                rocking.step();
+            if rocking.is_some_and(|rocking| rocking.roll == 0.0 && rocking.pitch == 0.0 && rocking.roll_rate == 0.0 && rocking.pitch_rate == 0.0) {
+                commands.entity(entity).remove::<Rocking>();
             }
-            view.rocks.retain(|id, rocking| sim.0.unit(*id).is_some() && (rocking.roll != 0.0 || rocking.pitch != 0.0 || rocking.roll_rate != 0.0 || rocking.pitch_rate != 0.0));
         }
         view.walk_tick = tick;
     }
-    // One that had gone from the map and is back (a passenger let out) has its
-    // look already and needs only a sprite again.
-    let drawn: Vec<u32> = sprites.iter().map(|(_, sprite, ..)| sprite.0).collect();
-    for unit in sim.0.units() {
-        if drawn.contains(&unit.id) {
-            continue;
-        }
-        commands.spawn((DespawnOnExit(Screen::InGame), UnitSprite(unit.id), Sprite::default()));
-    }
-    for (entity, unit_sprite, mut sprite, mut transform, depth) in &mut sprites {
-        let Some(unit) = sim.0.unit(unit_sprite.0) else {
-            // The unit is gone, for instance deployed into a building.
-            commands.entity(entity).despawn();
+    for (entity, sim_unit, mut sprite, mut transform, depth, counter, rocking, rock, ramp_seen) in &mut sprites {
+        let Some(unit) = sim.0.unit(sim_unit.0) else {
             continue;
         };
         // A unit that has changed sides (a mind taken, or given back) shows
@@ -1159,7 +1175,7 @@ fn show_units(
         // while not.
         if let Some(sheet) = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).and_then(|k| k.sheet) {
             let column = (((((unit.facing as usize) >> 4) + 1) >> 1) + 1) & 7;
-            let counter = view.walk_counters.get(&unit.id).copied().unwrap_or(0) as usize;
+            let counter = counter.0 as usize;
             // After a shot the picture is from the firing
             // frames: a counter set to twice their number less one runs down to
             // 0, halved, so they play backwards two frames each.
@@ -1239,12 +1255,20 @@ fn show_units(
             if matches!(ramp, 1..=16) { ramp } else { 0 }
         };
         let now = sim.0.current_tick();
-        let seen = view.ramps.entry(unit.id).or_insert((ramp, ramp, 0));
-        if seen.0 != ramp {
-            *seen = (ramp, seen.0, now);
-        }
-        let thirds = now.saturating_sub(seen.2).min(3) as u8;
-        let tipped = match (ramp, seen.1, thirds) {
+        let seen = match ramp_seen {
+            Some(mut seen) => {
+                if seen.now != ramp {
+                    *seen = Ramp { now: ramp, before: seen.now, since: now };
+                }
+                (seen.before, seen.since)
+            }
+            None => {
+                commands.entity(entity).try_insert(Ramp { now: ramp, before: ramp, since: 0 });
+                (ramp, 0)
+            }
+        };
+        let thirds = now.saturating_sub(seen.1).min(3) as u8;
+        let tipped = match (ramp, seen.0, thirds) {
             _ if unit.rocket.is_some() => None,
             (_, old, 0..=2) if old != ramp => Some(format!("{model}@r{ramp}@b{old}_{thirds}")),
             (0, ..) => None,
@@ -1252,7 +1276,7 @@ fn show_units(
         };
         // A rocked vehicle is drawn rocked, its
         // angles kept to hundredths of a radian.
-        let tipped = match view.rocks.get(&unit.id).filter(|rocking| rocking.showing() && unit.rocket.is_none()) {
+        let tipped = match rocking.as_deref().filter(|rocking| rocking.showing() && unit.rocket.is_none()) {
             Some(rocking) => {
                 let base = tipped.as_ref().unwrap_or(model);
                 let (half_width, half_length) = view.art.half_extents(&files, model.split_once('@').map_or(model.as_str(), |(name, _)| name));
@@ -1265,7 +1289,7 @@ fn show_units(
         let direction = (((unit.facing >> 2) + 1) >> 1) & 31;
         // A rocking vehicle is drawn rolled and pitched
         // about its own axes.
-        let rocked = view.drone_rocks.get(&unit.id).and_then(|rock| rock.mark(direction << 3)).map(|mark| format!("{model}{mark}"));
+        let rocked = rock.and_then(|rock| rock.mark(direction << 3)).map(|mark| format!("{model}{mark}"));
         let model = rocked.as_ref().unwrap_or(model);
         // The turret's facing in 32 steps.
         let charge_turrets = (unit.stats.kind as usize).checked_sub(1).and_then(|k| view.kinds.get(k)).map_or(0, |kind| kind.charge_turrets);
@@ -1274,7 +1298,7 @@ fn show_units(
         // The model's animation frame is the walk
         // counter within the frames it has (the Nighthawk's two turn its rotors).
         let frames = view.art.hva_frames(&files, model);
-        let frame = if frames > 1 { view.walk_counters.get(&unit.id).copied().unwrap_or(0) as usize % frames } else { 0 };
+        let frame = if frames > 1 { counter.0 as usize % frames } else { 0 };
         view.art.hva_frame = frame;
         let key = (if frame == 0 { model.clone() } else { format!("{model}#{frame}") }, direction, turret.map(|t| t.0 + 32 * which), *palette, level);
         // Rocked pictures are let go now and then.
@@ -2196,8 +2220,8 @@ fn light_units(
     sim: Res<Sim>,
     view: Res<UnitView>,
     light: Option<Res<WorldLight>>,
-    mut units: Query<(&UnitSprite, &mut Sprite), Without<BuildingSprite>>,
-    mut buildings: Query<(&BuildingSprite, &mut Sprite), Without<UnitSprite>>,
+    mut units: Query<(&SimUnit, &mut Sprite), Without<BuildingSprite>>,
+    mut buildings: Query<(&BuildingSprite, &mut Sprite), Without<SimUnit>>,
 ) {
     let Some(light) = light else {
         return;
@@ -2974,7 +2998,7 @@ fn end_beams(mut commands: Commands, sim: Res<Sim>, beams: Query<(Entity, &Beam)
 }
 
 /// A vehicle's roll and pitch, and how fast each is changing, in radians.
-#[derive(Default, Clone, Copy)]
+#[derive(Component, Default, Clone, Copy)]
 struct Rock {
     roll: f32,
     roll_speed: f32,
@@ -3065,16 +3089,18 @@ impl Rock {
 }
 
 /// Steps the rocking vehicles once for each tick that has passed.
-fn rock_units(sim: Res<Sim>, mut view: ResMut<UnitView>) {
+fn rock_units(mut commands: Commands, sim: Res<Sim>, mut view: ResMut<UnitView>, mut rocks: Query<(Entity, &mut Rock)>) {
     let tick = sim.0.current_tick();
     let steps = tick.saturating_sub(view.rock_tick).min(60);
     view.rock_tick = tick;
-    for _ in 0..steps {
-        for rock in view.drone_rocks.values_mut() {
+    for (entity, mut rock) in &mut rocks {
+        for _ in 0..steps {
             rock.step();
         }
+        if rock.still() {
+            commands.entity(entity).remove::<Rock>();
+        }
     }
-    view.drone_rocks.retain(|id, rock| !rock.still() && sim.0.unit(*id).is_some());
 }
 
 /// A spark flying from a bitten vehicle.
