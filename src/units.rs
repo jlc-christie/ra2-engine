@@ -2490,7 +2490,7 @@ fn auto_build(
             // At or after the tick: at speed, several pass in a frame.
             if sim.0.current_tick() >= at && !*killed {
                 *killed = true;
-                sim.0.destroy_house_for_tests(house as u8);
+                sim.0.destroy_house(house as u8);
             }
         }
     }

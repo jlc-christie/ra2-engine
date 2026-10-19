@@ -4534,7 +4534,8 @@ impl World {
         }
     }
 
-    pub fn destroy_house_for_tests(&mut self, house: u8) {
+    /// Destroys everything a house has: a player who left a network game.
+    pub fn destroy_house(&mut self, house: u8) {
         let units: Vec<u32> = self.units.iter().filter(|u| u.owner == house).map(|u| u.id).collect();
         let buildings: Vec<u32> = self.buildings.iter().filter(|b| b.owner == house).map(|b| b.id).collect();
         for aim in units.into_iter().map(combat::Aim::Unit).chain(buildings.into_iter().map(combat::Aim::Building)) {
