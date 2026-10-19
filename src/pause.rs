@@ -29,6 +29,8 @@ pub(crate) enum Menu {
     Abort,
     /// The list of saved games, to load, save over or delete.
     Saves(crate::saves::Kind),
+    /// Abort chosen: the game stays stopped while the announcer says so.
+    Leaving,
 }
 
 /// Run condition: the game is not stopped behind a menu.
@@ -195,7 +197,12 @@ fn run_menu(
     mut cues: MessageWriter<Cue>,
     parts: Query<Entity, With<MenuPart>>,
     time: Res<Time<Real>>,
-    (setup, mut notices): (Option<Res<crate::game::MatchSetup>>, MessageWriter<crate::notice::Notice>),
+    (setup, mut notices, speaking, mut left): (
+        Option<Res<crate::game::MatchSetup>>,
+        MessageWriter<crate::notice::Notice>,
+        Query<(), With<crate::audio::Speaking>>,
+        Local<f64>,
+    ),
 ) {
     let mut now = *menu;
     // Once the save is written a box says so.
@@ -206,6 +213,14 @@ fn run_menu(
     }
     match now {
         Menu::Closing => now = Menu::Closed,
+        // Up to five seconds for the line to finish.
+        Menu::Leaving => {
+            let waited = time.elapsed_secs_f64() - *left;
+            if waited >= 5.0 || (waited >= 0.25 && speaking.is_empty()) {
+                now = Menu::Closed;
+                next_screen.set(Screen::MainMenu);
+            }
+        }
         // Esc is always the options menu.
         Menu::Closed if keys.just_pressed(KeyCode::Escape) => now = Menu::Options,
         Menu::Options | Menu::Abort if keys.just_pressed(KeyCode::Escape) => now = Menu::Closing,
@@ -282,8 +297,9 @@ fn run_menu(
                         Action::Resume => now = Menu::Closing,
                         Action::AskAbort => now = Menu::Abort,
                         Action::Quit => {
-                            now = Menu::Closed;
-                            next_screen.set(Screen::MainMenu);
+                            now = Menu::Leaving;
+                            *left = time.elapsed_secs_f64();
+                            cues.write(Cue::Farewell("EVA_BattleControlTerminated"));
                         }
                         // Load and Delete are there to press only when there
                         // is a save; Save always.
