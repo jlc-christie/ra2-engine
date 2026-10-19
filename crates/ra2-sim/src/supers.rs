@@ -497,7 +497,7 @@ impl World {
             for (id, dies) in here {
                 if dies {
                     self.kill(crate::combat::Aim::Unit(id));
-                } else if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                } else if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                     unit.curtain_until = until;
                 }
             }
@@ -532,7 +532,7 @@ impl World {
             let (source, dest) = ((from.0 + dx, from.1 + dy), (to.0 + dx, to.1 + dy));
             let here: Vec<u32> = self.units.iter().filter(|u| u.cell() == source && self.altitude(u) == 0).map(|u| u.id).collect();
             for id in here {
-                let Some(index) = self.units.iter().position(|u| u.id == id) else {
+                let Some(index) = self.unit_at(id) else {
                     continue;
                 };
                 let unit = &self.units[index];
@@ -573,7 +573,7 @@ impl World {
         let tick = self.tick;
         let warping: Vec<u32> = self.units.iter().filter(|u| u.chrono.is_some()).map(|u| u.id).collect();
         for id in warping {
-            let Some(index) = self.units.iter().position(|u| u.id == id) else {
+            let Some(index) = self.unit_at(id) else {
                 continue;
             };
             let Some(mut warp) = self.units[index].chrono else {
@@ -624,7 +624,7 @@ impl World {
             for victim in victims {
                 self.kill(crate::combat::Aim::Unit(victim));
             }
-            let Some(index) = self.units.iter().position(|u| u.id == id) else {
+            let Some(index) = self.unit_at(id) else {
                 continue;
             };
             let from = (self.units[index].x, self.units[index].y);
@@ -655,7 +655,7 @@ impl World {
                 continue;
             }
             if water && !infantry {
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                     unit.chrono = Some(Warp { to: warp.to, at: tick, sink: Some(0) });
                     unit.warp_until = u64::MAX;
                 }

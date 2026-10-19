@@ -338,7 +338,7 @@ impl World {
         let wait = if hunting { 14 } else { 27 } + self.draw(0, 2) as u64;
         if !moving {
             if self.can_deploy(id) {
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                     unit.deploying = true;
                 }
             } else {

@@ -325,7 +325,7 @@ impl World {
             for (id, on_deck) in here {
                 if !on_deck {
                     self.kill(Aim::Unit(id));
-                } else if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                } else if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                     unit.on_bridge = false;
                     unit.falling = Some(4 * crate::combat::LEVEL_HEIGHT);
                     unit.doomed = true;

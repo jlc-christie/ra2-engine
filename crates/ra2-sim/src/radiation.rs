@@ -268,7 +268,7 @@ impl World {
                 }
                 self.houses[owner as usize].credits -= price;
                 let step = self.repair_step;
-                if let Some(u) = self.units.iter_mut().find(|u| u.id == unit) {
+                if let Some(u) = self.unit_at(unit).map(|at| &mut self.units[at]) {
                     u.health = (u.health + step).min(strength);
                 }
                 if !self.buildings[index].depot_busy {

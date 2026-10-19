@@ -141,7 +141,7 @@ impl World {
     pub(crate) fn run_spawns(&mut self) {
         let owners: Vec<u32> = self.units.iter().filter(|unit| unit.stats.spawns.is_some()).map(|unit| unit.id).collect();
         for id in owners {
-            let Some(index) = self.units.iter().position(|u| u.id == id) else {
+            let Some(index) = self.unit_at(id) else {
                 continue;
             };
             let Some(stats) = self.units[index].stats.spawns else {
@@ -162,7 +162,7 @@ impl World {
                 spawner.think_at = self.tick + 10;
                 self.think_spawner(id, stats, &mut spawner);
             }
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                 unit.spawner = Some(spawner);
             }
         }
@@ -220,7 +220,7 @@ impl World {
                             self.put_back(unit);
                         } else {
                             self.put_back(unit);
-                            if let Some(index) = self.units.iter().position(|u| u.id == spawn) {
+                            if let Some(index) = self.unit_at(spawn) {
                                 self.plane_move(index, (home.0, home.1 - 1));
                             }
                         }
@@ -235,7 +235,7 @@ impl World {
                 }
                 2 if !node.rocket => {
                     spawner.adopt();
-                    if let Some(index) = node.out.and_then(|out| self.units.iter().position(|u| u.id == out)) {
+                    if let Some(index) = node.out.and_then(|out| self.unit_at(out)) {
                         if spawner.target.is_none() {
                             self.spawn_home(index, home);
                             node.state = 4;
@@ -248,7 +248,7 @@ impl World {
                 // sent home; otherwise it is told to attack again.
                 3 => {
                     spawner.adopt();
-                    if let Some(index) = node.out.and_then(|out| self.units.iter().position(|u| u.id == out)) {
+                    if let Some(index) = node.out.and_then(|out| self.unit_at(out)) {
                         let spent = self.units[index].plane.is_some_and(|plane| plane.ammo == 0);
                         match spawner.target.filter(|_| !spent) {
                             Some(target) => self.spawn_attack(index, target),
@@ -263,7 +263,7 @@ impl World {
                 // is taken aboard to reload.
                 4 => {
                     spawner.adopt();
-                    if let Some(index) = node.out.and_then(|out| self.units.iter().position(|u| u.id == out)) {
+                    if let Some(index) = node.out.and_then(|out| self.unit_at(out)) {
                         let loaded = self.units[index].plane.is_some_and(|plane| plane.ammo > 0);
                         if let Some(target) = spawner.target.filter(|_| loaded) {
                             node.state = 3;
@@ -336,7 +336,7 @@ impl World {
                         missiles = true;
                     } else {
                         spawner.nodes[at].state = 3;
-                        if let Some(index) = spawner.nodes[at].out.and_then(|out| self.units.iter().position(|u| u.id == out)) {
+                        if let Some(index) = spawner.nodes[at].out.and_then(|out| self.unit_at(out)) {
                             self.spawn_attack(index, target);
                         }
                     }
@@ -408,7 +408,7 @@ impl World {
             if node.rocket {
                 continue;
             }
-            if let Some(unit) = node.out.and_then(|out| self.units.iter_mut().find(|u| u.id == out)) {
+            if let Some(unit) = node.out.and_then(|out| self.unit_at(out).map(|at| &mut self.units[at])) {
                 unit.health = 0;
                 if let Some(plane) = unit.plane.as_mut() {
                     plane.crashing = true;

@@ -473,7 +473,7 @@ impl World {
         };
         let strength = self.unit(id).map_or(1, |u| u.stats.strength);
         let health = self.ranged(5, strength / 2);
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+        if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
             unit.health = health.clamp(1, strength);
             unit.on_bridge = dead.on_bridge;
         }
@@ -513,12 +513,12 @@ impl World {
                             left -= 1;
                             let strength = self.unit(id).map_or(1, |u| u.stats.strength);
                             let health = self.ranged(5, strength);
-                            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+                            if let Some(unit) = self.unit_at(id).map(|at| &mut self.units[at]) {
                                 unit.health = health.clamp(1, strength);
                             }
                             self.scatter_unit(id);
                             let enemy = planter.filter(|&by| self.unit(by).is_some_and(|u| !self.allied(building.owner, u.owner)));
-                            if let (Some(by), Some(unit)) = (enemy, self.units.iter_mut().find(|u| u.id == id)) {
+                            if let (Some(by), Some(unit)) = (enemy, self.unit_at(id).map(|at| &mut self.units[at])) {
                                 unit.arms.target = Some(Aim::Unit(by));
                                 unit.arms.attacking = true;
                             }
@@ -594,7 +594,7 @@ impl World {
     /// would not survive leaving for twice the damage less the threshold in
     /// frames; mending (negative damage) throws it out with no chance.
     pub(crate) fn parasite_suppression(&mut self, host: u32, damage: i32, source: Option<Aim>) {
-        let Some(index) = self.units.iter().position(|u| u.id == host) else {
+        let Some(index) = self.unit_at(host) else {
             return;
         };
         let Some(biter) = self.units[index].parasite.first() else {
