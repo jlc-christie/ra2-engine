@@ -54,6 +54,7 @@ impl Rng {
 /// One game's set-up, all drawn from the seed.
 #[derive(Debug, Clone)]
 struct Setup {
+    #[allow(dead_code)]
     seed: u64,
     map: String,
     opponents: Vec<usize>,
@@ -236,11 +237,10 @@ fn play(files: &GameFiles, setup: &Setup) -> Findings {
             }
         }
         let tick = world.current_tick();
-        if Some(tick) == setup.snapshot_at {
-            if let Err(why) = round_trip(files, setup, &mut world) {
+        if Some(tick) == setup.snapshot_at
+            && let Err(why) = round_trip(files, setup, &mut world) {
                 findings.hard.push(format!("tick {tick}: {why}"));
             }
-        }
         if tick % 5000 == 0 && std::env::var_os("FUZZ_AI").is_some() {
             watch_ai(&world, &names, tick);
         }
@@ -310,6 +310,8 @@ fn play(files: &GameFiles, setup: &Setup) -> Findings {
             findings.soft.push(format!("spy {id} took a disguise {} times: {:?}", shots.len(), shots.iter().take(12).collect::<Vec<_>>()));
         }
     }
+    // For checking that a change leaves the simulation as it was.
+    println!("FUZZ   end: tick {} hash {:016x}", world.current_tick(), world.state_hash());
     findings
 }
 
@@ -409,7 +411,7 @@ fn watch_one_computer() {
     for _ in 0..ticks {
         world.tick();
         let _ = world.take_events();
-        if world.current_tick() % 5000 == 0 {
+        if world.current_tick().is_multiple_of(5000) {
             watch_ai(&world, &names, world.current_tick());
         }
     }
