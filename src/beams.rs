@@ -99,7 +99,7 @@ impl Plugin for BeamsPlugin {
                     commands.entity(camera).remove::<SonicWarp>();
                 }
             })
-            .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>), wave_rad_beams, show_sonic_waves.run_if(resource_exists::<Sim>)).run_if(in_state(Screen::InGame)));
+            .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>), wave_rad_beams, show_sonic_waves.run_if(resource_exists::<Sim>)).run_if(in_state(Screen::InGame)).in_set(crate::schedule::GameSet::View));
     }
 }
 

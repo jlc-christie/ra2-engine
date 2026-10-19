@@ -392,7 +392,7 @@ impl Plugin for NetPlugin {
         app.insert_non_send(NetStart::default())
             .init_resource::<Lobby>()
             .add_systems(Update, arrange.run_if(not(in_state(Screen::InGame))))
-            .add_systems(Update, (begin, step).chain().run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>))
+            .add_systems(Update, (begin, step).chain().run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).in_set(crate::schedule::GameSet::Net))
             .add_systems(OnExit(Screen::InGame), |world: &mut bevy::ecs::world::World| {
                 world.remove_non_send::<NetGame>();
                 world.remove_resource::<NetActive>();

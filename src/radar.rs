@@ -129,7 +129,8 @@ impl Plugin for RadarPlugin {
                 .run_if(resource_exists::<Radar>)
                 .run_if(resource_exists::<Sim>)
                 .run_if(resource_exists::<UnitView>)
-                .run_if(resource_exists::<RadarGround>),
+                .run_if(resource_exists::<RadarGround>)
+                .in_set(crate::schedule::GameSet::Hud),
         );
     }
 }

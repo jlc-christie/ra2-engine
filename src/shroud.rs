@@ -41,7 +41,7 @@ impl Plugin for ShroudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::InGame), setup).add_systems(
             Update,
-            show.run_if(in_state(Screen::InGame)).run_if(resource_exists::<ShroudArt>).run_if(resource_exists::<Sim>).run_if(resource_exists::<UnitView>),
+            show.run_if(in_state(Screen::InGame)).run_if(resource_exists::<ShroudArt>).run_if(resource_exists::<Sim>).run_if(resource_exists::<UnitView>).in_set(crate::schedule::GameSet::View),
         );
     }
 }

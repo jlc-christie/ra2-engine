@@ -364,7 +364,8 @@ impl Plugin for UnitsPlugin {
                 (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
-                    .run_if(resource_exists::<UnitView>),
+                    .run_if(resource_exists::<UnitView>)
+                    .in_set(crate::schedule::GameSet::View),
             )
             .add_systems(OnExit(Screen::InGame), clear);
     }

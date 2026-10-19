@@ -176,7 +176,7 @@ impl Plugin for PausePlugin {
                     saves.picked = 0;
                 }
             })
-            .add_systems(Update, run_menu.run_if(in_state(Screen::InGame)));
+            .add_systems(Update, run_menu.run_if(in_state(Screen::InGame)).in_set(crate::schedule::GameSet::Input));
     }
 }
 

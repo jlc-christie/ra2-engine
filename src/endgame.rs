@@ -55,7 +55,7 @@ impl Plugin for EndGamePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScoreBoard>()
             .init_resource::<HouseNames>()
-            .add_systems(Update, watch.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).run_if(resource_exists::<UnitView>));
+            .add_systems(Update, watch.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).run_if(resource_exists::<UnitView>).in_set(crate::schedule::GameSet::Hud));
     }
 }
 
