@@ -109,6 +109,8 @@ struct Radar {
     ground: Vec<[u8; 3]>,
     ground_version: Option<u64>,
     picture: Option<Handle<Image>>,
+    /// The game frame, view centre and window size the picture was drawn for.
+    drawn: Option<(u64, Vec2, Vec2)>,
     sounds: Option<(Option<String>, Option<String>)>,
     /// A left press on the map that will become an order when let go.
     pressed: bool,
@@ -258,6 +260,7 @@ fn update(
     // pictures: draw everything afresh.
     if !fresh.is_empty() {
         radar.shown_frame = None;
+        radar.drawn = None;
     }
     let now = time.elapsed_secs_f64();
 
@@ -307,6 +310,7 @@ fn update(
     if radar.state != 1 {
         *map.2 = Visibility::Hidden;
         radar.pressed = false;
+        radar.drawn = None;
         return;
     }
     if radar.layout.is_none() {
@@ -341,143 +345,153 @@ fn update(
         radar.ground = scale_ground(&layout, &raw);
     }
 
-    // The picture: ground, then things, then the view box, inside a frame one
-    // pixel wider all round.
-    let (pw, ph) = (ow + 2, oh + 2);
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    let put = |rgba: &mut [u8], x: i32, y: i32, colour: [u8; 3]| {
-        if (0..ow).contains(&x) && (0..oh).contains(&y) {
-            let at = (((y + 1) * pw + x + 1) * 4) as usize;
-            rgba[at..at + 4].copy_from_slice(&[colour[0], colour[1], colour[2], 255]);
-        }
-    };
-    for y in 0..oh {
-        for x in 0..ow {
-            put(&mut rgba, x, y, radar.ground[(y * ow + x) as usize]);
-        }
-    }
-    // Buildings as diamonds and
-    // everything else as one pixel, in its house's colour; where two share a
-    // pixel the player's own shows.
+    // Drawn again when a game frame has passed or the view has moved; a ping
+    // moves on once a game frame.
     let world = &sim.0;
-    for own in [false, true] {
-        for building in world.buildings().iter().filter(|b| (b.owner == local()) == own).filter(|b| own || !world.map.shrouded(b.cell.0, b.cell.1)) {
-            let colour = view.radar_colour_building(building.id, building.owner);
-            let (x, y) = layout.point(building.cell.0 * LEPTONS_PER_CELL + 128, building.cell.1 * LEPTONS_PER_CELL + 128);
-            for (dx, dy) in foundation_pixels(layout.scale, building.size) {
-                put(&mut rgba, x + dx, y + dy, colour);
-            }
-        }
-        for unit in world.units().iter().filter(|u| (u.owner == local()) == own).filter(|u| own || !world.map.shrouded(u.cell().0, u.cell().1)) {
-            let (x, y) = layout.point(unit.x, unit.y);
-            put(&mut rgba, x, y, view.radar_colour_unit(unit.id, unit.owner));
-        }
-    }
-    // Each ping's square shrinks by
-    // `RadarEventSpeed` a pass from the picture's edge to `RadarEventMinRadius`,
-    // turning; at the smallest it slows and stops square to the picture, and is
-    // shown for its type's frames more.
-    // DATA: `RadarEventSpeed` 1.2, `RadarEventMinRadius` 8.
-    {
-        let tick = world.current_tick();
-        for event in &mut events.0 {
-            let (_, visible, duration, colour) = event_type(event.kind);
-            let (px, py) = layout.point(event.cell.0 * LEPTONS_PER_CELL + 128, event.cell.1 * LEPTONS_PER_CELL + 128);
-            let radius = event.radius.get_or_insert_with(|| px.max(py).max(ow - px).max(oh - py) as f32);
-            *radius = (*radius - 1.2).max(8.0);
-            if event.animating {
-                if (*radius - 8.0).abs() < 0.01 {
-                    let quarter = std::f32::consts::FRAC_PI_2;
-                    let past = (event.angle + quarter / 2.0) % quarter;
-                    if past < event.rotation {
-                        event.angle += past;
-                        event.animating = false;
-                        event.shown_until = tick + visible;
-                        event.expires = tick + duration;
-                    } else {
-                        event.angle += event.rotation;
-                        event.rotation = (event.rotation - 0.001).max(0.05 / 3.0);
-                    }
-                } else {
-                    event.angle += event.rotation;
-                }
-            }
-            let Some(colour) = colour.filter(|_| event.animating || tick < event.shown_until) else {
-                continue;
-            };
-            let (sin, cos) = event.angle.sin_cos();
-            let (x, y) = ((cos * *radius) as i32, (sin * *radius) as i32);
-            let corners = [(x, y), (-y, x), (-x, -y), (y, -x)].map(|(dx, dy)| (px + dx, py + dy));
-            for i in 0..4 {
-                let (from, to) = (corners[i], corners[(i + 1) % 4]);
-                let steps = (to.0 - from.0).abs().max((to.1 - from.1).abs()).max(1);
-                for step in 0..=steps {
-                    put(&mut rgba, from.0 + (to.0 - from.0) * step / steps, from.1 + (to.1 - from.1) * step / steps, colour);
-                }
-            }
-        }
-    }
-    // The box and the frame, in the sidebar's text
-    // colour.
-    let (view_w, view_h) = (window.width() - SIDEBAR_WIDTH, window.height() - BOTTOM_BAR_HEIGHT);
-    let middle = layout.cell(cell_at(world, view.origin, centre.0));
-    let box_w = (2.0 * view_w / (60.0 / layout.scale) + 1.0) as i32;
-    let box_h = (2.0 * view_h / (30.0 / layout.scale)) as i32;
-    let mut box_x = middle.0 - (view_w / (60.0 / layout.scale)) as i32;
-    let mut box_y = middle.1 - (2.0 * view_h / (30.0 / layout.scale) * 0.5) as i32;
-    if box_x < 0 {
-        box_x = 0;
-    } else if box_x + box_w >= ow {
-        box_x = ow - box_w - 1;
-    }
-    if box_y < 0 {
-        box_y = 0;
-    } else if box_y + box_h >= oh {
-        box_y = oh - box_h - 1;
-    }
-    let line = crate::hud::TEXT;
-    let outline = |rgba: &mut [u8], x0: i32, y0: i32, w: i32, h: i32, inner: bool| {
-        let mut dot = |x: i32, y: i32| {
-            if inner {
-                put(rgba, x, y, line);
-            } else if (0..pw).contains(&x) && (0..ph).contains(&y) {
-                let at = ((y * pw + x) * 4) as usize;
-                rgba[at..at + 4].copy_from_slice(&[line[0], line[1], line[2], 255]);
+    let tick = world.current_tick();
+    let drawn = (tick, centre.0, Vec2::new(window.width(), window.height()));
+    let steps = radar.drawn.map_or(1, |(at, ..)| tick.saturating_sub(at).min(8));
+    if radar.drawn != Some(drawn) {
+        radar.drawn = Some(drawn);
+        // The picture: ground, then things, then the view box, inside a frame one
+        // pixel wider all round.
+        let (pw, ph) = (ow + 2, oh + 2);
+        let mut rgba = vec![0u8; (pw * ph * 4) as usize];
+        let put = |rgba: &mut [u8], x: i32, y: i32, colour: [u8; 3]| {
+            if (0..ow).contains(&x) && (0..oh).contains(&y) {
+                let at = (((y + 1) * pw + x + 1) * 4) as usize;
+                rgba[at..at + 4].copy_from_slice(&[colour[0], colour[1], colour[2], 255]);
             }
         };
-        for x in x0..x0 + w {
-            dot(x, y0);
-            dot(x, y0 + h - 1);
+        for y in 0..oh {
+            for x in 0..ow {
+                put(&mut rgba, x, y, radar.ground[(y * ow + x) as usize]);
+            }
         }
-        for y in y0..y0 + h {
-            dot(x0, y);
-            dot(x0 + w - 1, y);
+        // Buildings as diamonds and
+        // everything else as one pixel, in its house's colour; where two share a
+        // pixel the player's own shows.
+        for own in [false, true] {
+            for building in world.buildings().iter().filter(|b| (b.owner == local()) == own).filter(|b| own || !world.map.shrouded(b.cell.0, b.cell.1)) {
+                let colour = view.radar_colour_building(building.id, building.owner);
+                let (x, y) = layout.point(building.cell.0 * LEPTONS_PER_CELL + 128, building.cell.1 * LEPTONS_PER_CELL + 128);
+                for (dx, dy) in foundation_pixels(layout.scale, building.size) {
+                    put(&mut rgba, x + dx, y + dy, colour);
+                }
+            }
+            for unit in world.units().iter().filter(|u| (u.owner == local()) == own).filter(|u| own || !world.map.shrouded(u.cell().0, u.cell().1)) {
+                let (x, y) = layout.point(unit.x, unit.y);
+                put(&mut rgba, x, y, view.radar_colour_unit(unit.id, unit.owner));
+            }
         }
-    };
-    outline(&mut rgba, box_x, box_y, box_w, box_h, true);
-    outline(&mut rgba, 0, 0, pw, ph, false);
+        // Each ping's square shrinks by
+        // `RadarEventSpeed` a pass from the picture's edge to `RadarEventMinRadius`,
+        // turning; at the smallest it slows and stops square to the picture, and is
+        // shown for its type's frames more.
+        // DATA: `RadarEventSpeed` 1.2, `RadarEventMinRadius` 8.
+        {
+            let tick = world.current_tick();
+            for event in &mut events.0 {
+                let (_, visible, duration, colour) = event_type(event.kind);
+                let (px, py) = layout.point(event.cell.0 * LEPTONS_PER_CELL + 128, event.cell.1 * LEPTONS_PER_CELL + 128);
+                let radius = event.radius.get_or_insert_with(|| px.max(py).max(ow - px).max(oh - py) as f32);
+                for _ in 0..steps {
+                    *radius = (*radius - 1.2).max(8.0);
+                    if event.animating {
+                        if (*radius - 8.0).abs() < 0.01 {
+                            let quarter = std::f32::consts::FRAC_PI_2;
+                            let past = (event.angle + quarter / 2.0) % quarter;
+                            if past < event.rotation {
+                                event.angle += past;
+                                event.animating = false;
+                                event.shown_until = tick + visible;
+                                event.expires = tick + duration;
+                            } else {
+                                event.angle += event.rotation;
+                                event.rotation = (event.rotation - 0.001).max(0.05 / 3.0);
+                            }
+                        } else {
+                            event.angle += event.rotation;
+                        }
+                    }
+                }
+                let Some(colour) = colour.filter(|_| event.animating || tick < event.shown_until) else {
+                    continue;
+                };
+                let (sin, cos) = event.angle.sin_cos();
+                let (x, y) = ((cos * *radius) as i32, (sin * *radius) as i32);
+                let corners = [(x, y), (-y, x), (-x, -y), (y, -x)].map(|(dx, dy)| (px + dx, py + dy));
+                for i in 0..4 {
+                    let (from, to) = (corners[i], corners[(i + 1) % 4]);
+                    let steps = (to.0 - from.0).abs().max((to.1 - from.1).abs()).max(1);
+                    for step in 0..=steps {
+                        put(&mut rgba, from.0 + (to.0 - from.0) * step / steps, from.1 + (to.1 - from.1) * step / steps, colour);
+                    }
+                }
+            }
+        }
+        // The box and the frame, in the sidebar's text
+        // colour.
+        let (view_w, view_h) = (window.width() - SIDEBAR_WIDTH, window.height() - BOTTOM_BAR_HEIGHT);
+        let middle = layout.cell(cell_at(world, view.origin, centre.0));
+        let box_w = (2.0 * view_w / (60.0 / layout.scale) + 1.0) as i32;
+        let box_h = (2.0 * view_h / (30.0 / layout.scale)) as i32;
+        let mut box_x = middle.0 - (view_w / (60.0 / layout.scale)) as i32;
+        let mut box_y = middle.1 - (2.0 * view_h / (30.0 / layout.scale) * 0.5) as i32;
+        if box_x < 0 {
+            box_x = 0;
+        } else if box_x + box_w >= ow {
+            box_x = ow - box_w - 1;
+        }
+        if box_y < 0 {
+            box_y = 0;
+        } else if box_y + box_h >= oh {
+            box_y = oh - box_h - 1;
+        }
+        let line = crate::hud::TEXT;
+        let outline = |rgba: &mut [u8], x0: i32, y0: i32, w: i32, h: i32, inner: bool| {
+            let mut dot = |x: i32, y: i32| {
+                if inner {
+                    put(rgba, x, y, line);
+                } else if (0..pw).contains(&x) && (0..ph).contains(&y) {
+                    let at = ((y * pw + x) * 4) as usize;
+                    rgba[at..at + 4].copy_from_slice(&[line[0], line[1], line[2], 255]);
+                }
+            };
+            for x in x0..x0 + w {
+                dot(x, y0);
+                dot(x, y0 + h - 1);
+            }
+            for y in y0..y0 + h {
+                dot(x0, y);
+                dot(x0 + w - 1, y);
+            }
+        };
+        outline(&mut rgba, box_x, box_y, box_w, box_h, true);
+        outline(&mut rgba, 0, 0, pw, ph, false);
 
-    let image = crate::hud::rgba_image(pw as u32, ph as u32, rgba);
-    match &radar.picture {
-        Some(handle) => {
-            if let Some(mut slot) = images.get_mut(handle) {
-                *slot = image;
+        let image = crate::hud::rgba_image(pw as u32, ph as u32, rgba);
+        match &radar.picture {
+            Some(handle) => {
+                if let Some(mut slot) = images.get_mut(handle) {
+                    *slot = image;
+                }
+                if map.0.image != *handle {
+                    map.0.image = handle.clone();
+                }
             }
-            if map.0.image != *handle {
+            None => {
+                let handle = images.add(image);
                 map.0.image = handle.clone();
+                radar.picture = Some(handle);
             }
         }
-        None => {
-            let handle = images.add(image);
-            map.0.image = handle.clone();
-            radar.picture = Some(handle);
-        }
+        map.1.left = Val::Px((layout.at.0 - 1) as f32);
+        map.1.top = Val::Px(crate::hud::CREDITS_HEIGHT - 16.0 + (layout.at.1 - 1) as f32);
+        map.1.width = Val::Px(pw as f32);
+        map.1.height = Val::Px(ph as f32);
+        *map.2 = Visibility::Inherited;
     }
-    map.1.left = Val::Px((layout.at.0 - 1) as f32);
-    map.1.top = Val::Px(crate::hud::CREDITS_HEIGHT - 16.0 + (layout.at.1 - 1) as f32);
-    map.1.width = Val::Px(pw as f32);
-    map.1.height = Val::Px(ph as f32);
-    *map.2 = Visibility::Inherited;
 
     // The mouse.
     // A right press centres the view on the cell; so
