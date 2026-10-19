@@ -129,7 +129,7 @@ fn relayout(mut commands: Commands, bar: Res<Bar>, window: Single<&Window, With<
     commands.run_system(id);
 }
 
-fn setup(mut commands: Commands, files: Res<GameFiles>, mut images: ResMut<Assets<Image>>, window: Single<&Window, With<PrimaryWindow>>, old: Option<Res<Bar>>) {
+fn setup(mut commands: Commands, files: Res<GameFiles>, mut images: ResMut<Assets<Image>>, window: Single<&Window, With<PrimaryWindow>>, old: Option<Res<Bar>>, rules: Res<crate::files::Rules>) {
     // The row of button places ends at the right end
     // cap, 28 pixels from the sidebar; there are as many 52-pixel places as fit
     // between two 28-pixel caps and a 168-pixel gap; the thumb sits left of the
@@ -200,7 +200,7 @@ fn setup(mut commands: Commands, files: Res<GameFiles>, mut images: ResMut<Asset
         first_x,
         thumb_open_x,
         thumb_shut_x,
-        click: crate::audio::rules_sound(&files, "GUIMainButtonSound"),
+        click: rules.sound("GUIMainButtonSound"),
         font: files.get("game.fnt").and_then(Font::parse),
         strings: files.get("ra2.csf").and_then(Csf::parse),
         lines,
@@ -302,7 +302,6 @@ fn buttons(
 fn messages(
     mut commands: Commands,
     mut incoming: MessageReader<Status>,
-    files: Res<GameFiles>,
     mut cues: MessageWriter<crate::audio::Cue>,
     mut sounds: Local<MessageSounds>,
     mut typing: Query<(Entity, &mut Typing)>,
@@ -312,13 +311,14 @@ fn messages(
     view: Option<Res<UnitView>>,
     root: Query<Entity, With<MessageRoot>>,
     mut nodes: Query<&mut Node, Without<MessageRoot>>,
+    rules: Res<crate::files::Rules>,
 ) {
     let now = time.elapsed_secs_f64();
     let Ok(root) = root.single() else {
         return;
     };
     if !sounds.read {
-        *sounds = MessageSounds { incoming: crate::audio::rules_sound(&files, "IncomingMessage"), typed: crate::audio::rules_sound(&files, "MessageCharTyped"), read: true };
+        *sounds = MessageSounds { incoming: rules.sound("IncomingMessage"), typed: rules.sound("MessageCharTyped"), read: true };
     }
     for (entity, mut typed) in &mut typing {
         let count = (((now - typed.began) / 0.016) as usize + 1).min(typed.widths.len());

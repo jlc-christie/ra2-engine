@@ -59,6 +59,7 @@ fn main() {
     eprintln!("the game's files are in {}", files.dir().display());
     let video = video::Video::from_settings();
     App::new()
+        .insert_resource(files::Rules::read(&files))
         .insert_resource(files)
         .insert_resource(video)
         .insert_resource(crate::net::Settings::read().prefs)

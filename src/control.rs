@@ -11,7 +11,6 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use ra2_formats::csf::Csf;
 use ra2_formats::fnt::Font;
-use ra2_formats::ini::Ini;
 use ra2_formats::pal::Palette;
 use ra2_formats::shp::Shp;
 use crate::action::{self, Action, Mods};
@@ -229,8 +228,8 @@ fn forget_last_game(mut selection: ResMut<Selection>, mut groups: ResMut<GroupOf
     *plans = Plans::default();
 }
 
-fn setup(mut commands: Commands, files: Res<GameFiles>) {
-    let rules = files.get("rules.ini").map(Ini::parse);
+fn setup(mut commands: Commands, files: Res<GameFiles>, rules: Res<crate::files::Rules>) {
+    let rules = Some(&rules.0);
     // DATA: rules.ini `ConditionYellow` and `ConditionRed`, as percentages.
     let percent = |key: &str, default: f32| {
         rules
@@ -457,7 +456,7 @@ fn shortcuts(
     mut bar: MessageReader<crate::bar::Command>,
     mut status: MessageWriter<crate::bar::Status>,
     mut cues: MessageWriter<Cue>,
-    files: Res<GameFiles>,
+    rules: Res<crate::files::Rules>,
 ) {
     let world = &sim.0;
     // A new game: the groups and bookmarks of the last one mean nothing in it.
@@ -647,7 +646,7 @@ fn shortcuts(
     // selection took the order.
     for (key, sound) in [(KeyCode::KeyS, "StopSound"), (KeyCode::KeyX, "ScatterSound")] {
         if keys.just_pressed(key) && !selection.0.is_empty() {
-            cues.write_batch(crate::audio::rules_sound(&files, sound).map(Cue::Sound));
+            cues.write_batch(rules.sound(sound).map(Cue::Sound));
         }
     }
     if keys.just_pressed(KeyCode::KeyS) {
@@ -660,12 +659,11 @@ fn shortcuts(
     // C has every soldier of the player's cheer, at most once
     // every `MaximumCheerRate` frames, with `CheerSound`.
     if keys.just_pressed(KeyCode::KeyC) && !ctrl {
-        let rules = files.get("rules.ini").map(Ini::parse);
-        let rate = rules.as_ref().and_then(|rules| rules.get("General", "MaximumCheerRate")).and_then(|v| v.split(';').next()?.trim().parse::<u64>().ok()).unwrap_or(300);
+        let rate = rules.0.get("General", "MaximumCheerRate").and_then(|v| v.split(';').next()?.trim().parse::<u64>().ok()).unwrap_or(300);
         let now = sim.0.current_tick();
         if state.cheered_at.is_none_or(|at| now < at || now >= at + rate) {
             sim.give(Order::Cheer { house: crate::terrain::local() });
-            cues.write_batch(crate::audio::rules_sound(&files, "CheerSound").map(Cue::Sound));
+            cues.write_batch(rules.sound("CheerSound").map(Cue::Sound));
             state.cheered_at = Some(now);
         }
     }
@@ -701,7 +699,7 @@ fn clicks(
     mut last_order: ResMut<LastOrder>,
     mut cues: MessageWriter<Cue>,
     mut bar: MessageReader<crate::bar::Command>,
-    files: Res<GameFiles>,
+    rules: Res<crate::files::Rules>,
     mut plans: ResMut<Plans>,
     planning: Res<crate::bar::PlanningMode>,
     mut status: MessageWriter<crate::bar::Status>,
@@ -1094,7 +1092,7 @@ fn clicks(
     }
     // With `AddPlanningModeCommandSound`.
     if plans.waiting.values().map(Vec::len).sum::<usize>() > planned_before {
-        cues.write_batch(crate::audio::rules_sound(&files, "AddPlanningModeCommandSound").map(Cue::Sound));
+        cues.write_batch(rules.sound("AddPlanningModeCommandSound").map(Cue::Sound));
     }
 }
 
@@ -1105,12 +1103,12 @@ fn clicks(
 // the one before.
 fn run_plans(
     keys: Res<ButtonInput<KeyCode>>,
-    files: Res<GameFiles>,
     mut planning: ResMut<crate::bar::PlanningMode>,
     mut plans: ResMut<Plans>,
     mut sim: ResMut<Sim>,
     mut status: MessageWriter<crate::bar::Status>,
     mut cues: MessageWriter<Cue>,
+    rules: Res<crate::files::Rules>,
 ) {
     if keys.just_pressed(KeyCode::KeyZ) && !planning.0 {
         planning.0 = true;
@@ -1125,7 +1123,7 @@ fn run_plans(
     if planning.0 != plans.was_on {
         plans.was_on = planning.0;
         let sound = if planning.0 { "StartPlanningModeSound" } else { "EndPlanningModeSound" };
-        cues.write_batch(crate::audio::rules_sound(&files, sound).map(Cue::Sound));
+        cues.write_batch(rules.sound(sound).map(Cue::Sound));
         if !planning.0 {
             let waiting = std::mem::take(&mut plans.waiting);
             for (unit, orders) in waiting {

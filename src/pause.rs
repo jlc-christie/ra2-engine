@@ -189,7 +189,7 @@ fn run_menu(
     mouse: Res<ButtonInput<MouseButton>>,
     pointer: Res<Pointer>,
     window: Single<&Window, With<PrimaryWindow>>,
-    files: Res<GameFiles>,
+    (files, rules): (Res<GameFiles>, Res<crate::files::Rules>),
     mut images: ResMut<Assets<Image>>,
     mut wanted: ResMut<WantedCursor>,
     mut next_screen: ResMut<NextState<Screen>>,
@@ -234,7 +234,7 @@ fn run_menu(
                 let enter = keys.just_pressed(KeyCode::Enter);
                 let hit = pointer.0.filter(|_| mouse.just_pressed(MouseButton::Left)).and_then(|at| (0..if two { 2 } else { 1 }).find(|&n| ask_button(&window, n, two).contains(at)));
                 if let Some(answer) = hit.or(enter.then_some(0)) {
-                    cues.write_batch(crate::audio::rules_sound(&files, "GUIMainButtonSound").map(Cue::Sound));
+                    cues.write_batch(rules.sound("GUIMainButtonSound").map(Cue::Sound));
                     saves.ask = None;
                     saves.dirty = true;
                     match (ask, answer) {
@@ -290,7 +290,7 @@ fn run_menu(
                     .find(|(slot, ..)| pointer.0.is_some_and(|at| button_rect(&window, *slot).contains(at)));
                 if let Some(&(_, key, action)) = hit {
                     if action != Action::Nothing {
-                        cues.write_batch(crate::audio::rules_sound(&files, "GUIMainButtonSound").map(Cue::Sound));
+                        cues.write_batch(rules.sound("GUIMainButtonSound").map(Cue::Sound));
                     }
                     match action {
                         Action::Resume => now = Menu::Closing,

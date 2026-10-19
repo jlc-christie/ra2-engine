@@ -14,7 +14,7 @@ use ra2_formats::pal::Palette;
 use ra2_formats::shp::Shp;
 use ra2_sim::Order;
 
-use crate::audio::{Cue, rules_sound};
+use crate::audio::Cue;
 use crate::files::GameFiles;
 use crate::shell::Screen;
 use crate::terrain::local;
@@ -286,6 +286,7 @@ fn spawn_sidebar(
     mut images: ResMut<Assets<Image>>,
     window: Single<&Window, With<PrimaryWindow>>,
     old: Option<Res<Hud>>,
+    rules: Res<crate::files::Rules>,
 ) {
     let lit: Vec<_> = [("repair.shp", REPAIR_AT, crate::control::Mode::Repair), ("sell.shp", SELL_AT, crate::control::Mode::Sell)]
         .into_iter()
@@ -383,10 +384,8 @@ fn spawn_sidebar(
         });
 
     // DATA: rules.ini `CreditTicks` names the counting-up and counting-down sounds.
-    let rules = files.get("rules.ini").map(ra2_formats::ini::Ini::parse);
     let credit_sounds = rules
-        .as_ref()
-        .and_then(|rules| rules.get("AudioVisual", "CreditTicks").or_else(|| rules.get("General", "CreditTicks")))
+        .visual("CreditTicks")
         .and_then(|list| {
             let (up, down) = list.split_once(',')?;
             Some((up.trim().to_owned(), down.trim().to_owned()))
@@ -400,9 +399,9 @@ fn spawn_sidebar(
         rows,
         tab,
         enabled,
-        tab_sound: rules_sound(&files, "GUITabSound"),
-        build_sound: rules_sound(&files, "GUIBuildSound"),
-        scold_sound: rules_sound(&files, "ScoldSound"),
+        tab_sound: rules.sound("GUITabSound"),
+        build_sound: rules.sound("GUIBuildSound"),
+        scold_sound: rules.sound("ScoldSound"),
         credit_sounds,
         credits,
         credits_tick,
@@ -450,7 +449,7 @@ fn update_sidebar(
     mut modes: (ResMut<crate::control::Mode>, ResMut<crate::control::Selection>),
     catalog: Res<BuildCatalog>,
     catalogs: (Res<crate::units::UnitCatalog>, Res<crate::units::SuperCatalog>, Res<crate::prefs::Prefs>),
-    files: Res<GameFiles>,
+    (files, rules): (Res<GameFiles>, Res<crate::files::Rules>),
     time: Res<Time>,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -529,7 +528,7 @@ fn update_sidebar(
             if mouse.is_some_and(|at| Rect::from_corners(corner, corner + size).contains(at)) {
                 let (mode, selection) = &mut modes;
                 mode.toggle(which, &sim.0, selection, &placing);
-                cues.write_batch(rules_sound(&files, "GUIMainButtonSound").map(Cue::Sound));
+                cues.write_batch(rules.sound("GUIMainButtonSound").map(Cue::Sound));
             }
         }
     }
@@ -569,7 +568,7 @@ fn update_sidebar(
         // click ends the choosing.
         let (mode, selection) = &mut modes;
         if buttons.just_pressed(MouseButton::Left) {
-            cues.write_batch(rules_sound(&files, "GUIMainButtonSound").map(Cue::Sound));
+            cues.write_batch(rules.sound("GUIMainButtonSound").map(Cue::Sound));
             if house.supers.get(index as usize).is_some_and(|state| state.can_fire()) {
                 placing.0 = None;
                 selection.0.clear();

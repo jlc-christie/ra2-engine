@@ -280,6 +280,7 @@ pub(crate) fn load_map(
     drawn: Option<Res<DrawnCountry>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut ground: ResMut<Assets<crate::depth::GroundMaterial>>,
+    rules: Res<crate::files::Rules>,
 ) {
     // A random country or colour is settled now, or for the country, on the
     // loading screen before.
@@ -460,7 +461,7 @@ pub(crate) fn load_map(
     }
     commands.insert_resource(recording);
     crate::units::spawn_tile_anims(&mut commands, &scene.tile_anims);
-    crate::units::setup(&mut commands, &files, built, scene.player_palette, scene.unit_art, scene.origin, options.speed);
+    crate::units::setup(&mut commands, &rules, built, scene.player_palette, scene.unit_art, scene.origin, options.speed);
 
     // One texture and one layout per atlas page; `slots[entry]` is the entry's index
     // within its page's layout.

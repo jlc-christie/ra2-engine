@@ -722,7 +722,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
 /// Starts the game on a built simulation: a sprite per vehicle, and the test hooks.
 pub fn setup(
     commands: &mut Commands,
-    files: &GameFiles,
+    rules: &crate::files::Rules,
     built: BuiltWorld,
     player_palette: Option<usize>,
     art: UnitArt,
@@ -801,10 +801,10 @@ pub fn setup(
         looks,
         voices,
         kinds,
-        slam_sound: crate::audio::rules_sound(files, "BuildingSlam"),
-        click_sound: crate::audio::rules_sound(files, "GenericClick"),
-        scold_sound: crate::audio::rules_sound(files, "ScoldSound"),
-        sell_sound: crate::audio::rules_sound(files, "SellSound"),
+        slam_sound: rules.sound("BuildingSlam"),
+        click_sound: rules.sound("GenericClick"),
+        scold_sound: rules.sound("ScoldSound"),
+        sell_sound: rules.sound("SellSound"),
         building_art,
         anim_types,
         anim_names,
@@ -2054,15 +2054,8 @@ fn show_mirages(
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
     old: Query<Entity, With<MirageSprite>>,
-    mut names: Local<Option<Vec<String>>>,
+    rules: Res<crate::files::Rules>,
 ) {
-    let names = names.get_or_insert_with(|| {
-        files
-            .get("rules.ini")
-            .map(ra2_formats::ini::Ini::parse)
-            .and_then(|rules| rules.get("General", "DefaultMirageDisguises").map(|list| list.split(',').map(|name| name.trim().to_lowercase()).filter(|name| !name.is_empty()).collect()))
-            .unwrap_or_default()
-    });
     let now: Vec<(u32, u16, (i32, i32))> = sim
         .0
         .units()
@@ -2077,6 +2070,7 @@ fn show_mirages(
         return;
     }
     view.mirages_shown = Some(now.clone());
+    let names: Vec<String> = rules.0.get("General", "DefaultMirageDisguises").map(|list| list.split(',').map(|name| name.trim().to_lowercase()).filter(|name| !name.is_empty()).collect()).unwrap_or_default();
     for entity in &old {
         commands.entity(entity).despawn();
     }
@@ -2740,13 +2734,14 @@ fn show_markers(
     mut images: ResMut<Assets<Image>>,
     mut cues: MessageWriter<Cue>,
     mut markers: Query<(Entity, &Marker, &mut Sprite, &mut Transform)>,
+    rules: Res<crate::files::Rules>,
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
     let me = local();
     let mut wanted: Vec<(String, (i32, i32))> = Vec::new();
     let choosing = matches!(*mode, crate::control::Mode::Super(index) if sim.0.super_types.get(index as usize).is_some_and(|kind| kind.kind == 4));
-    if let (true, Some(cell), Some(name)) = (choosing, sim.0.houses.get(me as usize).and_then(|house| house.chrono_source), crate::audio::rules_sound(&files, "ChronoPlacement")) {
+    if let (true, Some(cell), Some(name)) = (choosing, sim.0.houses.get(me as usize).and_then(|house| house.chrono_source), rules.sound("ChronoPlacement")) {
         wanted.push((name.to_uppercase(), cell));
     }
     for cell in sim.0.nuke_warnings(me) {
