@@ -361,13 +361,15 @@ impl Plugin for UnitsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Time::<Fixed>::from_hz(TICKS_PER_SECOND as f64))
             .init_resource::<Placing>()
+            .add_message::<SimEvent>()
+            .add_systems(Update, publish_events.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).in_set(crate::schedule::GameSet::Events))
             .add_systems(
                 FixedUpdate,
                 tick.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).run_if(crate::pause::playing).run_if(not(resource_exists::<crate::net::NetActive>)),
             )
             .add_systems(
                 Update,
-                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, show_effects, show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
+                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, rock_units, show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (show_effects, step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>)
@@ -2812,6 +2814,15 @@ fn height_pixels(z: i32) -> i32 {
 #[derive(Component)]
 struct ShotSprite(u32);
 
+/// Something the simulation reports for the player to see or hear, taken from it
+/// once each frame.
+#[derive(Message, Clone)]
+pub(crate) struct SimEvent(pub(crate) ra2_sim::combat::Event);
+
+fn publish_events(mut sim: ResMut<Sim>, mut events: MessageWriter<SimEvent>) {
+    events.write_batch(sim.0.take_events().into_iter().map(SimEvent));
+}
+
 /// A laser beam fading out: the frame count it lasts and the tick it was fired.
 #[derive(Component)]
 struct Beam {
@@ -2839,17 +2850,14 @@ pub(crate) fn scene_point_3d(origin: Vec2, (x, y, z): (i32, i32, i32)) -> Vec2 {
 // animation's own sound is heard as it starts.
 fn show_effects(
     mut commands: Commands,
-    mut sim: ResMut<Sim>,
+    sim: Res<Sim>,
+    mut sim_events: MessageReader<SimEvent>,
     files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     armoury: Option<Res<crate::armoury::Armoury>>,
     units: Res<UnitCatalog>,
     catalog: Res<BuildCatalog>,
-    mut images: ResMut<Assets<Image>>,
     mut cues: MessageWriter<Cue>,
-    mut effects: Query<(Entity, &Effect, &mut Sprite, &mut Transform), Without<ShotSprite>>,
-    mut shots: Query<(Entity, &ShotSprite, &mut Sprite, &mut Transform, Option<&mut Depth>), Without<Effect>>,
-    beams: Query<(Entity, &Beam)>,
     mut picks: Local<u32>,
     mut radar_events: ResMut<crate::radar::RadarEvents>,
     mut status: MessageWriter<crate::bar::Status>,
@@ -2876,7 +2884,7 @@ fn show_effects(
             spawned.insert(Depth::Upright { adjust: -2 - height, write: false });
         }
     };
-    for event in sim.0.take_events() {
+    for SimEvent(event) in sim_events.read().cloned() {
         use ra2_sim::combat::Event;
         match event {
             Event::Fired { weapon, at, to, facing, by } => {
@@ -3363,9 +3371,19 @@ fn show_effects(
             }
         }
     }
+}
 
-
-    // Animations step on and end.
+/// Animations step on and end.
+fn step_effects(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    files: Res<GameFiles>,
+    mut view: ResMut<UnitView>,
+    mut images: ResMut<Assets<Image>>,
+    mut effects: Query<(Entity, &Effect, &mut Sprite, &mut Transform)>,
+) {
+    let view = &mut *view;
+    let tick = sim.0.current_tick();
     for (entity, effect, mut sprite, mut transform) in &mut effects {
         let Some(anim) = view.anim_types.get(&effect.anim) else {
             commands.entity(entity).despawn();
@@ -3407,9 +3425,23 @@ fn show_effects(
             None => sprite.image = Handle::default(),
         }
     }
+}
 
-    // Shots that can be seen. One that `Rotates` shows the frame for the way it
-    // is going, of 32.
+/// Shots that can be seen. One that `Rotates` shows the frame for the way it
+/// is going, of 32.
+fn show_shots(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    files: Res<GameFiles>,
+    mut view: ResMut<UnitView>,
+    armoury: Option<Res<crate::armoury::Armoury>>,
+    mut images: ResMut<Assets<Image>>,
+    mut shots: Query<(Entity, &ShotSprite, &mut Sprite, &mut Transform, Option<&mut Depth>)>,
+) {
+    let Some(armoury) = armoury else {
+        return;
+    };
+    let view = &mut *view;
     let flying: Vec<(u32, u16, (f64, f64, f64), u8, Option<u8>)> = sim
         .0
         .bullets()
@@ -3473,6 +3505,11 @@ fn show_effects(
             commands.spawn((DespawnOnExit(Screen::InGame), ShotSprite(id), Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
         }
     }
+}
+
+/// Laser beams that have had their time go.
+fn end_beams(mut commands: Commands, sim: Res<Sim>, beams: Query<(Entity, &Beam)>) {
+    let tick = sim.0.current_tick();
     for (entity, beam) in &beams {
         if tick >= beam.until {
             commands.entity(entity).despawn();

@@ -9,6 +9,8 @@ pub enum GameSet {
     Input,
     /// A network game steps the simulation here; a local one in `FixedUpdate`.
     Net,
+    /// What the simulation reported is published as messages.
+    Events,
     /// The map and everything on it.
     View,
     /// The sidebar, bar, radar and what is laid over the map.
@@ -19,6 +21,6 @@ pub struct SchedulePlugin;
 
 impl Plugin for SchedulePlugin {
     fn build(&self, app: &mut App) {
-        app.configure_sets(Update, (GameSet::Input, GameSet::Net, GameSet::View, GameSet::Hud).chain());
+        app.configure_sets(Update, (GameSet::Input, GameSet::Net, GameSet::Events, GameSet::View, GameSet::Hud).chain());
     }
 }
