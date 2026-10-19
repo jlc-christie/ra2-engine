@@ -156,6 +156,12 @@ pub(crate) struct UnitView {
     /// Vehicles being rocked, by unit id, and the tick they were last stepped.
     drone_rocks: HashMap<u32, Rock>,
     rock_tick: u64,
+    /// The crates drawn, and the shroud's count of changes when they were.
+    crates_shown: Option<(Vec<((i32, i32), bool)>, u64)>,
+    /// The Mirages drawn as trees: unit, tree and cell.
+    mirages_shown: Option<Vec<(u32, u16, (i32, i32))>>,
+    /// Crate pictures by water and height level.
+    crate_images: HashMap<(bool, i32), Option<(Handle<Image>, Vec2)>>,
 }
 
 /// What is needed to show and voice a unit type.
@@ -812,6 +818,9 @@ pub fn setup(
         walk_counters: HashMap::new(),
         drone_rocks: HashMap::new(),
         rock_tick: 0,
+        crates_shown: None,
+        mirages_shown: None,
+        crate_images: HashMap::new(),
         ramps: HashMap::new(),
         walk_tick: 0,
         effect_images: HashMap::new(),
@@ -1982,19 +1991,18 @@ fn show_crates(
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
     old: Query<Entity, With<CrateSprite>>,
-    mut shown: Local<Vec<((i32, i32), bool)>>,
-    mut pictures: Local<HashMap<(bool, i32), Option<(Handle<Image>, Vec2)>>>,
 ) {
+    // Drawn again when a crate comes or goes, or the shroud lifts off one.
     let now: Vec<((i32, i32), bool)> = sim.0.crates().iter().map(|c| (c.cell, c.water)).collect();
-    if now == *shown {
+    let shown = (now, sim.0.map.shroud_version);
+    if view.crates_shown.as_ref() == Some(&shown) {
         return;
     }
-    *shown = now.clone();
     for entity in &old {
         commands.entity(entity).despawn();
     }
     let view = &mut *view;
-    for (cell, water) in now {
+    for &(cell, water) in &shown.0 {
         if sim.0.map.shrouded(cell.0, cell.1) {
             continue;
         }
@@ -2007,7 +2015,7 @@ fn show_crates(
         // the cell that picks it up.)
         let anchor = scene_point(view.origin, cell.0 * LEPTONS_PER_CELL + half, cell.1 * LEPTONS_PER_CELL + half, level) - Vec2::new(0.0, 12.0);
         let row = (cell.0 + cell.1) as f32;
-        let picture = pictures.entry((water, level)).or_insert_with(|| {
+        let picture = view.crate_images.entry((water, level)).or_insert_with(|| {
             let drawn = view.art.smudge(&files, &art, level)?;
             let size = Vec2::new(drawn.width as f32, drawn.height as f32);
             let image = Image::new(
@@ -2025,6 +2033,7 @@ fn show_crates(
             commands.spawn((DespawnOnExit(Screen::InGame), CrateSprite, Sprite::from_image(handle), Transform::from_xyz(centre.x, -centre.y, 2.0 + row * DEPTH_PER_ROW), lit));
         }
     }
+    view.crates_shown = Some(shown);
 }
 
 /// A Mirage's tree.
@@ -2041,7 +2050,6 @@ fn show_mirages(
     mut images: ResMut<Assets<Image>>,
     old: Query<Entity, With<MirageSprite>>,
     mut names: Local<Option<Vec<String>>>,
-    mut shown: Local<Vec<(u32, u16, (i32, i32))>>,
 ) {
     let names = names.get_or_insert_with(|| {
         files
@@ -2060,10 +2068,10 @@ fn show_mirages(
             (house == ra2_sim::abilities::TREE_DISGUISE && !sim.0.shows_true_self(unit, local()) && !sim.0.map.shrouded(cell.0, cell.1)).then_some((unit.id, look, cell))
         })
         .collect();
-    if now == *shown {
+    if view.mirages_shown.as_ref() == Some(&now) {
         return;
     }
-    *shown = now.clone();
+    view.mirages_shown = Some(now.clone());
     for entity in &old {
         commands.entity(entity).despawn();
     }
