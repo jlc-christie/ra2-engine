@@ -139,9 +139,6 @@ pub(crate) struct UnitView {
     /// Drawn building images by art, frame, palette, height level and whether it
     /// is the shadow, with where each goes relative to the building's draw point.
     building_images: HashMap<PartKey, Option<(Handle<Image>, Vec2)>>,
-    /// Each building's animation clock: when it was offline, and its super
-    /// weapon's stage.
-    building_clocks: HashMap<u32, AnimClock>,
     /// The player's palette, and every house's by owner.
     player_palette: Option<usize>,
     house_palettes: Vec<Option<usize>>,
@@ -331,10 +328,38 @@ struct ShadowSprite(Entity);
 /// model's section on a ramp at a direction.
 type ShadowKey = (String, u8);
 
-/// One of the sprites a building is drawn from: the building's id, which of its
-/// parts this is, and what it is showing.
+/// One of the sprites a building is drawn from, a child of the building's
+/// entity: the building's id, which of its parts this is, and what it is
+/// showing.
 #[derive(Component)]
 struct BuildingSprite(u32, usize, Option<PartKey>);
+
+/// A building's entity, by the simulation's id. Its parts are its children; it
+/// stays at the scene's origin so theirs are scene places.
+#[derive(Component)]
+pub(crate) struct SimBuilding(pub(crate) u32);
+
+/// The entity of each building on the map, by id.
+#[derive(Resource, Default)]
+pub(crate) struct BuildingEntities(pub(crate) HashMap<u32, Entity>);
+
+/// Gives each building an entity and takes it, with its parts, away when the
+/// building goes (destroyed, sold, or packed up).
+fn mirror_buildings(mut commands: Commands, sim: Res<Sim>, mut entities: ResMut<BuildingEntities>) {
+    entities.0.retain(|&id, &mut entity| {
+        let here = sim.0.building(id).is_some();
+        if !here {
+            commands.entity(entity).despawn();
+        }
+        here
+    });
+    for building in sim.0.buildings() {
+        entities.0.entry(building.id).or_insert_with(|| {
+            let clock = AnimClock { super_since: building.opened, ..default() };
+            commands.spawn((DespawnOnExit(Screen::InGame), SimBuilding(building.id), clock, Transform::default(), Visibility::default())).id()
+        });
+    }
+}
 
 pub struct UnitsPlugin;
 
@@ -415,6 +440,7 @@ impl Plugin for UnitsPlugin {
             .add_message::<SimEvent>()
             .init_resource::<effects::EffectRng>()
             .init_resource::<UnitEntities>()
+            .init_resource::<BuildingEntities>()
             .add_systems(Update, publish_events.run_if(in_state(Screen::InGame)).run_if(resource_exists::<Sim>).in_set(crate::schedule::GameSet::Events))
             .add_systems(
                 FixedUpdate,
@@ -422,7 +448,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, (mirror_units, rock_units).chain(), show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (effects::effect_systems(), step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
+                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, (mirror_units, mirror_buildings, rock_units).chain(), show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (effects::effect_systems(), step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>)
@@ -870,7 +896,6 @@ pub fn setup(
         smudge_sprites: HashMap::new(),
         smudges_shown: None,
         building_images: HashMap::new(),
-        building_clocks: HashMap::new(),
         player_palette,
         images: HashMap::new(),
     });
@@ -1504,7 +1529,7 @@ fn anim_frame(anim: &crate::terrain::AnimType, images: usize, ticks: u64, speed:
     Some(anim.start + (from + (steps - first) % round) as usize)
 }
 
-#[derive(Clone, Default)]
+#[derive(Component, Clone, Default)]
 struct AnimClock {
     /// The last few spans the building was offline, the latest perhaps still
     /// open.
@@ -1540,19 +1565,15 @@ fn show_buildings(
     files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut images: ResMut<Assets<Image>>,
-    mut shown: Query<(Entity, &mut BuildingSprite, &mut Sprite, &mut Transform, &mut Visibility, Option<&mut Depth>)>,
+    mut buildings: Query<(Entity, &SimBuilding, &mut AnimClock, Option<&Children>)>,
+    mut shown: Query<(&mut BuildingSprite, &mut Sprite, &mut Transform, &mut Visibility, Option<&mut Depth>)>,
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
-    let standing: std::collections::HashSet<u32> = sim.0.buildings().iter().map(|b| b.id).collect();
-    view.building_clocks.retain(|id, _| standing.contains(id));
-    // Buildings that are gone, for instance packed up into a vehicle.
-    for (entity, sprite, ..) in &shown {
-        if !sim.0.buildings().iter().any(|b| b.id == sprite.0) {
-            commands.entity(entity).despawn();
-        }
-    }
-    for building in sim.0.buildings() {
+    for (owner_entity, sim_building, mut clock, children) in &mut buildings {
+        let Some(building) = sim.0.building(sim_building.0) else {
+            continue;
+        };
         let Some(art) = view.building_art.get(building.kind as usize) else {
             continue;
         };
@@ -1621,7 +1642,6 @@ fn show_buildings(
                 }
                 // Offline, `Powered` animations stop on their frame and
                 // `PoweredLight` ones go, to start again when it comes back.
-                let mut clock = view.building_clocks.get(&building.id).cloned().unwrap_or_else(|| AnimClock { super_since: building.opened, ..default() });
                 let offline = !sim.0.online(building);
                 match (offline, clock.offline()) {
                     (true, false) => {
@@ -1689,7 +1709,6 @@ fn show_buildings(
                     let depth = PartDepth::Upright(slot.z_adjust - height - 2);
                     with_shadow(&mut parts, &mut view.art, &files, &anim.image, frame, body_z + step * (order + 1) as f32, anim.shadow, depth);
                 }
-                view.building_clocks.insert(building.id, clock);
                 // A voxel turret, at the draw point
                 // moved by `TurretAnimX` and `TurretAnimY`, facing in 32 steps;
                 // not while the building is going up or coming down.
@@ -1738,10 +1757,10 @@ fn show_buildings(
                 PartDepth::Upright(adjust) => Some(Depth::Upright { adjust, write: false }),
             }
         };
-        for (entity, mut sprite, mut picture, mut transform, mut visibility, depth) in &mut shown {
-            if sprite.0 != building.id {
+        for &entity in children.into_iter().flatten() {
+            let Ok((mut sprite, mut picture, mut transform, mut visibility, depth)) = shown.get_mut(entity) else {
                 continue;
-            }
+            };
             have = have.max(sprite.1 + 1);
             let Some((name, frame, shadow, z, part)) = parts.get(sprite.1) else {
                 commands.entity(entity).despawn();
@@ -1793,7 +1812,7 @@ fn show_buildings(
                 None => (Handle::default(), Vec3::new(anchor.x, -anchor.y, *z), Visibility::Hidden, None),
             };
             let mut spawned = commands.spawn((
-                DespawnOnExit(Screen::InGame),
+                ChildOf(owner_entity),
                 BuildingSprite(building.id, index, Some(key)),
                 Sprite::from_image(handle),
                 Transform::from_translation(place),
