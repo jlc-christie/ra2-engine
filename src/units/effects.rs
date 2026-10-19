@@ -96,7 +96,7 @@ fn combat_effects(
                         let (owner, layers) = match by {
                             ra2_sim::combat::Aim::Unit(id) => (sim.0.unit(id).map(|u| u.owner), 2),
                             ra2_sim::combat::Aim::Building(id) => {
-                                let tower = sim.0.buildings().iter().find(|b| b.id == id);
+                                let tower = sim.0.building(id);
                                 (tower.map(|b| b.owner), if tower.is_some_and(|b| b.last_supports > 0) { 5 } else { 3 })
                             }
                             ra2_sim::combat::Aim::Cell(..) => (None, 2),
