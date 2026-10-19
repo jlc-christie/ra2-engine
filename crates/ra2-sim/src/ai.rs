@@ -406,21 +406,19 @@ impl World {
         let mut done = vec![false; candidates.len()];
         let rules = self.ai_rules.clone();
         let mut order: Vec<Option<u16>> = Vec::new();
-        if let Some(yard) = self.pick(house, &rules.build_const) {
-            if let Some(at) = candidates.iter().position(|&c| c == yard) {
+        if let Some(yard) = self.pick(house, &rules.build_const)
+            && let Some(at) = candidates.iter().position(|&c| c == yard) {
                 done[at] = true;
                 order.push(Some(yard));
             }
-        }
         order.push(self.pick(house, &rules.build_power));
         for (slot, list) in [(0usize, &rules.build_barracks), (1, &rules.build_weapons)] {
-            if let Some(at) = self.pick(house, list).and_then(|kind| candidates.iter().position(|&c| c == kind)) {
-                if slot < candidates.len() {
+            if let Some(at) = self.pick(house, list).and_then(|kind| candidates.iter().position(|&c| c == kind))
+                && slot < candidates.len() {
                     candidates.swap(slot, at);
                     done[at] = done[slot];
                     done[slot] = false;
                 }
-            }
         }
         let met = |world: &World, kind: u16, list: &[Option<u16>]| {
             world.building_types[kind as usize].prerequisites.iter().all(|group| group.iter().any(|needed| list.contains(&Some(*needed))))
@@ -452,14 +450,13 @@ impl World {
             }
         }
         // Extra refineries: two for the hardest, one, none.
-        if let Some(refinery) = self.pick(house, &rules.build_refinery) {
-            if let Some(first) = order[..order.len().saturating_sub(1)].iter().position(|&kind| kind == Some(refinery)) {
+        if let Some(refinery) = self.pick(house, &rules.build_refinery)
+            && let Some(first) = order[..order.len().saturating_sub(1)].iter().position(|&kind| kind == Some(refinery)) {
                 for _ in 0..(2 - difficulty.min(2)) {
                     let at = self.draw(first as i32, order.len() as i32 - 1) as usize;
                     order.insert(at + 1, Some(refinery));
                 }
             }
-        }
         let counts = if side == 1 { rules.defence_counts.1 } else { rules.defence_counts.0 };
         for _ in 0..counts[difficulty.min(2)] {
             if order.len() > 3 {
@@ -530,7 +527,7 @@ impl World {
                     Some((against, quarter)) => {
                         let g = self.coverage(house, base, c, against as usize);
                         let (dx, dy) = ((c.0 - base.0) as f64, (c.1 - base.1) as f64);
-                        let facing = ((dx.atan2(-dy) / std::f64::consts::TAU * 65536.0) as i32 & 0xffff) as i32;
+                        let facing = (dx.atan2(-dy) / std::f64::consts::TAU * 65536.0) as i32 & 0xffff;
                         let f = (((facing >> 7) + 1) >> 1) & 0xff;
                         let mut a = (quarter as i32 * 2 * 32 - f).abs();
                         if a >= 128 {
@@ -601,7 +598,7 @@ impl World {
     // wall already; the places go in just after it: the rows above and below,
     // the columns left and right, then the corners, in reverse order.
     fn add_wall_nodes(&self, house: u8, nodes: &mut Vec<Node>, at: usize) -> bool {
-        let side = self.houses[house as usize].side as i32;
+        let side = self.houses[house as usize].side;
         let Some(wall) = self.ai_rules.concrete_walls.iter().copied().find(|&w| self.building_types.get(w as usize).is_some_and(|t| t.planning_side == side || t.planning_side == -1)) else {
             return false;
         };

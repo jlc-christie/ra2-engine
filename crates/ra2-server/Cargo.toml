@@ -7,3 +7,6 @@ edition = "2024"
 # crate alone: no simulation, no Bevy, no game files.
 [dependencies]
 ra2-net = { path = "../ra2-net" }
+
+[lints]
+workspace = true

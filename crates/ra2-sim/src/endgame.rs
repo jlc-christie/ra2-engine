@@ -48,11 +48,10 @@ impl World {
                 }
             }
         }
-        if counts {
-            if let Some(house) = self.houses.get_mut(owner as usize) {
+        if counts
+            && let Some(house) = self.houses.get_mut(owner as usize) {
                 house.score.losses += 1;
             }
-        }
     }
 
     /// The defeat of houses and the end of the game.

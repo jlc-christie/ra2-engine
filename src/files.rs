@@ -67,6 +67,7 @@ impl GameFiles {
     /// Opens the game directory named by `RA2_DIR`, or the Steam depot copied into
     /// the project root (for the tests and tools; the game itself goes through
     /// `setup::locate`).
+    #[cfg(test)]
     pub fn open() -> std::io::Result<Self> {
         Self::open_at(&dev_dir())
     }
@@ -88,11 +89,10 @@ impl GameFiles {
                 }
             }
             for (slot, nested) in sidebars.iter_mut().zip(SIDEBARS) {
-                if slot.is_none() {
-                    if let Some(inner) = mix.nested(nested) {
+                if slot.is_none()
+                    && let Some(inner) = mix.nested(nested) {
                         *slot = Some(inner.map_err(named)?);
                     }
-                }
             }
             archives.push(mix);
         }

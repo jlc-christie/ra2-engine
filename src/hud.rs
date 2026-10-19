@@ -441,7 +441,6 @@ fn slot_rect(slot: usize) -> Rect {
 
 /// Runs the sidebar: mouse clicks on cameos, and redrawing whichever of the
 /// credits, power bar, cameo strip and tooltip has changed.
-#[allow(clippy::too_many_arguments)]
 fn update_sidebar(
     mut commands: Commands,
     mut hud: ResMut<Hud>,
@@ -488,7 +487,7 @@ fn update_sidebar(
     let in_tab = |tab: usize| -> Vec<u16> {
         match tab {
             1 => supers.iter().map(|index| SUPER + index).chain(everything.iter().copied().filter(|&building| sim.0.is_defence(building))).collect(),
-            0 | 1 => everything.iter().copied().filter(|&building| sim.0.is_defence(building) == (tab == 1)).collect(),
+            0 => everything.iter().copied().filter(|&building| !sim.0.is_defence(building)).collect(),
             _ => units.iter().copied().filter(|&unit| sim.0.unit_tab(unit) == tab).collect(),
         }
     };
@@ -502,11 +501,10 @@ fn update_sidebar(
     }
     hud.enabled = enabled;
     // RA2_TAB=0..3 keeps that tab showing whenever it has something, for checking it.
-    if let Some(forced) = std::env::var("RA2_TAB").ok().and_then(|n| n.trim().parse::<usize>().ok()) {
-        if forced < 4 && enabled[forced] {
+    if let Some(forced) = std::env::var("RA2_TAB").ok().and_then(|n| n.trim().parse::<usize>().ok())
+        && forced < 4 && enabled[forced] {
             hud.tab = forced;
         }
-    }
     // A tab with nothing in it is disabled and takes no clicks; a click on any
     // other shows it and plays `GUITabSound`.
     if buttons.just_pressed(MouseButton::Left) {
@@ -551,11 +549,10 @@ fn update_sidebar(
     let in_production = house.tab_slot(tab);
     // Production is abandoned only when the last factory for it goes; losing
     // what a type needs to be offered does not stop one already begun.
-    if tab < 2 {
-        if let Some(production) = in_production.filter(|production| !buildable.contains(&production.building)) {
+    if tab < 2
+        && let Some(production) = in_production.filter(|production| !buildable.contains(&production.building)) {
             buildable.push(production.building);
         }
-    }
 
     if mouse != Some(hud.mouse) {
         hud.mouse = mouse.unwrap_or(Vec2::NEG_ONE);
@@ -660,8 +657,8 @@ fn update_sidebar(
                     sim.give(Order::Build { house: local(), building });
                 }
             }
-        } else if buttons.just_pressed(MouseButton::Right) {
-            if let Some(production) = mine {
+        } else if buttons.just_pressed(MouseButton::Right)
+            && let Some(production) = mine {
                 placing.0 = None;
                 cues.write_batch(build_sound);
                 if production.suspended {
@@ -673,7 +670,6 @@ fn update_sidebar(
                     sim.give(Order::Suspend { house: local(), building });
                 }
             }
-        }
     }
 
     // Credits run towards the real figure an eighth of the gap at a time.
@@ -899,7 +895,6 @@ fn update_sidebar(
 
 /// Draws one cameo and what lies over it.
 // The layers and their order.
-#[allow(clippy::too_many_arguments)]
 fn draw_cameo(
     parent: &mut ChildSpawnerCommands,
     hud: &Hud,
@@ -942,8 +937,8 @@ fn draw_cameo(
             // top right, on a darkened box.
             let count = strip.counts.get(slot).copied().unwrap_or(0);
             let counted = count > 1 || (count == 1 && mine.is_none());
-            if counted {
-                if let Some(font) = &hud.font {
+            if counted
+                && let Some(font) = &hud.font {
                     let (image, text_size) = text_image(font, images, &count.to_string());
                     let x = 60.0 - text_size.x - 2.0;
                     cameo.spawn((
@@ -952,7 +947,6 @@ fn draw_cameo(
                     ));
                     cameo.spawn((absolute(x, 1.0, text_size), ImageNode::new(image)));
                 }
-            }
             let Some((_, stage, ready, on_hold)) = mine else {
                 return;
             };

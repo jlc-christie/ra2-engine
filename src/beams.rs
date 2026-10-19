@@ -227,6 +227,7 @@ fn fade_lasers(
 // leptons is split at its middle (eight deep at most) and each middle pushed
 // aside, in world leptons; the first split also sways by a sine of the seed.
 // Strand 0 is drawn in colour 15, over the other two.
+#[allow(clippy::needless_range_loop)]
 fn flicker_bolts(mut commands: Commands, colours: Res<BoltColours>, mut bolts: Query<(Entity, &mut Bolt)>) {
     for (entity, mut bolt) in &mut bolts {
         for line in bolt.lines.drain(..) {

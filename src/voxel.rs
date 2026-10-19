@@ -28,7 +28,7 @@ impl NormalTables {
             };
             at += raw.len();
             let vectors = raw
-                .chunks_exact(12)
+                .as_chunks::<12>().0.iter()
                 .map(|v| std::array::from_fn(|i| f32::from_le_bytes(v[i * 4..][..4].try_into().unwrap())))
                 .collect();
             tables.insert(kind, vectors);
@@ -169,7 +169,7 @@ fn world_to_view(v: [f32; 3]) -> [f32; 3] {
 /// The direction of the light in view space.
 // The vector (-0.7071, -0.7071, 0) turned 45 degrees
 // about the y axis.
-const LIGHT: [f32; 3] = [-0.5, -0.707_106_8, 0.5];
+const LIGHT: [f32; 3] = [-0.5, -std::f32::consts::FRAC_1_SQRT_2, 0.5];
 /// Sharpness of the highlight.
 // Passed as 3.0.
 const SHININESS: f32 = 3.0;
@@ -283,7 +283,6 @@ impl Pose {
 
 /// Draws a model facing a compass direction (0 to 255, clockwise from north).
 /// `light` is the brightness multiplier per channel in thousandths.
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     vxl: &Vxl,
     hva: Option<&Hva>,

@@ -55,11 +55,10 @@ fn follow_window(mut images: ResMut<Assets<Image>>, window: Single<&Window, With
         return;
     };
     let wanted = (window.width() as u32, window.height() as u32);
-    if let Some(mut image) = images.get_mut(&target.0) {
-        if (image.width(), image.height()) != wanted {
+    if let Some(mut image) = images.get_mut(&target.0)
+        && (image.width(), image.height()) != wanted {
             image.resize(Extent3d { width: wanted.0, height: wanted.1, depth_or_array_layers: 1 });
         }
-    }
 }
 
 fn capture_and_exit(

@@ -507,9 +507,9 @@ impl World {
         for dy in 0..building.size.1 {
             for dx in 0..building.size.0 {
                 let cell = (building.cell.0 + dx, building.cell.1 + dy);
-                if !defeated && left > 0 && self.ranged(0, odds) == 1 {
-                    if let Some(crew) = self.building_crew_kind(building, &kind) {
-                        if let Some(id) = self.put_survivor(crew, building.owner, cell) {
+                if !defeated && left > 0 && self.ranged(0, odds) == 1
+                    && let Some(crew) = self.building_crew_kind(building, &kind)
+                        && let Some(id) = self.put_survivor(crew, building.owner, cell) {
                             left -= 1;
                             let strength = self.unit(id).map_or(1, |u| u.stats.strength);
                             let health = self.ranged(5, strength);
@@ -523,8 +523,6 @@ impl World {
                                 unit.arms.attacking = true;
                             }
                         }
-                    }
-                }
                 if self.map.passable(cell.0, cell.1) {
                     let burn = self.random_below(100) < 50;
                     let dx = self.ranged(-0x80, 0x80);

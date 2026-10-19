@@ -6,6 +6,14 @@ edition = "2024"
 [workspace]
 members = ["crates/ra2-formats", "crates/ra2-sim", "crates/ra2-tools", "crates/ra2-net", "crates/ra2-server", "crates/ra2-bundle"]
 
+# Bevy systems take their data as parameters and queries.
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[lints]
+workspace = true
+
 [dependencies]
 ra2-formats = { path = "crates/ra2-formats" }
 ra2-sim = { path = "crates/ra2-sim" }

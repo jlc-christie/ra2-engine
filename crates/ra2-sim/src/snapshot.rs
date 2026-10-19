@@ -37,6 +37,7 @@
 //!   `exempt` only ever gains cells. A game goes on with the zones it has, so
 //!   they are saved as they stand; building them afresh on restore sent units
 //!   another way within fifty ticks.
+//!
 //! The lists below are the classification the code uses: each names every
 //! field of its struct, so a new field does not compile until it is put in one.
 //!

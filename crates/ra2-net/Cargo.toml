@@ -5,3 +5,6 @@ edition = "2024"
 
 # No dependencies on purpose: std only, so it builds offline, and no ra2-sim or Bevy.
 [dependencies]
+
+[lints]
+workspace = true

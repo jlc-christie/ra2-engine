@@ -15,7 +15,7 @@ use ra2_formats::ini::Ini;
 use ra2_formats::pal::Palette;
 use ra2_formats::shp::Shp;
 use crate::action::{self, Action, Mods};
-use ra2_sim::{LEPTONS_PER_CELL, Order, SpeedType, World};
+use ra2_sim::{LEPTONS_PER_CELL, Order, World};
 
 use crate::audio::Cue;
 use crate::cursor::{self, Pointer, WantedCursor};
@@ -39,11 +39,6 @@ pub enum Target {
 pub struct Selection(pub Vec<Target>);
 
 impl Selection {
-    /// The thing selected, when it is the only one.
-    fn only(&self) -> Option<Target> {
-        (self.0.len() == 1).then(|| self.0[0])
-    }
-
     pub(crate) fn units(&self) -> impl Iterator<Item = u32> + '_ {
         self.0.iter().filter_map(|target| match target {
             Target::Unit(id) => Some(*id),
@@ -300,12 +295,11 @@ fn setup(mut commands: Commands, files: Res<GameFiles>) {
 struct SelectLater(Target);
 
 fn select_later(mut commands: Commands, later: Option<Res<SelectLater>>, sim: Res<Sim>, mut selection: ResMut<Selection>) {
-    if let Some(later) = later {
-        if exists(&sim.0, later.0) {
+    if let Some(later) = later
+        && exists(&sim.0, later.0) {
             selection.0 = vec![later.0];
             commands.remove_resource::<SelectLater>();
         }
-    }
 }
 
 /// Finds what the mouse is over.
@@ -447,7 +441,6 @@ struct Shortcuts {
 // object, Ctrl+number make a group, number select it (twice within 25 frames to
 // centre on it), Alt+number select and centre, Shift+number add it, F1 to F4 go to
 // a view bookmark and Ctrl+F1 to F4 set one.
-#[allow(clippy::too_many_arguments)]
 fn shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
     view: Res<UnitView>,
@@ -694,7 +687,6 @@ fn shortcuts(
 // player's things with Shift, selects it alone otherwise, or gives every selected
 // unit the order for what was clicked, the first of them answering. A right click
 // backs out of placing a building, or else deselects everything.
-#[allow(clippy::too_many_arguments)]
 fn clicks(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -827,8 +819,8 @@ fn clicks(
             }
             return;
         }
-        if buttons.just_released(MouseButton::Left) {
-            if let Some(Target::Building(building)) = hover.target.filter(|target| owned_by_player(&sim.0, *target)) {
+        if buttons.just_released(MouseButton::Left)
+            && let Some(Target::Building(building)) = hover.target.filter(|target| owned_by_player(&sim.0, *target)) {
                 match *mode {
                     Mode::Repair => {
                         let was = sim.0.buildings().iter().any(|b| b.id == building && b.repairing);
@@ -846,7 +838,6 @@ fn clicks(
                     }
                 }
             }
-        }
         return;
     }
     let deploy_button = bar.read().any(|command| *command == crate::bar::Command::Deploy);
@@ -860,12 +851,11 @@ fn clicks(
         // If the first thing selected is a building
         // of the player's with soldiers in it, they come out and nothing else
         // is done.
-        if let Some(Target::Building(building)) = selection.0.first().copied() {
-            if sim.0.buildings().iter().any(|b| b.id == building && b.owner == local() && !b.occupants.is_empty()) {
+        if let Some(Target::Building(building)) = selection.0.first().copied()
+            && sim.0.buildings().iter().any(|b| b.id == building && b.owner == local() && !b.occupants.is_empty()) {
                 sim.give(Order::Evacuate { building });
                 return;
             }
-        }
         // Every selected thing that can deploy;
         // but if some of the `Deployer` soldiers are dug in and some are not,
         // those dug in are left as they are, so that a mixed group first all
@@ -890,13 +880,11 @@ fn clicks(
         band.pressed = hover.point;
         band.drawn = None;
     }
-    if buttons.pressed(MouseButton::Left) {
-        if let (Some(from), Some(to)) = (band.pressed, hover.point) {
-            if band.drawn.is_some() || (to - from).length().trunc() > 4.0 {
+    if buttons.pressed(MouseButton::Left)
+        && let (Some(from), Some(to)) = (band.pressed, hover.point)
+            && (band.drawn.is_some() || (to - from).length().trunc() > 4.0) {
                 band.drawn = Some((from, to));
             }
-        }
-    }
     if !buttons.just_released(MouseButton::Left) {
         return;
     }
@@ -1114,7 +1102,6 @@ fn clicks(
 // messages as it comes on (the key's own wording the first time); on leaving,
 // every unit with a plan starts on it and takes each next order as it finishes
 // the one before.
-#[allow(clippy::too_many_arguments)]
 fn run_plans(
     keys: Res<ButtonInput<KeyCode>>,
     files: Res<GameFiles>,
@@ -1565,7 +1552,6 @@ fn draw_sensor_lines(mut commands: Commands, mut images: ResMut<Assets<Image>>, 
 }
 
 /// Redraws everything shown over the map for the mouse.
-#[allow(clippy::too_many_arguments)]
 fn draw_overlays(
     mut commands: Commands,
     mut art: ResMut<OverlayArt>,

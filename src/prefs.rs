@@ -52,7 +52,7 @@ impl Prefs {
     }
 
     /// The `[Options]` and `[Audio]` sections.
-    pub fn to_keys(&self) -> String {
+    pub fn to_keys(self) -> String {
         let yes = |on: bool| if on { "yes" } else { "no" };
         format!(
             "\n[Options]\nDetailLevel={}\nDifficulty={}\nScrollRate={}\nUnitActionLines={}\nShowHidden={}\nToolTips={}\n\n[Audio]\nSoundVolume={:.6}\nVoiceVolume={:.6}\nScoreVolume={:.6}\n",

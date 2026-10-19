@@ -163,11 +163,10 @@ fn main() {
             }
             if let Some(want) = args.get(3).and_then(|n| n.parse::<u8>().ok()) {
                 for tile in &map.tiles {
-                    if let Some((kind, state)) = map.overlay_at(tile.x as i32, tile.y as i32) {
-                        if kind == want {
+                    if let Some((kind, state)) = map.overlay_at(tile.x as i32, tile.y as i32)
+                        && kind == want {
                             println!("  {},{} level {} state {state}", tile.x, tile.y, tile.level);
                         }
-                    }
                 }
             }
             for (kind, (count, (x, y))) in overlays {

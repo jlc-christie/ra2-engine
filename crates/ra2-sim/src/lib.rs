@@ -532,12 +532,11 @@ impl Map {
 
     /// Puts a cell back under a house's shroud.
     pub(crate) fn hide(&mut self, house: u8, cell: (i32, i32)) {
-        if let Some(index) = self.index(cell.0, cell.1) {
-            if self.revealed[index] & house_bit(house) != 0 {
+        if let Some(index) = self.index(cell.0, cell.1)
+            && self.revealed[index] & house_bit(house) != 0 {
                 self.revealed[index] &= !house_bit(house);
                 self.shroud_version += 1;
             }
-        }
     }
 
     /// Shows or hides the whole map for a house.
@@ -606,12 +605,11 @@ impl Map {
             if self.index(tx, ty).is_some() && self.level(tx, ty) as i32 > level + 3 {
                 continue;
             }
-            if let Some(index) = self.index(centre.0 + dx, centre.1 + dy) {
-                if self.revealed[index] & bit == 0 {
+            if let Some(index) = self.index(centre.0 + dx, centre.1 + dy)
+                && self.revealed[index] & bit == 0 {
                     self.revealed[index] |= bit;
                     changed = true;
                 }
-            }
         }
         if changed {
             self.shroud_version += 1;
@@ -931,11 +929,10 @@ impl Map {
                 if tree || building {
                     for dy in -1..=1 {
                         for dx in -1..=1 {
-                            if let Some(near) = self.index(x + dx, y + dy) {
-                                if building || (dx, dy) != (0, 0) {
+                            if let Some(near) = self.index(x + dx, y + dy)
+                                && (building || (dx, dy) != (0, 0)) {
                                     self.exempt[near] = true;
                                 }
-                            }
                         }
                     }
                 }
@@ -2667,11 +2664,10 @@ impl World {
         let kind = self.building_types.get(kind as usize);
         // A wall may go over the placer's own wall of
         // the same kind once that is damaged.
-        if let Some(overlay) = kind.and_then(|kind| kind.wall_overlay) {
-            if self.map.wall_kind[index] == overlay && self.map.wall_owner[index] == house && self.map.wall_data[index] > 15 {
+        if let Some(overlay) = kind.and_then(|kind| kind.wall_overlay)
+            && self.map.wall_kind[index] == overlay && self.map.wall_owner[index] == house && self.map.wall_data[index] > 15 {
                 return true;
             }
-        }
         if kind.is_some_and(|kind| kind.water_bound) {
             self.map.passable[index]
                 && !self.map.overlay[index]
@@ -2989,8 +2985,8 @@ impl World {
         } as i32;
         // The aircraft that live on pads, together,
         // owned and being built, may not outnumber the house's pads.
-        if let Item::Unit(kind) = item {
-            if self.unit_types.get(kind as usize).is_some_and(|kind| kind.stats.plane.is_some_and(|plane| plane.airport_bound)) {
+        if let Item::Unit(kind) = item
+            && self.unit_types.get(kind as usize).is_some_and(|kind| kind.stats.plane.is_some_and(|plane| plane.airport_bound)) {
                 let bound = |stats: &UnitStats| stats.plane.is_some_and(|plane| plane.airport_bound);
                 let owned = self.units.iter().filter(|u| u.owner == house && bound(&u.stats)).count();
                 let queued = self.houses.get(house as usize).map_or(0, |h| {
@@ -2998,7 +2994,6 @@ impl World {
                 });
                 return owned + queued >= self.dock_count(house);
             }
-        }
         limit.is_some_and(|limit| limit > 0 && owned >= limit)
     }
 
@@ -3417,7 +3412,7 @@ impl World {
                 }
             }
         }
-        if self.repair_interval == 0 || self.tick % self.repair_interval as u64 != 0 {
+        if self.repair_interval == 0 || !self.tick.is_multiple_of(self.repair_interval as u64) {
             return;
         }
         for index in 0..self.buildings.len() {
@@ -3724,12 +3719,11 @@ impl World {
     /// Lets go of the refinery a miner is in touch with.
     fn leave_dock(&mut self, index: usize) {
         let id = self.units[index].id;
-        if let Some(dock) = self.units[index].work.dock.take() {
-            if let Some(building) = self.buildings.iter_mut().find(|b| b.id == dock && b.docked == Some(id)) {
+        if let Some(dock) = self.units[index].work.dock.take()
+            && let Some(building) = self.buildings.iter_mut().find(|b| b.id == dock && b.docked == Some(id)) {
                 building.docked = None;
                 building.refining = None;
             }
-        }
     }
 
     /// Runs the missions of the miners that are due.
@@ -3945,16 +3939,15 @@ impl World {
                     return self.mission_delay();
                 }
                 let limit = if stats.teleporter { self.chrono_too_far } else { self.harvester_too_far } as i64 * LEPTONS_PER_CELL as i64;
-                if let Some((dock, distance)) = self.find_dock(index, false) {
-                    if distance <= limit {
+                if let Some((dock, distance)) = self.find_dock(index, false)
+                    && distance <= limit {
                         self.buildings[dock].docked = Some(self.units[index].id);
                         self.units[index].work.dock = Some(self.buildings[dock].id);
                         self.units[index].work.status = 3;
                         return self.mission_delay();
                     }
-                }
-                if let Some((dock, distance)) = self.find_dock(index, true) {
-                    if distance > 0x300 || stats.teleporter {
+                if let Some((dock, distance)) = self.find_dock(index, true)
+                    && (distance > 0x300 || stats.teleporter) {
                         let building = &self.buildings[dock];
                         let queue = self.building_types[building.kind as usize].queueing_cell;
                         let wait = (building.cell.0 + queue.0, building.cell.1 + queue.1);
@@ -3967,7 +3960,6 @@ impl World {
                             None => self.units[index].dest = None,
                         }
                     }
-                }
                 self.mission_delay()
             }
             3 => {
@@ -4049,11 +4041,10 @@ impl World {
                 let free = self.map.index(spot.0, spot.1).is_some_and(|at| self.claims[at] == 0);
                 if free {
                     self.parasite_exit(index);
-                    if let Some(at) = self.map.index(here.0, here.1) {
-                        if self.claims[at] == id + 1 {
+                    if let Some(at) = self.map.index(here.0, here.1)
+                        && self.claims[at] == id + 1 {
                             self.claims[at] = 0;
                         }
-                    }
                     if let Some(at) = self.map.index(spot.0, spot.1) {
                         self.claims[at] = id + 1;
                     }
@@ -4458,7 +4449,7 @@ impl World {
         // Not original behaviour: the engine counts each cell's viewers and
         // darkens a watched cell as its last viewer leaves; here the disc goes
         // dark every fifteen frames and the player's things look again.
-        if self.tick % 15 == 0 {
+        if self.tick.is_multiple_of(15) {
             let gaps: Vec<((i32, i32), i32)> = self
                 .buildings
                 .iter()
@@ -4498,7 +4489,7 @@ impl World {
                 continue;
             }
             let cell = unit.cell();
-            if unit.looked == Some(cell) && !(unit.is_moving() && self.tick % 15 == 0) {
+            if unit.looked == Some(cell) && !(unit.is_moving() && self.tick.is_multiple_of(15)) {
                 continue;
             }
             let level = self.map.level(cell.0, cell.1) as i32 + self.altitude(unit) / combat::LEVEL_HEIGHT;
@@ -4869,11 +4860,10 @@ impl World {
                 }
                 // The Enter mission with the pad
                 // building as where to go.
-                if let Some(index) = self.units.iter().position(|u| u.id == unit) {
-                    if self.can_dock(unit, building) {
+                if let Some(index) = self.units.iter().position(|u| u.id == unit)
+                    && self.can_dock(unit, building) {
                         self.plane_dock(index, building);
                     }
-                }
             }
             Order::Evacuate { building } => {
                 // The Unload mission of a
@@ -4913,11 +4903,10 @@ impl World {
             Order::Attack { unit, target } => {
                 // A `C4` soldier told to attack a
                 // building it can wire walks in instead.
-                if let combat::Aim::Building(building) = target {
-                    if self.entry_action(unit, building) == Some(combat::Entry::Sabotage) {
+                if let combat::Aim::Building(building) = target
+                    && self.entry_action(unit, building) == Some(combat::Entry::Sabotage) {
                         return self.order(Order::Enter { unit, building });
                     }
-                }
                 if let Some(index) = self.units.iter().position(|u| u.id == unit && u.plane.is_some()) {
                     self.plane_attack(index, target);
                     return;
@@ -4927,13 +4916,12 @@ impl World {
                 // feet when it has to walk; here it is done at the order).
                 let tick = self.tick;
                 let human = self.unit(unit).is_some_and(|u| self.human(u.owner));
-                if let Some(soldier) = self.units.iter_mut().find(|u| u.id == unit && u.stats.infantry && !human) {
-                    if matches!(soldier.stance, combat::Stance::Deployed | combat::Stance::Deploying(_)) {
+                if let Some(soldier) = self.units.iter_mut().find(|u| u.id == unit && u.stats.infantry && !human)
+                    && matches!(soldier.stance, combat::Stance::Deployed | combat::Stance::Deploying(_)) {
                         soldier.stance = combat::Stance::Undeploying(tick + soldier.stats.fighter.undeploy_frames as u64);
                         soldier.undeploy_at = None;
                         soldier.busy_at = tick;
                     }
-                }
                 // The Attack mission with the target.
                 if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit && !u.tethered) {
                     unit.arms.target = Some(target);
@@ -5051,13 +5039,12 @@ impl World {
                 let tick = self.tick;
                 let held = self.houses.get(house as usize).and_then(|h| h.slot(combat));
                 if let Some(held) = held {
-                    if held.building == building && held.on_hold() {
-                        if let Some(production) = self.houses[house as usize].slot_mut(combat) {
+                    if held.building == building && held.on_hold()
+                        && let Some(production) = self.houses[house as usize].slot_mut(combat) {
                             production.suspended = false;
                             production.rate = rate;
                             production.next = tick + rate as u64;
                         }
-                    }
                     return;
                 }
                 if !self.buildable(house).contains(&building) || self.at_build_limit(house, building) {
@@ -5107,12 +5094,11 @@ impl World {
             }
             Order::SuspendUnit { house, unit } => {
                 let tab = self.unit_slot(unit);
-                if let Some(production) = self.houses.get_mut(house as usize).and_then(|h| h.tab_slot_mut(tab).as_mut()) {
-                    if production.building == unit && !production.suspended {
+                if let Some(production) = self.houses.get_mut(house as usize).and_then(|h| h.tab_slot_mut(tab).as_mut())
+                    && production.building == unit && !production.suspended {
                         production.suspended = true;
                         production.rate = 0;
                     }
-                }
             }
             Order::CancelUnit { house, unit } => {
                 // A queued copy goes first; only when
@@ -5137,24 +5123,21 @@ impl World {
             Order::Suspend { house, building } => {
                 // The stage and what was paid are kept.
                 let combat = self.is_defence(building);
-                if let Some(production) = self.houses.get_mut(house as usize).and_then(|h| h.slot_mut(combat).as_mut()) {
-                    if production.building == building && !production.suspended {
+                if let Some(production) = self.houses.get_mut(house as usize).and_then(|h| h.slot_mut(combat).as_mut())
+                    && production.building == building && !production.suspended {
                         production.suspended = true;
                         production.rate = 0;
                     }
-                }
             }
             Order::CancelBuild { house, building } => {
                 // The refund is what has been paid.
                 let combat = self.is_defence(building);
                 let cost = self.building_types.get(building as usize).map_or(0, |kind| kind.cost);
-                if let Some(house) = self.houses.get_mut(house as usize) {
-                    if house.slot(combat).is_some_and(|p| p.building == building) {
-                        if let Some(production) = house.slot_mut(combat).take() {
+                if let Some(house) = self.houses.get_mut(house as usize)
+                    && house.slot(combat).is_some_and(|p| p.building == building)
+                        && let Some(production) = house.slot_mut(combat).take() {
                             house.credits += cost - production.balance;
                         }
-                    }
-                }
             }
             Order::Place { house, building, x, y } => {
                 let combat = self.is_defence(building);
@@ -5465,12 +5448,11 @@ impl World {
                 unit.work.next = self.tick + 1;
                 continue;
             }
-            if (left || !unit.is_moving()) && !unit.tethered {
-                if let Some(rally) = unit.rally.take() {
+            if (left || !unit.is_moving()) && !unit.tethered
+                && let Some(rally) = unit.rally.take() {
                     going.push((unit.id, rally));
                     continue;
                 }
-            }
             if left || on_building {
                 leaving.push(unit.id);
             }
@@ -5506,11 +5488,10 @@ impl World {
             .filter(|u| u.cell() == cell && u.health > 0 && !(u.stats.infantry && u.is_moving()))
             .map(|u| u.id)
             .collect();
-        if let Some(unit) = self.units.iter().find(|u| u.id + 1 == claim).map(|u| u.id) {
-            if !asked.contains(&unit) {
+        if let Some(unit) = self.units.iter().find(|u| u.id + 1 == claim).map(|u| u.id)
+            && !asked.contains(&unit) {
                 asked.push(unit);
             }
-        }
         for unit in asked {
             self.scatter_unit_from(unit, how);
         }
@@ -6140,7 +6121,8 @@ impl Ground<'_> {
             // level, so a step that only the height rule refuses counts as open.
             let blocked = |to: (i32, i32), dir: usize, from: (i32, i32)| this.can_enter_at(who, to, Some(dir), from, this.map.level(to.0, to.1) as i32) != code::OK;
             let mut tries = 0;
-            let found = loop {
+            
+            loop {
                 let found = run(corridor.as_ref());
                 let (Some(zones), Some(confined)) = (usable, corridor.as_ref()) else {
                     break found;
@@ -6163,8 +6145,7 @@ impl Ground<'_> {
                 if corridor.is_none() {
                     break None;
                 }
-            };
-            found
+            }
         };
         match steps {
             Some(steps) => {
@@ -6241,7 +6222,7 @@ level: i32,
                 return code::NO;
             }
         }
-        let src = if from_bridge { from_h } else if level == -1 { from_h } else { level };
+        let src = if from_bridge || level == -1 { from_h } else { level };
         let allowed = match src - h {
             0 => (map.deck(to.0, to.1) && from_bridge && (level == -1 || level != h || map.deck(from.0, from.1))) || level == -1 || level == h,
             1 => map.ramp(to.0, to.1) != 0,
@@ -6270,11 +6251,10 @@ level: i32,
     // On the missions that
     // go into something, the cells of what the unit was sent into are open to
     // it: a building's foundation, and the cell its transport stands on.
-    if let Some((origin, size)) = unit.enter_area {
-        if (origin.0..origin.0 + size.0).contains(&to.0) && (origin.1..origin.1 + size.1).contains(&to.1) {
+    if let Some((origin, size)) = unit.enter_area
+        && (origin.0..origin.0 + size.0).contains(&to.0) && (origin.1..origin.1 + size.1).contains(&to.1) {
             return code::OK;
         }
-    }
     let mut result = code::OK;
     // What is on the other layer
     // of a bridge cell is not in the way.
@@ -7092,12 +7072,11 @@ fn follow_track(unit: &mut Unit, ground: &mut Ground) {
 
     // A curve lets go of the cell it passes through
     // at the track's cell-crossing point.
-    if let Some(via) = drive.via {
-        if track.cell >= 0 && drive.index as i32 > track.cell {
+    if let Some(via) = drive.via
+        && track.cell >= 0 && drive.index as i32 > track.cell {
             ground.release(via, unit.id);
             drive.via = None;
         }
-    }
 
     if drive.index >= track.points.len() {
         // The track ends at the centre of its cell, facing the way the entry says.

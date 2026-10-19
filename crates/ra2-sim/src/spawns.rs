@@ -6,7 +6,7 @@
 //!
 
 use crate::aircraft::{Mission, Plane};
-use crate::combat::{Aim, Event};
+use crate::combat::Aim;
 use crate::{Unit, UnitStats, World, LEPTONS_PER_CELL};
 
 /// `Spawns`, `SpawnsNumber`, `SpawnRegenRate`, `SpawnReloadRate`.
@@ -185,11 +185,10 @@ impl World {
             let mut node = spawner.nodes[at].clone();
             // One that has died is replaced after
             // `SpawnRegenRate`.
-            if let Some(out) = node.out {
-                if !self.unit(out).is_some_and(|unit| unit.health > 0 && !unit.plane.is_some_and(|plane| plane.crashing)) {
+            if let Some(out) = node.out
+                && !self.unit(out).is_some_and(|unit| unit.health > 0 && !unit.plane.is_some_and(|plane| plane.crashing)) {
                     node = Node { aboard: None, out: None, state: 7, until: now + stats.regen as u64, rocket: node.rocket };
                 }
-            }
             match node.state {
                 // With a target and the launch timer run out, and for
                 // a rocket only while the owner stands still, the spawn is put
@@ -293,12 +292,11 @@ impl World {
                         }
                     }
                 }
-                7 => {
-                    if now >= node.until {
+                7
+                    if now >= node.until => {
                         node.aboard = self.new_spawn(&owner, stats);
                         node.state = if node.aboard.is_some() { 0 } else { 7 };
                     }
-                }
                 _ => {}
             }
             spawner.nodes[at] = node;

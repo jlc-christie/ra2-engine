@@ -863,11 +863,10 @@ impl World {
             0
         };
         let mut limit = weapon.range + slant;
-        if let Aim::Building(id) = target {
-            if let Some(building) = self.buildings.iter().find(|b| b.id == id) {
+        if let Aim::Building(id) = target
+            && let Some(building) = self.buildings.iter().find(|b| b.id == id) {
                 limit += (building.size.0 + building.size.1) * 64;
             }
-        }
         // For a firer in the air the distance is
         // taken at the target's own height (a Kirov over its target is beside
         // it). Not original behaviour: "in the air" is judged from the height
@@ -1023,11 +1022,10 @@ impl World {
         // A `Spawner` weapon makes no shot: it
         // hands the target to the unit's spawns.
         if weapon.spawner {
-            if let Aim::Unit(id) = by {
-                if let Some(spawner) = self.units.iter_mut().find(|u| u.id == id).and_then(|unit| unit.spawner.as_mut()) {
+            if let Aim::Unit(id) = by
+                && let Some(spawner) = self.units.iter_mut().find(|u| u.id == id).and_then(|unit| unit.spawner.as_mut()) {
                     spawner.set_target(target);
                 }
-            }
             arms.rearm_at = self.tick + weapon.rof.max(0) as u64 + (self.next_random() % 3) as u64;
             arms.fired_at = self.tick;
             return true;
@@ -1038,15 +1036,14 @@ impl World {
         // shot takes (distance over nine tenths of the shot's speed). Only the
         // launch is led; the shot's fuse still counts to the target itself.
         let mut launch_at = aim;
-        if let Aim::Unit(id) = target {
-            if let Some(them) = self.unit(id).filter(|u| !u.stats.infantry && u.plane.is_none() && u.is_moving() && u.drive.is_some()) {
+        if let Aim::Unit(id) = target
+            && let Some(them) = self.unit(id).filter(|u| !u.stats.infantry && u.plane.is_none() && u.is_moving() && u.drive.is_some()) {
                 let distance = ((them.x - at.0) as f64).hypot((them.y - at.1) as f64) as i32;
                 let shot = self.shot_speed(&weapon, &projectile, distance).max(1) as f64;
                 let lead = (distance as f64 / (shot * 0.9) * them.speed as f64) as i32;
                 let a = rad((them.facing as i32) << 8);
                 launch_at = ((aim.0 as f64 + a.cos() * lead as f64) as i32, (aim.1 as f64 - a.sin() * lead as f64) as i32, aim.2);
             }
-        }
         let mut d = ((launch_at.0 - from.0) as f64, (launch_at.1 - from.1) as f64, (launch_at.2 - from.2) as f64);
         // An `Inaccurate`,
         // `Arcing` shot strays: with `FlakScatter` (and seen) by up to
@@ -1303,28 +1300,25 @@ impl World {
         let mut damage = damage;
         // A soldier lying down takes the
         // warhead's `ProneDamage` share of it, at least 1.
-        if let Aim::Unit(id) = victim {
-            if damage > 0 && self.unit(id).is_some_and(|unit| unit.prone) {
+        if let Aim::Unit(id) = victim
+            && damage > 0 && self.unit(id).is_some_and(|unit| unit.prone) {
                 damage = ((damage as f64 * warhead.prone_damage) as i32).max(1);
             }
-        }
         // A rank with STRONGER divides what
         // reaches it by `VeteranArmor`.
-        if let Aim::Unit(id) = victim {
-            if damage > 0 && self.unit(id).is_some_and(|unit| unit.has_ability(crate::abilities::ability::STRONGER)) {
+        if let Aim::Unit(id) = victim
+            && damage > 0 && self.unit(id).is_some_and(|unit| unit.has_ability(crate::abilities::ability::STRONGER)) {
                 damage = (damage as f64 / self.veterancy.armor) as i32;
             }
-        }
         // An
         // armour crate's multiplier divides what reaches it.
-        if let Aim::Unit(id) = victim {
-            if damage > 0 {
+        if let Aim::Unit(id) = victim
+            && damage > 0 {
                 let armour = self.unit(id).map_or(1.0, |unit| unit.crate_armour);
                 if armour != 1.0 {
                     damage = (damage as f64 / armour as f64) as i32;
                 }
             }
-        }
         if damage > 0 {
             damage = damage.max(1);
         }
@@ -1406,15 +1400,14 @@ impl World {
                 (Some(a), Some(b)) => (((a.0 - b.0) as f64).hypot((a.1 - b.1) as f64) as i32) <= (fighter.sight * 256 + 128),
                 _ => false,
             };
-            if hostile && fighter.can_retaliate && fighter.primary.is_some() {
-                if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
+            if hostile && fighter.can_retaliate && fighter.primary.is_some()
+                && let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
                     let idle = unit.arms.target.is_none() && unit.dest.is_none() && unit.work.job == Job::Idle;
                     if idle && near {
                         unit.arms.target = Some(attacker);
                         unit.arms.passive = true;
                     }
                 }
-            }
         }
         if let Aim::Unit(id) = victim {
             self.frighten(id, source.is_some());
@@ -1641,11 +1634,10 @@ impl World {
             }
             Aim::Cell(..) => None,
         };
-        if points.is_some() {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == firer) {
+        if points.is_some()
+            && let Some(unit) = self.units.iter_mut().find(|u| u.id == firer) {
                 unit.arms.erasing = Some(target);
             }
-        }
     }
 
     /// Wears down everything a `Temporal` weapon has hold of.
@@ -2075,7 +2067,7 @@ impl World {
                 }
                 let mut acceleration = projectile.acceleration as f64;
                 if bullet.locked && projectile.course_lock == 0 {
-                    acceleration = if self.tick % 2 == 0 { 1.0 } else { 0.0 };
+                    acceleration = if self.tick.is_multiple_of(2) { 1.0 } else { 0.0 };
                 }
                 let rescale = |v: (f64, f64, f64), to: f64| {
                     let length = length3(v);
@@ -2320,29 +2312,26 @@ impl World {
             let (who, owner, health) = candidate;
             // A cloaked thing on a cell
             // my house does not sense is passed over.
-            if let Aim::Unit(id) = who {
-                if self.unit(id).is_some_and(|unit| self.hidden_from(unit, house)) {
+            if let Aim::Unit(id) = who
+                && self.unit(id).is_some_and(|unit| self.hidden_from(unit, house)) {
                     return None;
                 }
-            }
             // One that is disguised to my house is
             // passed over unless my type sees through disguises.
-            if let Aim::Unit(id) = who {
-                if !fighter.detect_disguise && self.unit(id).is_some_and(|unit| self.disguised_to(unit, house)) {
+            if let Aim::Unit(id) = who
+                && !fighter.detect_disguise && self.unit(id).is_some_and(|unit| self.disguised_to(unit, house)) {
                     return None;
                 }
-            }
             // With both on
             // bridge cells, one on the deck and one under it are no targets for
             // each other.
-            if let (Aim::Unit(mine), Aim::Unit(id)) = (me, who) {
-                if let (Some(a), Some(b)) = (self.unit(mine), self.unit(id)) {
+            if let (Aim::Unit(mine), Aim::Unit(id)) = (me, who)
+                && let (Some(a), Some(b)) = (self.unit(mine), self.unit(id)) {
                     let (ca, cb) = (a.cell(), b.cell());
                     if self.map.bridged(ca.0, ca.1) && self.map.bridged(cb.0, cb.1) && a.on_bridge != b.on_bridge {
                         return None;
                     }
                 }
-            }
             let theirs = self.fighter(who)?;
             let index = self.select_weapon(fighter, who);
             let mount = Self::mount(fighter, index)?;
@@ -2396,11 +2385,10 @@ impl World {
                 ring.push((centre.0 + k, centre.1 + y));
             }
             for cell in ring {
-                if let Some((who, value)) = evaluate(cell) {
-                    if best.is_none_or(|(_, most)| value > most) {
+                if let Some((who, value)) = evaluate(cell)
+                    && best.is_none_or(|(_, most)| value > most) {
                         best = Some((who, value));
                     }
-                }
             }
             if best.is_some() && (k == cells / 4 || k == cells / 2) {
                 break;
@@ -2427,11 +2415,10 @@ impl World {
         if reach >= 0x200 {
             reach -= 0x80;
         }
-        if let Aim::Building(id) = target {
-            if let Some(building) = self.buildings.iter().find(|b| b.id == id) {
+        if let Aim::Building(id) = target
+            && let Some(building) = self.buildings.iter().find(|b| b.id == id) {
                 reach += (building.size.0 + building.size.1) * 64;
             }
-        }
         let mut reach = (reach as f64 - if unit.stats.infantry { 281.6 } else { 179.2 }) as i32;
         reach = if reach <= 0 { 0 } else { reach.max(0xff) };
         let towards = (facing_of(((to.1 - unit.y) as f64).atan2((unit.x - to.0) as f64)) as u16 >> 8) as i32;
@@ -2658,12 +2645,11 @@ impl World {
                         arms.target = None;
                     }
                 }
-                if arms.target.is_none() {
-                    if let Some(found) = self.greatest_threat(me, at, owner, &fighter) {
+                if arms.target.is_none()
+                    && let Some(found) = self.greatest_threat(me, at, owner, &fighter) {
                         arms.target = Some(found);
                         arms.passive = true;
                     }
-                }
             }
             // A unit that
             // guards an area keeps the cell it was left at as its post. With
@@ -2712,14 +2698,13 @@ impl World {
                     arms.attacking = true;
                     self.units[index].charging = true;
                 }
-            } else if self.units[index].charging {
-                if let Some(found) = self.greatest_threat(me, at, owner, &fighter) {
+            } else if self.units[index].charging
+                && let Some(found) = self.greatest_threat(me, at, owner, &fighter) {
                     arms.target = Some(found);
                     arms.passive = true;
                     arms.attacking = false;
                     self.units[index].charging = false;
                 }
-            }
 
             // A `HoverAttack` flyer on the ground with a
             // target takes off first.
@@ -2829,7 +2814,7 @@ impl World {
                                 } else {
                                     arms.target = None;
                                 }
-                            } else if (arms.attacking || fighter.can_approach_target) && (self.tick + self.units[index].id as u64) % 15 == 0 {
+                            } else if (arms.attacking || fighter.can_approach_target) && (self.tick + self.units[index].id as u64).is_multiple_of(15) {
                                 // On its way, something in the
                                 // air picks its place again each time the mission comes
                                 // round (every 14 to 16 frames), so it follows a target
@@ -2930,7 +2915,7 @@ impl World {
             // A building that soldiers fire from does nothing with nobody
             // in it. One that needs an engineer is off until it has been
             // captured.
-            let garrison = kind.can_be_occupied.then(|| building.occupants.len());
+            let garrison = kind.can_be_occupied.then_some(building.occupants.len());
             if garrison == Some(0) || (kind.needs_engineer && building.owner == 0) {
                 self.buildings[index].arms.target = None;
                 continue;
@@ -2993,12 +2978,11 @@ impl World {
                         continue;
                     }
                     self.buildings[index].last_supports = self.buildings[index].supports;
-                    if let Some(target) = arms.target {
-                        if self.fire_error(centre, &fighter, &arms, target, which) == FireError::Ok {
+                    if let Some(target) = arms.target
+                        && self.fire_error(centre, &fighter, &arms, target, which) == FireError::Ok {
                             let want = self.direction_to((at.0, at.1), target).unwrap_or(0);
                             self.fire(me, at, 0x40, want, owner, &fighter, &mut arms, target, which);
                         }
-                    }
                     // The count of beams lent
                     // starts again with each shot.
                     self.buildings[index].supports = 0;

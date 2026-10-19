@@ -180,7 +180,6 @@ impl Plugin for PausePlugin {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_menu(
     mut commands: Commands,
     mut menu: ResMut<Menu>,
@@ -429,7 +428,7 @@ fn run_menu(
             // the date and the time in columns, the row picked filled in;
             // in the Save dialog the name box under it.
             if let (Menu::Saves(kind), Some(font)) = (now, &font) {
-                let mut line = |parent: &mut ChildSpawnerCommands, images: &mut Assets<Image>, words: &str, x: f32, y: f32| {
+                let line = |parent: &mut ChildSpawnerCommands, images: &mut Assets<Image>, words: &str, x: f32, y: f32| {
                     if !words.is_empty() {
                         let (image, size) = hud::text_image(font, images, words);
                         parent.spawn((hud::absolute(x.round(), y.round(), size), ImageNode::new(image)));

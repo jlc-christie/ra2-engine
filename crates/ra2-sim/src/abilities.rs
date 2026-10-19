@@ -349,7 +349,7 @@ impl World {
                 continue;
             }
             let (cell, owner) = (unit.cell(), unit.owner);
-            if self.tick % 8 != 0 {
+            if !self.tick.is_multiple_of(8) {
                 let enemy_beside = crate::path::DIRECTIONS.iter().any(|step| {
                     let next = (cell.0 + step.0, cell.1 + step.1);
                     self.units.iter().any(|other| other.stats.infantry && other.health > 0 && other.cell() == next && !self.allied(other.owner, owner))
@@ -515,11 +515,10 @@ impl World {
         let Some(victim) = self.units.iter_mut().find(|u| u.id == controller).and_then(|unit| unit.controls.take()) else {
             return;
         };
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim) {
-            if let Some((_, home)) = unit.controlled_by.take() {
+        if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim)
+            && let Some((_, home)) = unit.controlled_by.take() {
                 unit.owner = home;
             }
-        }
         self.changed_sides(victim);
     }
 
@@ -901,7 +900,7 @@ impl World {
     // time), and FASTER is applied to its speed then.
     fn run_veterancy(&mut self) {
         let rules = self.veterancy;
-        let heal = rules.heal_every > 0 && self.tick % rules.heal_every == 0;
+        let heal = rules.heal_every > 0 && self.tick.is_multiple_of(rules.heal_every);
         for index in 0..self.units.len() {
             let unit = &mut self.units[index];
             let rank = unit.rank();
@@ -1003,12 +1002,11 @@ impl World {
         }
         let orphans: Vec<u32> = self.units.iter().filter(|u| u.controlled_by.is_some_and(|(controller, _)| self.unit(controller).is_none())).map(|u| u.id).collect();
         for id in orphans {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
-                if let Some((_, home)) = unit.controlled_by.take() {
+            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id)
+                && let Some((_, home)) = unit.controlled_by.take() {
                     unit.owner = home;
                     unit.arms.target = None;
                 }
-            }
         }
     }
 
@@ -1036,20 +1034,18 @@ impl World {
             self.explode(point, damage, warhead, bomb.owner.filter(|&id| self.unit(id).is_some()).map(Aim::Unit));
             self.blast_event(warhead, damage, point, false);
         }
-        if let Some(controller) = dead.controlled_by.map(|(controller, _)| controller) {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
+        if let Some(controller) = dead.controlled_by.map(|(controller, _)| controller)
+            && let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
                 unit.controls = None;
             }
-        }
         if dead.controls.is_some() {
             let id = dead.id;
             // The dead unit is already off the list: free its victim directly.
-            if let Some(unit) = self.units.iter_mut().find(|u| u.controlled_by.is_some_and(|(controller, _)| controller == id)) {
-                if let Some((_, home)) = unit.controlled_by.take() {
+            if let Some(unit) = self.units.iter_mut().find(|u| u.controlled_by.is_some_and(|(controller, _)| controller == id))
+                && let Some((_, home)) = unit.controlled_by.take() {
                     unit.owner = home;
                     unit.arms.target = None;
                 }
-            }
         }
         if let Some(spawner) = dead.spawner.take() {
             self.orphan_spawns(&spawner);

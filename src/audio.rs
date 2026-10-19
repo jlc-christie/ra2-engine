@@ -221,7 +221,6 @@ impl Audio {
 // while playing or waiting is ignored. `Type=QUEUE` lines wait their turn; an
 // ordinary line waits in a single place, which a later one takes only if its
 // priority is higher, and is otherwise dropped.
-#[allow(clippy::too_many_arguments)]
 fn play_cues(
     mut commands: Commands,
     mut cues: MessageReader<Cue>,

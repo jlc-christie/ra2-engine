@@ -117,6 +117,7 @@ pub fn match_rules(world: &mut ra2_sim::World, options: &Options) {
 /// The world a settled match is played in, without the app: the map, the
 /// houses as chosen, and the match's rules. Its state is the start's; a
 /// recording or save is laid over it (`saves::replay`).
+#[cfg(test)]
 pub fn match_world(files: &GameFiles, setup: &MatchSetup) -> Option<ra2_sim::World> {
     let options = setup.options;
     let opponents = options

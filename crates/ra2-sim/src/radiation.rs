@@ -134,7 +134,7 @@ impl World {
         let rules = self.rad_rules;
         let tick = self.tick;
         self.rad_sites.retain(|site| tick < site.born + site.level as u64 * rules.duration_multiple as u64);
-        if tick % rules.application_delay.max(1) as u64 != 0 {
+        if !tick.is_multiple_of(rules.application_delay.max(1) as u64) {
             return;
         }
         // A deployed soldier whose second weapon has a `RadLevel` fires it at
@@ -230,11 +230,10 @@ impl World {
             }
             let (owner, online) = (building.owner, self.online(building));
             self.buildings[index].cash_at = tick + delay as u64;
-            if owner != 0 && online {
-                if let Some(house) = self.houses.get_mut(owner as usize) {
+            if owner != 0 && online
+                && let Some(house) = self.houses.get_mut(owner as usize) {
                     house.credits = (house.credits + amount).max(0);
                 }
-            }
         }
     }
 

@@ -426,12 +426,11 @@ impl World {
                 self.adjust_anger(house, 1, other);
             }
         }
-        if let Some(enemy) = self.houses[h].ai.as_ref().and_then(|b| b.enemy) {
-            if self.defeated(enemy) {
+        if let Some(enemy) = self.houses[h].ai.as_ref().and_then(|b| b.enemy)
+            && self.defeated(enemy) {
                 let anger = self.houses[h].ai.as_ref().and_then(|b| b.anger.get(enemy as usize).copied()).unwrap_or(0);
                 self.adjust_anger(house, -anger, enemy);
             }
-        }
         // A
         // house that still has buildings, none of them a factory of any kind,
         // and has not been hit for 900 frames sells everything and sends all it
@@ -1125,12 +1124,11 @@ impl World {
         let recruitable = self.team_data.team_types.get(team.kind).is_some_and(|t| t.members_recruitable);
         let first = team.members.is_empty();
         let old = self.unit(id).and_then(|unit| unit.team);
-        if let Some(old) = old {
-            if let Some(other) = self.teams.iter_mut().find(|t| t.id == old) {
+        if let Some(old) = old
+            && let Some(other) = self.teams.iter_mut().find(|t| t.id == old) {
                 other.members.retain(|&member| member != id);
                 other.dirty = true;
             }
-        }
         if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
             unit.team = Some(team.id);
             unit.initiated = first;
@@ -1940,11 +1938,10 @@ impl World {
                 match next {
                     Some(unit) => self.order(Order::Board { unit, transport }),
                     None => {
-                        if kind.transports_return {
-                            if let Some(unit) = self.units.iter_mut().find(|u| u.id == transport) {
+                        if kind.transports_return
+                            && let Some(unit) = self.units.iter_mut().find(|u| u.id == transport) {
                                 unit.work.archive = Some(unit.cell());
                             }
-                        }
                         team.next_mission = true;
                     }
                 }
@@ -2058,15 +2055,5 @@ impl World {
     #[doc(hidden)]
     pub fn kill_unit_for_tests(&mut self, unit: u32) {
         self.kill(Aim::Unit(unit));
-    }
-
-    /// The factory a unit type comes from, for the computer's choice of what
-    /// to build.
-    pub(crate) fn factory_of_class(class: u8) -> Factory {
-        match class {
-            0 => Factory::Infantry,
-            2 => Factory::Aircraft,
-            _ => Factory::Unit,
-        }
     }
 }
