@@ -80,6 +80,8 @@ pub struct Bolt {
     /// `IsAlternateColor`.
     alternate: bool,
     lines: Vec<Entity>,
+    /// The game frame it was last drawn on.
+    drawn_at: Option<u64>,
 }
 
 /// The colours a bolt's strands are drawn in: two strands, the third, and the
@@ -99,7 +101,7 @@ impl Plugin for BeamsPlugin {
                     commands.entity(camera).remove::<SonicWarp>();
                 }
             })
-            .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>), wave_rad_beams, show_sonic_waves.run_if(resource_exists::<Sim>)).run_if(in_state(Screen::InGame)).in_set(crate::schedule::GameSet::View));
+            .add_systems(Update, (fade_lasers.run_if(resource_exists::<Sim>), flicker_bolts.run_if(resource_exists::<BoltColours>).run_if(resource_exists::<Sim>), wave_rad_beams.run_if(resource_exists::<Sim>), show_sonic_waves.run_if(resource_exists::<Sim>)).run_if(in_state(Screen::InGame)).in_set(crate::schedule::GameSet::View));
     }
 }
 
@@ -172,7 +174,7 @@ pub fn laser(commands: &mut Commands, from: Vec2, to: Vec2, inner: [u8; 3], oute
 // The seed is a random number from 0 to 256.
 // RA2_BOLT_FRAMES=n keeps bolts up longer, for looking at them.
 pub fn bolt(commands: &mut Commands, from: (i32, i32, i32), to: (i32, i32, i32), origin: Vec2, seed: u32, alternate: bool) {
-    commands.spawn((DespawnOnExit(Screen::InGame), Bolt { from, to, origin, seed: seed % 257, frames: std::env::var("RA2_BOLT_FRAMES").ok().and_then(|n| n.parse().ok()).unwrap_or(17), alternate, lines: Vec::new() }));
+    commands.spawn((DespawnOnExit(Screen::InGame), Bolt { from, to, origin, seed: seed % 257, frames: std::env::var("RA2_BOLT_FRAMES").ok().and_then(|n| n.parse().ok()).unwrap_or(17), alternate, lines: Vec::new(), drawn_at: None }));
 }
 
 // A stage a game frame; gone at the
@@ -222,14 +224,21 @@ fn fade_lasers(
     }
 }
 
-// Drawn afresh each rendered frame for 17 frames, the seed going up by one each
+// Drawn afresh each game frame for 17 frames, the seed going up by one each
 // time. Three strands from the target end to the source: a piece longer than 64
 // leptons is split at its middle (eight deep at most) and each middle pushed
 // aside, in world leptons; the first split also sways by a sine of the seed.
 // Strand 0 is drawn in colour 15, over the other two.
 #[allow(clippy::needless_range_loop)]
-fn flicker_bolts(mut commands: Commands, colours: Res<BoltColours>, mut bolts: Query<(Entity, &mut Bolt)>) {
+fn flicker_bolts(mut commands: Commands, sim: Res<Sim>, colours: Res<BoltColours>, mut bolts: Query<(Entity, &mut Bolt)>) {
+    let tick = sim.0.current_tick();
     for (entity, mut bolt) in &mut bolts {
+        if bolt.drawn_at == Some(tick) {
+            continue;
+        }
+        let missed = bolt.drawn_at.map_or(0, |at| tick.saturating_sub(at).saturating_sub(1)) as u32;
+        bolt.frames = bolt.frames.saturating_sub(missed);
+        bolt.drawn_at = Some(tick);
         for line in bolt.lines.drain(..) {
             commands.entity(line).despawn();
         }
@@ -335,9 +344,11 @@ pub struct RadBeam {
     colour: [u8; 3],
     stage: u32,
     lines: Vec<Entity>,
+    /// The game frame it was last drawn on.
+    drawn_at: Option<u64>,
 }
 
-/// Rendered frames a rad beam lasts.
+/// Game frames a rad beam lasts.
 const RAD_BEAM_FRAMES: u32 = 15;
 /// How far, in leptons of height, the beam swings at the end of its life.
 const RAD_BEAM_AMPLITUDE: f64 = 40.0;
@@ -347,7 +358,7 @@ const RAD_BEAM_STEP: f64 = 20.0;
 
 /// Starts a rad beam between two points in world leptons.
 pub fn rad_beam(commands: &mut Commands, from: (i32, i32, i32), to: (i32, i32, i32), origin: Vec2, colour: [u8; 3]) {
-    commands.spawn((DespawnOnExit(Screen::InGame), RadBeam { from, to, origin, colour, stage: 0, lines: Vec::new() }));
+    commands.spawn((DespawnOnExit(Screen::InGame), RadBeam { from, to, origin, colour, stage: 0, lines: Vec::new(), drawn_at: None }));
 }
 
 // Drawn afresh each rendered frame for 15 frames: straight pieces along the
@@ -355,8 +366,15 @@ pub fn rad_beam(commands: &mut Commands, from: (i32, i32, i32), to: (i32, i32, i
 // (at least 360 leptons' worth over the beam), times an amplitude that grows
 // from nothing to 40 leptons over the beam's life. Each piece's colour is
 // the beam's times one half plus half its share of the full swing.
-fn wave_rad_beams(mut commands: Commands, mut beams: Query<(Entity, &mut RadBeam)>) {
+fn wave_rad_beams(mut commands: Commands, sim: Res<Sim>, mut beams: Query<(Entity, &mut RadBeam)>) {
+    let tick = sim.0.current_tick();
     for (entity, mut beam) in &mut beams {
+        if beam.drawn_at == Some(tick) {
+            continue;
+        }
+        let missed = beam.drawn_at.map_or(0, |at| tick.saturating_sub(at).saturating_sub(1)) as u32;
+        beam.stage += missed;
+        beam.drawn_at = Some(tick);
         for line in beam.lines.drain(..) {
             commands.entity(line).despawn();
         }
