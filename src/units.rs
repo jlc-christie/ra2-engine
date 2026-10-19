@@ -3,6 +3,7 @@
 //!
 //! Mouse control and what is drawn over the map for it are in `control.rs`.
 
+mod cache;
 mod effects;
 
 use std::collections::HashMap;
@@ -124,11 +125,11 @@ pub(crate) struct UnitView {
     walk_tick: u64,
     /// Shadows, by picture, with where each one's middle lies from the draw
     /// point.
-    shadow_images: HashMap<ShadowKey, Option<(Handle<Image>, Vec2)>>,
+    shadow_images: cache::ImageCache<ShadowKey, (Handle<Image>, Vec2)>,
     /// Pictures of one-off animations and of shots, by art and frame.
-    effect_images: HashMap<(String, usize), Option<(Handle<Image>, Vec2)>>,
+    effect_images: cache::ImageCache<(String, usize), (Handle<Image>, Vec2)>,
     ore_shown: Option<u64>,
-    ore_images: HashMap<(String, usize), Option<(Handle<Image>, Vec2)>>,
+    ore_images: cache::ImageCache<(String, usize), (Handle<Image>, Vec2)>,
     ore_sprites: HashMap<(i32, i32), (Entity, u8)>,
     /// The art of each kind of ground mark, the marks drawn, and the map's
     /// count of changes when they were.
@@ -138,12 +139,12 @@ pub(crate) struct UnitView {
     game_speed: i32,
     /// Drawn building images by art, frame, palette, height level and whether it
     /// is the shadow, with where each goes relative to the building's draw point.
-    building_images: HashMap<PartKey, Option<(Handle<Image>, Vec2)>>,
+    building_images: cache::ImageCache<PartKey, (Handle<Image>, Vec2)>,
     /// The player's palette, and every house's by owner.
     player_palette: Option<usize>,
     house_palettes: Vec<Option<usize>>,
     /// Drawn images by model, direction (0 to 31), palette and height level.
-    images: HashMap<(String, u8, Option<u8>, Option<usize>, i32), Option<UnitImage>>,
+    images: cache::ImageCache<(String, u8, Option<u8>, Option<usize>, i32), UnitImage>,
     /// The tick the drone rocks were last stepped on.
     rock_tick: u64,
     /// The crates drawn, and the shroud's count of changes when they were.
@@ -151,7 +152,7 @@ pub(crate) struct UnitView {
     /// The Mirages drawn as trees: unit, tree and cell.
     mirages_shown: Option<Vec<(u32, u16, (i32, i32))>>,
     /// Crate pictures by water and height level.
-    crate_images: HashMap<(bool, i32), Option<(Handle<Image>, Vec2)>>,
+    crate_images: cache::ImageCache<(bool, i32), (Handle<Image>, Vec2)>,
 }
 
 /// What is needed to show and voice a unit type.
@@ -214,6 +215,17 @@ struct Ramp {
     now: u8,
     before: u8,
     since: u64,
+}
+
+/// Moves the picture caches on a frame.
+fn step_caches(mut view: ResMut<UnitView>) {
+    let view = &mut *view;
+    view.shadow_images.step();
+    view.crate_images.step();
+    view.effect_images.step();
+    view.ore_images.step();
+    view.building_images.step();
+    view.images.step();
 }
 
 /// Gives each unit on the map an entity and takes it away when the unit goes
@@ -448,7 +460,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(
                 Update,
-                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, (mirror_units, mirror_buildings, rock_units).chain(), show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (effects::effect_systems(), step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
+                (auto_build.run_if(not(resource_exists::<crate::net::NetSeat>)), announce, (step_caches, mirror_units, mirror_buildings, rock_units).chain(), show_units, show_buildings, show_walls, show_crates, show_mirages, show_bridges, show_ore, (effects::effect_systems(), step_effects, show_shots, end_beams).chain(), show_markers, show_corpses, show_debris, show_sinking, show_sparks, light_world, light_units, crate::lighting::apply)
                     .chain()
                     .run_if(in_state(Screen::InGame))
                     .run_if(resource_exists::<UnitView>)
@@ -883,21 +895,21 @@ pub fn setup(
         smudge_names,
         walls_shown: None,
         ore_art,
-        shadow_images: HashMap::new(),
+        shadow_images: Default::default(),
         rock_tick: 0,
         crates_shown: None,
         mirages_shown: None,
-        crate_images: HashMap::new(),
+        crate_images: Default::default(),
         walk_tick: 0,
-        effect_images: HashMap::new(),
+        effect_images: Default::default(),
         ore_shown: None,
-        ore_images: HashMap::new(),
+        ore_images: Default::default(),
         ore_sprites: HashMap::new(),
         smudge_sprites: HashMap::new(),
         smudges_shown: None,
-        building_images: HashMap::new(),
+        building_images: Default::default(),
         player_palette,
-        images: HashMap::new(),
+        images: Default::default(),
     });
 }
 
@@ -1336,10 +1348,6 @@ fn show_units(
         let frame = if frames > 1 { counter.0 as usize % frames } else { 0 };
         view.art.hva_frame = frame;
         let key = (if frame == 0 { model.clone() } else { format!("{model}#{frame}") }, direction, turret.map(|t| t.0 + 32 * which), *palette, level);
-        // Rocked pictures are let go now and then.
-        if view.images.len() > 2000 {
-            view.images.retain(|key, _| !key.0.contains("@w"));
-        }
         let image = view.images.entry(key).or_insert_with(|| {
             let drawn = view.art.vehicle(&files, model, direction << 3, turret.map(|(dir, offset)| (dir << 3, offset, which)), *palette, level)?;
             let size = Vec2::new(drawn.width as f32, drawn.height as f32);
