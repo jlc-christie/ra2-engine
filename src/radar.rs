@@ -239,7 +239,7 @@ fn update(
     sim: ResMut<Sim>,
     view: Res<UnitView>,
     ground: Res<RadarGround>,
-    files: Res<GameFiles>,
+    (files, rules): (Res<GameFiles>, Res<crate::files::Rules>),
     time: Res<Time<Real>>,
     centre: Res<ViewCentre>,
     pointer: Res<Pointer>,
@@ -265,7 +265,7 @@ fn update(
     // Turning on only from off or closing,
     // turning off from anything; each with its sound.
     let sounds = radar.sounds.get_or_insert_with(|| {
-        (crate::audio::rules_sound(&files, "RadarOn"), crate::audio::rules_sound(&files, "RadarOff"))
+        (rules.sound("RadarOn"), rules.sound("RadarOff"))
     });
     let available = sim.0.radar_available(local());
     let on = matches!(radar.state, 1 | 3);

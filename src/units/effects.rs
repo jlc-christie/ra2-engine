@@ -60,11 +60,11 @@ fn combat_effects(
     mut commands: Commands,
     sim: Res<Sim>,
     mut events: MessageReader<SimEvent>,
-    files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     armoury: Option<Res<crate::armoury::Armoury>>,
     mut cues: MessageWriter<Cue>,
     mut rng: ResMut<EffectRng>,
+    rules: Res<crate::files::Rules>,
 ) {
     let Some(armoury) = armoury else {
         return;
@@ -185,7 +185,7 @@ fn combat_effects(
             // time weapon or jumping.
             Event::Wake { at } | Event::Sparkle { at } => {
                 let key = if matches!(event, Event::Wake { .. }) { "Wake" } else { "ChronoSparkle1" };
-                if let Some(name) = crate::audio::rules_sound(&files, key) {
+                if let Some(name) = rules.sound(key) {
                     let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
                     start_anim(&mut commands, &mut cues, view, tick, &name, scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 }
@@ -304,12 +304,12 @@ fn super_effects(
     mut commands: Commands,
     sim: Res<Sim>,
     mut events: MessageReader<SimEvent>,
-    files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut cues: MessageWriter<Cue>,
     mut rng: ResMut<EffectRng>,
     mut radar_events: ResMut<crate::radar::RadarEvents>,
     mut status: MessageWriter<crate::bar::Status>,
+    rules: Res<crate::files::Rules>,
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
@@ -343,7 +343,7 @@ fn super_effects(
                     scene_point_3d(view.origin, (x, y, sim.0.ground_z(x, y) + up))
                 };
                 let depth = |cell: (i32, i32)| 2.0 + ((cell.0 + cell.1) as f32 + 2.5) * DEPTH_PER_ROW;
-                let key = |key: &str| crate::audio::rules_sound(&files, key);
+                let key = |key: &str| rules.sound(key);
                 match kind {
                     1 => {
                         if let Some(name) = key("IronCurtainInvokeAnim") {
@@ -372,13 +372,13 @@ fn super_effects(
             // The missile leaves its silo over
             // `NukeTakeOff`, the siren sounds at the target and everyone is told.
             Event::NukeLaunched { at, cell, .. } => {
-                if let Some(name) = crate::audio::rules_sound(&files, "NukeTakeOff") {
+                if let Some(name) = rules.sound("NukeTakeOff") {
                     let depth = 2.0 + ((at.0 + at.1) as f32 / LEPTONS_PER_CELL as f32 + 2.5) * DEPTH_PER_ROW;
                     start_anim(&mut commands, &mut cues, view, tick, &name, scene_point_3d(view.origin, at), Some(height_pixels(at.2)), depth);
                 }
                 let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
                 let target = scene_point_3d(view.origin, (x, y, sim.0.ground_z(x, y)));
-                cues.write_batch(crate::audio::rules_sound(&files, "DigSound").map(|name| Cue::SoundOn(name, target)));
+                cues.write_batch(rules.sound("DigSound").map(|name| Cue::SoundOn(name, target)));
                 cues.write(Cue::Eva("EVA_NuclearMissileLaunched"));
             }
             // The fireball where it came down.
@@ -391,7 +391,7 @@ fn super_effects(
             // and the announcer while it is coming; a message to a player who
             // calls a storm while one is on.
             Event::StormStarted { cell, .. } => {
-                cues.write_batch(crate::audio::rules_sound(&files, "StormSound").map(Cue::Sound));
+                cues.write_batch(rules.sound("StormSound").map(Cue::Sound));
                 status.write(crate::bar::Status::Key("TXT_LIGHTNING_STORM"));
                 radar_events.raise(13, cell, tick);
             }
@@ -411,13 +411,13 @@ fn super_effects(
                 let bolt = matches!(event, Event::Bolt { .. });
                 let (x, y) = (cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128);
                 let ground = sim.0.ground_z(x, y);
-                let names = crate::audio::rules_list(&files, if bolt { "WeatherConBolts" } else { "WeatherConClouds" });
+                let names = rules.list(if bolt { "WeatherConBolts" } else { "WeatherConClouds" });
                 if let Some(name) = names.get(kind as usize).cloned() {
                     let at = scene_point_3d(view.origin, (x, y, ground + if bolt { 0 } else { 700 }));
                     start_anim(&mut commands, &mut cues, view, tick, &name, at, None, 2.0 + ((cell.0 + cell.1) as f32 + 3.0) * DEPTH_PER_ROW);
                 }
                 if bolt {
-                    let sounds = crate::audio::rules_list(&files, "LightningSounds");
+                    let sounds = rules.list("LightningSounds");
                     if !sounds.is_empty() {
                         cues.write(Cue::SoundOn(sounds[pick(sounds.len())].clone(), scene_point_3d(view.origin, (x, y, ground))));
                     }
@@ -442,10 +442,10 @@ fn announce_events(
     mut commands: Commands,
     sim: Res<Sim>,
     mut events: MessageReader<SimEvent>,
-    files: Res<GameFiles>,
     mut view: ResMut<UnitView>,
     mut cues: MessageWriter<Cue>,
     mut radar_events: ResMut<crate::radar::RadarEvents>,
+    rules: Res<crate::files::Rules>,
 ) {
     let view = &mut *view;
     let tick = sim.0.current_tick();
@@ -477,13 +477,13 @@ fn announce_events(
             Event::Garrisoned { by, .. } => {
                 if by == local() {
                     cues.write(Cue::Eva("EVA_StructureGarrisoned"));
-                    cues.write_batch(crate::audio::rules_sound(&files, "BuildingGarrisonedSound").map(Cue::Sound));
+                    cues.write_batch(rules.sound("BuildingGarrisonedSound").map(Cue::Sound));
                 }
             }
             Event::Abandoned { by, .. } => {
                 if by == local() {
                     cues.write(Cue::Eva("EVA_StructureAbandoned"));
-                    cues.write_batch(crate::audio::rules_sound(&files, "BuildingAbandonedSound").map(Cue::Sound));
+                    cues.write_batch(rules.sound("BuildingAbandonedSound").map(Cue::Sound));
                 }
             }
             // The transport type's
@@ -518,12 +518,12 @@ fn announce_events(
             Event::BombPlanted { target, house } => {
                 if house == local()
                     && let Some(at) = sim.0.aim_point(target) {
-                        cues.write_batch(crate::audio::rules_sound(&files, "BombAttachSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
+                        cues.write_batch(rules.sound("BombAttachSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
                     }
             }
             Event::MindControlled { victim, .. } => {
                 if let Some(at) = sim.0.aim_point(ra2_sim::combat::Aim::Unit(victim)) {
-                    cues.write_batch(crate::audio::rules_sound(&files, "YuriMindControlSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
+                    cues.write_batch(rules.sound("YuriMindControlSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
                 }
             }
             // The player's engineer
@@ -548,7 +548,7 @@ fn announce_events(
             // `ChuteSound` at the plane.
             Event::Parachuted { from, .. } => {
                 if let Some(at) = sim.0.aim_point(ra2_sim::combat::Aim::Unit(from)) {
-                    cues.write_batch(crate::audio::rules_sound(&files, "ChuteSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
+                    cues.write_batch(rules.sound("ChuteSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
                 }
             }
             // What the
@@ -574,7 +574,7 @@ fn announce_events(
                 if owner == local() {
                     if let Some(at) = sim.0.aim_point(ra2_sim::combat::Aim::Unit(unit)) {
                         let key = if elite { "UpgradeEliteSound" } else { "UpgradeVeteranSound" };
-                        cues.write_batch(crate::audio::rules_sound(&files, key).map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
+                        cues.write_batch(rules.sound(key).map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
                     }
                     cues.write(Cue::Eva("EVA_UnitPromoted"));
                 }
@@ -603,7 +603,7 @@ fn announce_events(
                         p::VETERAN => ("CratePromoteSound", None),
                         _ => ("CrateMoneySound", None),
                     };
-                    cues.write_batch(crate::audio::rules_sound(&files, sound).map(|name| Cue::SoundOn(name, at)));
+                    cues.write_batch(rules.sound(sound).map(|name| Cue::SoundOn(name, at)));
                     if let Some(eva) = eva {
                         cues.write(Cue::Eva(eva));
                     }
@@ -612,7 +612,7 @@ fn announce_events(
             // `CloakSound` where it is.
             Event::Cloaked { unit } => {
                 if let Some(at) = sim.0.unit(unit).filter(|u| !sim.0.hidden_from(u, local())).and_then(|u| sim.0.aim_point(ra2_sim::combat::Aim::Unit(u.id))) {
-                    cues.write_batch(crate::audio::rules_sound(&files, "CloakSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
+                    cues.write_batch(rules.sound("CloakSound").map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
                 }
             }
             Event::Mended { .. } => {}
@@ -623,7 +623,7 @@ fn announce_events(
             Event::Attacked { owner, at, building, miner } => {
                 if building && owner == local() && radar_events.raise(3, at, tick) {
                     cues.write(Cue::Eva("EVA_OurBaseIsUnderAttack"));
-                    cues.write_batch(crate::audio::rules_sound(&files, "BaseUnderAttackSound").map(Cue::Sound));
+                    cues.write_batch(rules.sound("BaseUnderAttackSound").map(Cue::Sound));
                 }
                 // The player's miner hurt and still alive: radar event 4 and
                 // the announcer.

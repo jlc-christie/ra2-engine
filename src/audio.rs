@@ -34,29 +34,6 @@ pub enum Cue {
     Farewell(&'static str),
 }
 
-/// An `[AudioVisual]` or `[General]` key of rules.ini that names a sound.
-pub fn rules_sound(files: &GameFiles, key: &str) -> Option<String> {
-    let rules = Ini::parse(files.get("rules.ini")?);
-    ["AudioVisual", "General"]
-        .iter()
-        .find_map(|section| rules.get(section, key))
-        .and_then(|value| value.split(',').next())
-        .map(|name| name.trim().to_owned())
-        .filter(|name| !name.is_empty())
-}
-
-/// Every name in an `[AudioVisual]` (or `[General]`) list in rules.ini.
-pub fn rules_list(files: &GameFiles, key: &str) -> Vec<String> {
-    let Some(rules) = files.get("rules.ini").map(Ini::parse) else {
-        return Vec::new();
-    };
-    ["AudioVisual", "General"]
-        .iter()
-        .find_map(|section| rules.get(section, key))
-        .map(|value| value.split(',').map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).collect())
-        .unwrap_or_default()
-}
-
 #[derive(Resource)]
 struct Audio {
     index: Option<AudioIndex>,
@@ -154,7 +131,7 @@ fn follow_prefs(prefs: Res<crate::prefs::Prefs>, mut audio: ResMut<Audio>, mut m
     }
 }
 
-fn setup(mut commands: Commands, files: Res<GameFiles>, prefs: Res<crate::prefs::Prefs>) {
+fn setup(mut commands: Commands, files: Res<GameFiles>, prefs: Res<crate::prefs::Prefs>, rules: Res<crate::files::Rules>) {
     let ini = |name: &str| files.get(name).map(Ini::parse);
     let volume = |key: &str, _default: f32| match key {
         "SoundVolume" => prefs.sound,
@@ -166,7 +143,7 @@ fn setup(mut commands: Commands, files: Res<GameFiles>, prefs: Res<crate::prefs:
         sounds: ini("sound.ini"),
         eva: ini("eva.ini"),
         themes: ini("theme.ini"),
-        button_sound: rules_sound(&files, "GUIMainButtonSound"),
+        button_sound: rules.sound("GUIMainButtonSound"),
         sound_volume: volume("SoundVolume", 0.7),
         voice_volume: volume("VoiceVolume", 0.8),
         score_volume: volume("ScoreVolume", 0.6),

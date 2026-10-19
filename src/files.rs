@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::Resource;
+use ra2_formats::ini::Ini;
 use ra2_formats::mix::Mix;
 
 const ARCHIVES: &[&str] = &[
@@ -365,5 +366,35 @@ mod tests {
         assert!(!check.problems.contains(&Problem::Missing(EXE)), "game.exe is not needed");
         assert!(!check.ok());
         let _ = std::fs::remove_dir_all(&empty);
+    }
+}
+
+/// rules.ini, read once.
+#[derive(Resource)]
+pub struct Rules(pub Ini);
+
+impl Rules {
+    pub fn read(files: &GameFiles) -> Self {
+        Rules(Ini::parse(files.get("rules.ini").unwrap_or_default()))
+    }
+
+    /// A key of `[AudioVisual]`, or else `[General]`.
+    pub fn visual(&self, key: &str) -> Option<&str> {
+        ["AudioVisual", "General"].iter().find_map(|section| self.0.get(section, key))
+    }
+
+    /// An `[AudioVisual]` or `[General]` key that names a sound or animation.
+    pub fn sound(&self, key: &str) -> Option<String> {
+        self.visual(key)
+            .and_then(|value| value.split(',').next())
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    }
+
+    /// Every name in an `[AudioVisual]` (or `[General]`) list.
+    pub fn list(&self, key: &str) -> Vec<String> {
+        self.visual(key)
+            .map(|value| value.split(',').map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).collect())
+            .unwrap_or_default()
     }
 }

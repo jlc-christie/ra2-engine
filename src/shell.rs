@@ -886,6 +886,7 @@ fn spawn_load_screen(
     setup: Res<GameSetup>,
     time: Res<Time<Real>>,
     lobby: Res<crate::net::Lobby>,
+    rules: Res<crate::files::Rules>,
 ) {
     let country = match setup.options.country {
         country @ 0..=8 => country as usize,
@@ -898,7 +899,7 @@ fn spawn_load_screen(
     };
     commands.insert_resource(LoadScreenShown(time.elapsed_secs_f64()));
     let (picture_name, name, unit, brief) = LOAD_SCREENS[country];
-    let rules = shell.files.get("rules.ini").map(Ini::parse);
+    let rules = Some(&rules.0);
     let scheme = if country < 5 { "AlliedLoad" } else { "SovietLoad" };
     let hsv = rules.as_ref().and_then(|rules| rules.get("Colors", scheme)).and_then(|value| {
         let parts: Vec<u8> = value.split(',').filter_map(|part| part.split(';').next()?.trim().parse().ok()).collect();
@@ -2066,7 +2067,6 @@ fn on_option(
     activate: On<Activate>,
     controls: Query<&OptionControl>,
     rows: Query<&ComboRow>,
-    shell: Res<Shell>,
     mut setup: ResMut<GameSetup>,
     mut open: ResMut<OpenCombo>,
     mut next_screen: ResMut<NextState<Screen>>,
@@ -2074,9 +2074,10 @@ fn on_option(
     mut cues: MessageWriter<crate::audio::Cue>,
     screen: Res<State<Screen>>,
     (mut prefs, mut video, mut window): (ResMut<crate::prefs::Prefs>, ResMut<crate::video::Video>, Single<&mut Window, With<PrimaryWindow>>),
+    rules: Res<crate::files::Rules>,
 ) {
     let mut sound = |key: &str| {
-        cues.write_batch(crate::audio::rules_sound(&shell.files, key).map(crate::audio::Cue::Sound));
+        cues.write_batch(rules.sound(key).map(crate::audio::Cue::Sound));
     };
     let options = &mut setup.options;
     if let Ok(&ComboRow(combo, index)) = rows.get(activate.entity) {
@@ -2223,12 +2224,12 @@ fn drag_sliders(
     mut grips: Query<(&SliderGrip, &mut Node)>,
     mut setup: ResMut<GameSetup>,
     mut dragging: Local<Option<(Slider, i32)>>,
-    shell: Res<Shell>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut redraw: ResMut<Redraw>,
     mut cues: MessageWriter<crate::audio::Cue>,
     lobby: Res<crate::net::Lobby>,
     (screen, mut prefs): (Res<State<Screen>>, ResMut<crate::prefs::Prefs>),
+    rules: Res<crate::files::Rules>,
 ) {
     // A player who joined a network game cannot change its options.
     if *screen.get() == Screen::Skirmish && !lobby.may_edit_game() {
@@ -2251,7 +2252,7 @@ fn drag_sliders(
     match (held, *dragging) {
         (Some((slider, value, left)), before) => {
             if before.is_none_or(|(_, was)| was != value) {
-                cues.write_batch(crate::audio::rules_sound(&shell.files, "GenericClick").map(crate::audio::Cue::Sound));
+                cues.write_batch(rules.sound("GenericClick").map(crate::audio::Cue::Sound));
                 // A volume takes effect as its
                 // slider moves.
                 if matches!(slider, Slider::Music | Slider::Sound | Slider::Voice) {
@@ -2325,8 +2326,8 @@ fn start_slide(
     mut slide: ResMut<Slide>,
     mut redraw: ResMut<Redraw>,
     time: Res<Time<Real>>,
-    shell: Res<Shell>,
     mut cues: MessageWriter<crate::audio::Cue>,
+    rules: Res<crate::files::Rules>,
 ) {
     if std::mem::take(&mut redraw.0) {
         // The same screen drawn again: the buttons are already in place.
@@ -2334,7 +2335,7 @@ fn start_slide(
         return;
     }
     *slide = Slide { started: time.elapsed_secs_f64(), leaving: None };
-    cues.write_batch(crate::audio::rules_sound(&shell.files, "GUIMoveInSound").map(crate::audio::Cue::Sound));
+    cues.write_batch(rules.sound("GUIMoveInSound").map(crate::audio::Cue::Sound));
 }
 
 /// Shows each sidebar slot's frame: sliding in, at rest, or sliding out.
@@ -2353,8 +2354,8 @@ fn slot_frames(
     mut words: Query<(&mut Node, &SlotTextHome)>,
     slide: Res<Slide>,
     time: Res<Time<Real>>,
-    shell: Res<Shell>,
     mut cues: MessageWriter<crate::audio::Cue>,
+    rules: Res<crate::files::Rules>,
 ) {
     let now = time.elapsed_secs_f64();
     let (since, out) = match slide.leaving {
@@ -2396,7 +2397,7 @@ fn slot_frames(
             }
         }
         if pressed && !slot.was_pressed {
-            cues.write_batch(crate::audio::rules_sound(&shell.files, "GUIMainButtonSound").map(crate::audio::Cue::Sound));
+            cues.write_batch(rules.sound("GUIMainButtonSound").map(crate::audio::Cue::Sound));
         }
         slot.was_pressed = pressed;
         let frame = sliding(slot.index, true).unwrap_or(if down { 4 } else { 2 });
@@ -2515,6 +2516,7 @@ fn on_menu_action(
     mut redraw: ResMut<Redraw>,
     mut saves: ResMut<crate::saves::SaveLoad>,
     mut notices: MessageWriter<crate::notice::Notice>,
+    rules: Res<crate::files::Rules>,
 ) {
     let Ok((action, slot)) = actions.get(activate.entity) else {
         return;
@@ -2524,7 +2526,7 @@ fn on_menu_action(
     if slot && !matches!(action, MenuAction::Mock(_) | MenuAction::Tell(_)) {
         if slide.leaving.is_none() {
             slide.leaving = Some((*action, time.elapsed_secs_f64()));
-            cues.write_batch(crate::audio::rules_sound(&shell.files, "GUIMoveOutSound").map(crate::audio::Cue::Sound));
+            cues.write_batch(rules.sound("GUIMoveOutSound").map(crate::audio::Cue::Sound));
         }
         return;
     }
