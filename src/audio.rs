@@ -29,6 +29,9 @@ pub enum Cue {
     SoundOn(String, Vec2),
     /// An `eva.ini` section, such as `EVA_ConstructionComplete`.
     Eva(&'static str),
+    /// Leaving the game: the music and sounds stop and this line is spoken at
+    /// once, over anything the announcer was saying.
+    Farewell(&'static str),
 }
 
 /// An `[AudioVisual]` or `[General]` key of rules.ini that names a sound.
@@ -80,6 +83,8 @@ struct Audio {
     eva_first: Option<&'static str>,
     eva_playing: Option<&'static str>,
     eva_ended: f64,
+    /// The game is being left: no more in-game music.
+    leaving: bool,
 }
 
 /// A sound effect that is playing: its `sound.ini` section and when it started.
@@ -112,7 +117,7 @@ fn play_chains(mut commands: Commands, mut done: Query<(Entity, &mut Chain), Wit
 
 /// The announcer's line that is playing.
 #[derive(Component)]
-struct Speaking;
+pub struct Speaking;
 
 /// Marks the entity playing music, with which it is: 0 the menus', 1 the
 /// in-game play list, 2 the score screen's.
@@ -174,6 +179,7 @@ fn setup(mut commands: Commands, files: Res<GameFiles>, prefs: Res<crate::prefs:
         eva_first: None,
         eva_playing: None,
         eva_ended: -1.0,
+        leaving: false,
     });
 }
 
@@ -227,7 +233,8 @@ fn play_cues(
     window: Single<&Window, With<bevy::window::PrimaryWindow>>,
     mut sources: ResMut<Assets<AudioSource>>,
     playing: Query<(Entity, &Playing)>,
-    speaking: Query<(), With<Speaking>>,
+    speaking: Query<Entity, With<Speaking>>,
+    music: Query<Entity, With<Music>>,
 ) {
     let now = time.elapsed_secs_f64();
     let audio = &mut *audio;
@@ -236,6 +243,16 @@ fn play_cues(
             Cue::Sound(section) => audio.pending.push((section.clone(), 1.0, None)),
             Cue::SoundAt(section, share) => audio.pending.push((section.clone(), *share, None)),
             Cue::SoundOn(section, point) => audio.pending.push((section.clone(), 1.0, Some(*point))),
+            Cue::Farewell(line) => {
+                for entity in playing.iter().map(|(entity, _)| entity).chain(&speaking).chain(&music) {
+                    commands.entity(entity).despawn();
+                }
+                audio.leaving = true;
+                audio.eva_waiting = vec![(line, 3, true)];
+                audio.eva_first = Some(*line);
+                audio.eva_playing = None;
+                audio.eva_ended = f64::NEG_INFINITY;
+            }
             Cue::Eva(line) => {
                 if audio.eva_playing == Some(*line) || audio.eva_waiting.iter().any(|(waiting, ..)| waiting == line) {
                     continue;
@@ -441,6 +458,11 @@ fn play_music(
         _ => 0,
     };
     let in_game = which == 1;
+    if !in_game {
+        audio.leaving = false;
+    } else if audio.leaving {
+        return;
+    }
     let mut current = false;
     for (entity, music) in &playing {
         if music.0 == which {
