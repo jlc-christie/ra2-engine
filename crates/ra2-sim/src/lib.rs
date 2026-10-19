@@ -2399,7 +2399,7 @@ pub struct World {
     /// `ReloadRate` in frames: the time a pad takes over each point of an
     /// aircraft's ammunition.
     pub reload_delay: u32,
-    events: Vec<combat::Event>,
+    events: combat::Pending,
     bullets: Vec<combat::Bullet>,
     /// Things killed this tick, with the kind of death.
     dying: Vec<(combat::Aim, i32)>,
@@ -2523,7 +2523,7 @@ impl World {
             storm: None,
             nukes: Vec::new(),
             ability_rules: abilities::Rules::default(),
-            events: Vec::new(),
+            events: combat::Pending::default(),
             bullets: Vec::new(),
             dying: Vec::new(),
             ore_values: vec![25, 50],

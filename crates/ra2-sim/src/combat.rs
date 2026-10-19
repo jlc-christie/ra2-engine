@@ -474,6 +474,37 @@ pub struct Wave {
     pub born: u64,
 }
 
+/// Events the app has not taken yet. They are written out as none, so a
+/// snapshot or state hash does not depend on when this machine last took them.
+#[derive(Default)]
+pub(crate) struct Pending(pub(crate) Vec<Event>);
+
+impl std::ops::Deref for Pending {
+    type Target = Vec<Event>;
+    fn deref(&self) -> &Vec<Event> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Pending {
+    fn deref_mut(&mut self) -> &mut Vec<Event> {
+        &mut self.0
+    }
+}
+
+impl serde::Serialize for Pending {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Vec::<Event>::new().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Pending {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Older snapshots wrote them; they are dropped.
+        Vec::<Event>::deserialize(deserializer).map(|_| Pending::default())
+    }
+}
+
 /// Something that happened this tick that is seen or heard.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Event {
@@ -668,7 +699,7 @@ impl World {
 
     /// What happened in the last tick, handed over once.
     pub fn take_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.events)
+        std::mem::take(&mut self.events.0)
     }
 
     pub fn bullets(&self) -> &[Bullet] {
