@@ -99,7 +99,7 @@ fn aim_of(target: Target) -> Aim {
 fn owner_of(world: &World, target: Target) -> Option<u8> {
     match target {
         Target::Unit(id) => world.unit(id).map(|unit| unit.owner),
-        Target::Building(id) => world.buildings().iter().find(|b| b.id == id).map(|b| b.owner),
+        Target::Building(id) => world.building(id).map(|b| b.owner),
     }
 }
 
@@ -116,7 +116,7 @@ pub fn best(world: &World, selection: &[Target], at: (i32, i32)) -> Option<Targe
                 let (dx, dy) = ((unit.x - at.0) as i64, (unit.y - at.1) as i64);
                 (if armed { 5 } else { 2 }, ((dx * dx + dy * dy) as f64).sqrt() as i64)
             }),
-            Target::Building(id) => world.buildings().iter().find(|b| b.id == id).map_or((0, 0), |b| {
+            Target::Building(id) => world.building(id).map_or((0, 0), |b| {
                 let armed = world.building_types.get(b.kind as usize).is_some_and(|kind| kind.fighter.primary.is_some());
                 let (dx, dy) = ((b.cell.0 * 256 + b.size.0 * 128 - at.0) as i64, (b.cell.1 * 256 + b.size.1 * 128 - at.1) as i64);
                 (if armed { 3 } else { 2 }, ((dx * dx + dy * dy) as f64).sqrt() as i64)
@@ -328,7 +328,7 @@ fn vehicle_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Act
     }
     // Step 3: a friendly building that will take it.
     if let Target::Building(id) = object {
-        let takes = world.buildings().iter().find(|b| b.id == id).is_some_and(|b| {
+        let takes = world.building(id).is_some_and(|b| {
             b.owner == unit.owner
                 && unit.stats.harvester
                 && b.docked.is_none()
@@ -399,7 +399,7 @@ fn finish(world: &World, a: Action, object: Target) -> Action {
 /// soldiers in it lets them out; a factory that is not the primary one becomes it;
 /// anything else has no answer.
 fn building_object(world: &World, id: u32, base: Action) -> Action {
-    let Some(building) = world.buildings().iter().find(|b| b.id == id) else {
+    let Some(building) = world.building(id) else {
         return Action::None;
     };
     let factory = world.building_types.get(building.kind as usize).is_some_and(|kind| kind.factory.is_some());

@@ -524,7 +524,7 @@ fn shortcuts(
     let point_of = |target: Target| -> Option<Vec2> {
         match target {
             Target::Unit(id) => world.unit(id).map(|unit| unit_point(world, &view, unit)),
-            Target::Building(id) => world.buildings().iter().find(|b| b.id == id).map(|b| {
+            Target::Building(id) => world.building(id).map(|b| {
                 let half = LEPTONS_PER_CELL / 2;
                 let level = world.map.level(b.cell.0, b.cell.1) as i32;
                 scene_point(
@@ -1054,7 +1054,7 @@ fn clicks(
             // it puts them out; a factory becomes the primary one, with the
             // announcer.
             (Target::Building(building), Action::Deploy) => {
-                let state = sim.0.buildings().iter().find(|b| b.id == building).map(|b| (b.occupants.is_empty(), b.primary));
+                let state = sim.0.building(building).map(|b| (b.occupants.is_empty(), b.primary));
                 match state {
                     Some((false, _)) => sim.give(Order::Evacuate { building }),
                     Some((true, primary)) => {
@@ -1586,7 +1586,7 @@ fn draw_overlays(
         let Target::Building(id) = *target else {
             continue;
         };
-        let Some(building) = world.buildings().iter().find(|b| b.id == id) else {
+        let Some(building) = world.building(id) else {
             continue;
         };
         let Some(kind) = world.building_types.get(building.kind as usize).filter(|kind| kind.radial_indicator) else {
@@ -1794,7 +1794,7 @@ fn draw_overlays(
                         (at.0.div_euclid(LEPTONS_PER_CELL), at.1.div_euclid(LEPTONS_PER_CELL))
                     }
                     Order::Board { transport, .. } => world.unit(transport)?.cell(),
-                    Order::Enter { building, .. } | Order::Dock { building, .. } => world.buildings().iter().find(|b| b.id == building)?.cell,
+                    Order::Enter { building, .. } | Order::Dock { building, .. } => world.building(building)?.cell,
                     _ => return None,
                 };
                 Some(scene_point(view.origin, cell.0 * LEPTONS_PER_CELL + 128, cell.1 * LEPTONS_PER_CELL + 128, world.map.level(cell.0, cell.1) as i32))
@@ -2126,7 +2126,7 @@ fn draw_overlays(
                 }
             }
             Target::Building(id) => {
-                let Some(building) = world.buildings().iter().find(|b| b.id == id) else {
+                let Some(building) = world.building(id) else {
                     continue;
                 };
                 let Some(kind) = world.building_types.get(building.kind as usize) else {

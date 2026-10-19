@@ -2632,6 +2632,10 @@ impl World {
         self.unit_at(id).map(|index| &self.units[index])
     }
 
+    pub fn building(&self, id: u32) -> Option<&Building> {
+        self.building_at(id).map(|at| &self.buildings[at])
+    }
+
     /// Where a building is in the list, which is kept in id order.
     pub(crate) fn building_at(&self, id: u32) -> Option<usize> {
         self.buildings.binary_search_by_key(&id, |building| building.id).ok()

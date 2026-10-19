@@ -2232,7 +2232,7 @@ fn light_units(
         }
     }
     for (sprite, mut picture) in &mut buildings {
-        let Some(building) = sim.0.buildings().iter().find(|b| b.id == sprite.0) else {
+        let Some(building) = sim.0.building(sprite.0) else {
             continue;
         };
         if sprite.2.as_ref().is_some_and(|key| key.4) {
