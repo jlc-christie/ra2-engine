@@ -456,10 +456,10 @@ fn show_sonic_waves(
     mut commands: Commands,
     sim: Res<Sim>,
     view: Option<Res<crate::units::UnitView>>,
-    camera: Single<(Entity, &Camera, &GlobalTransform), With<Camera2d>>,
+    camera: Single<(Entity, &Camera, &GlobalTransform, Has<SonicWarp>), With<Camera2d>>,
     window: Single<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    let (entity, camera, transform) = *camera;
+    let (entity, camera, transform, warping) = *camera;
     // Screen pixels per window point: a camera drawing into a picture (the
     // screenshot runs) has its own.
     let ratio = camera.target_scaling_factor().unwrap_or(window.scale_factor());
@@ -515,6 +515,13 @@ fn show_sonic_waves(
             };
             slot += 1;
         }
+        // With no waves the pass is left out.
+        if slot > 0 {
+            commands.entity(entity).insert(warp);
+            return;
+        }
     }
-    commands.entity(entity).insert(warp);
+    if warping {
+        commands.entity(entity).remove::<SonicWarp>();
+    }
 }
