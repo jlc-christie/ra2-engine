@@ -3587,7 +3587,7 @@ fn rock_units(sim: Res<Sim>, mut view: ResMut<UnitView>) {
     let steps = tick.saturating_sub(view.rock_tick).min(60);
     view.rock_tick = tick;
     for _ in 0..steps {
-        for rock in view.rocks.values_mut() {
+        for rock in view.drone_rocks.values_mut() {
             rock.step();
         }
     }
