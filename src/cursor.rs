@@ -191,6 +191,7 @@ fn show(
     mut entered: MessageReader<bevy::window::CursorEntered>,
     mut focused: MessageReader<bevy::window::WindowFocused>,
     mut hide_again: Local<f64>,
+    scale: Res<UiScale>,
 ) {
     let art = &mut *art;
     let mut options = window.into_inner();
@@ -264,7 +265,9 @@ fn show(
     if image.image != *handle {
         image.image = handle.clone();
     }
-    node.left = Val::Px(position.x.floor() - entry.hot_spot.0 as f32);
-    node.top = Val::Px(position.y.floor() - entry.hot_spot.1 as f32);
+    // The node's place is scaled with the menus; the pointer's is not.
+    let position = (position / scale.0).floor();
+    node.left = Val::Px(position.x - entry.hot_spot.0 as f32);
+    node.top = Val::Px(position.y - entry.hot_spot.1 as f32);
     *visibility = Visibility::Visible;
 }
