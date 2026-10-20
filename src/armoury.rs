@@ -251,6 +251,13 @@ impl Armoury {
             ivan_damage: get("IvanDamage").and_then(|v| v.parse().ok()).unwrap_or(defaults.ivan_damage),
             ivan_warhead: get("IvanWarhead").map_or(0, |name| self.warhead(rules, &name)),
             ivan_delay: get("IvanTimedDelay").and_then(|v| v.parse().ok()).unwrap_or(defaults.ivan_delay),
+            mind_overload: {
+                let counts: Vec<u32> = get("OverloadCount").map(|value| value.split(',').filter_map(|value| value.trim().parse().ok()).collect()).unwrap_or_default();
+                let damage: Vec<i32> = get("OverloadDamage").map(|value| value.split(',').filter_map(|value| value.trim().parse().ok()).collect()).unwrap_or_default();
+                let frames: Vec<u32> = get("OverloadFrames").map(|value| value.split(',').filter_map(|value| value.trim().parse().ok()).collect()).unwrap_or_default();
+                if counts.len() != damage.len() || counts.len() != frames.len() { Vec::new() }
+                else { counts.into_iter().zip(damage).zip(frames).map(|((count, damage), frames)| (count, damage, frames)).collect() }
+            },
         }
     }
 
@@ -286,6 +293,7 @@ impl Armoury {
             fire_once: yes(get("FireOnce"), false),
             limbo_launch: yes(get("LimboLaunch"), false),
             spawner: yes(get("Spawner"), false),
+            infinite_mind_control: yes(get("InfiniteMindControl"), false),
             fake_blink: number("DisguiseFakeBlinkTime").unwrap_or(0).max(0) as u32,
             area_fire: yes(get("AreaFire"), false),
             is_sonic: yes(get("IsSonic"), false),

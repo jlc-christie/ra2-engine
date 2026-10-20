@@ -11,5 +11,8 @@ saves/
 
 # Local settings
 settings.ini
+/run-local.sh
+/run-yr.sh
+/cache/
 
 /private/

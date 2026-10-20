@@ -9,6 +9,50 @@
 use crate::path::code;
 use crate::{cell_centre, entry_code, Other, Unit, UnitStats, World, LEPTONS_PER_CELL};
 
+#[cfg(test)]
+mod yr_tests {
+    use super::*;
+    use crate::{BuildingType, Factory, House, Map};
+
+    fn world() -> World {
+        let mut map = Map::new(20, 20);
+        for y in 0..20 { for x in 0..20 { map.set_cell(x, y, true, 0); } }
+        let mut world = World::new(map, None);
+        world.houses = vec![House::default(), House { side: 2, tech_level: 10, ai: Some(Brain { awake: true, ..Brain::of(0) }), ..House::default() }];
+        world.building_types = (0..4).map(|_| BuildingType { strength: 100, owners: 1, tech_level: 1, ai_build_this: true, planning_side: 2, size: (1, 1), ..BuildingType::default() }).collect();
+        world.building_types[0].construction_yard = true;
+        world.building_types[0].factory = Some(Factory::Building);
+        world
+    }
+
+    #[test]
+    fn yr_third_ai_plan_uses_third_defence_counts() {
+        let mut world = world();
+        world.ai_rules.build_const = vec![0];
+        world.ai_rules.build_power = vec![1];
+        world.ai_rules.build_barracks = vec![2];
+        world.ai_rules.build_weapons = vec![3];
+        world.ai_rules.defence_counts = ([9; 3], [8; 3]);
+        world.ai_rules.third_defence_counts = [2; 3];
+        let plan = world.generate_base_list(1);
+        assert_eq!(plan.iter().filter(|node| node.kind.is_none()).count(), 2);
+    }
+
+    #[test]
+    fn yr_third_ai_inserts_its_own_power_plant_before_a_drain() {
+        let mut world = world();
+        world.ai_rules.soviet_power = Some(1);
+        world.ai_rules.third_power = Some(2);
+        world.building_types[3].power = -100;
+        world.add_building(1, 0, (4, 4));
+        let brain = world.houses[1].ai.as_mut().unwrap();
+        brain.nodes = vec![Node::wanted(3)];
+        brain.base_cell = Some((4, 4));
+        world.run_base(1);
+        assert_eq!(world.houses[1].ai.as_ref().unwrap().nodes[0].kind, Some(2));
+    }
+}
+
 /// The rules lists the computer plans from.
 #[derive(Clone, Debug, Default)]
 pub struct Rules {
@@ -22,11 +66,15 @@ pub struct Rules {
     /// `[General]` `GDIPowerPlant` and `NodRegularPower`.
     pub allied_power: Option<u16>,
     pub soviet_power: Option<u16>,
+    /// Yuri's Revenge `ThirdPowerPlant`.
+    pub third_power: Option<u16>,
     /// `[General] HarvesterUnit`, as unit types, and `HarvestersPerRefinery`.
     pub harvesters: Vec<u16>,
     pub harvesters_per_refinery: i32,
     /// `AlliedBaseDefenseCounts` and `SovietBaseDefenseCounts`, hardest first.
     pub defence_counts: ([i32; 3], [i32; 3]),
+    /// Yuri's Revenge `ThirdBaseDefenseCounts`.
+    pub third_defence_counts: [i32; 3],
     /// `[AI] AIBaseSpacing`.
     pub base_spacing: i32,
     /// By difficulty, hardest first: the `ROF` of `[Easy]`, `[Normal]` and
@@ -460,7 +508,7 @@ impl World {
                 }
             }
         }
-        let counts = if side == 1 { rules.defence_counts.1 } else { rules.defence_counts.0 };
+        let counts = match side { 1 => rules.defence_counts.1, 2 => rules.third_defence_counts, _ => rules.defence_counts.0 };
         for _ in 0..counts[difficulty.min(2)] {
             if order.len() > 3 {
                 let at = self.draw(3, order.len() as i32 - 1) as usize;
@@ -823,7 +871,7 @@ impl World {
                 }
                 let (output, drain) = self.power(house);
                 if t.power < 0 && drain - t.power > output && !self.ai_rules.build_const.contains(&kind) {
-                    let plant = if self.houses[h].side == 0 { self.ai_rules.allied_power } else { self.ai_rules.soviet_power };
+                    let plant = match self.houses[h].side { 0 => self.ai_rules.allied_power, 1 => self.ai_rules.soviet_power, 2 => self.ai_rules.third_power, _ => None };
                     if let Some(plant) = plant {
                         brain.nodes.insert(at, Node { kind: Some(plant), cell: None, fails: 0, cover: None });
                         break;

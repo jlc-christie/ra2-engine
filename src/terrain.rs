@@ -61,6 +61,9 @@ impl Theater {
             "TEMPERATE" => ("temperat", "tem", 't'),
             "SNOW" => ("snow", "sno", 'a'),
             "URBAN" => ("urban", "urb", 'u'),
+            "DESERT" => ("desert", "des", 'd'),
+            "LUNAR" => ("lunar", "lun", 'l'),
+            "NEWURBAN" => ("urbann", "ubn", 'n'),
             _ => return None,
         };
         let ini = Ini::parse(files.get(&format!("{stem}.ini"))?);
@@ -72,7 +75,10 @@ impl Theater {
             let Some(file_stem) = ini.get(&section, "FileName") else {
                 break;
             };
-            let count: usize = ini.get(&section, "TilesInSet")?.parse().ok()?;
+            // INI integer reads use zero for a nonnumeric/absent value. Stock
+            // urbannmd.ini TileSet0105 actually says `TilesInSet=o`; this is an
+            // unplaceable, empty set, and must not prevent NEWURBAN loading.
+            let count = ini.get(&section, "TilesInSet").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
             // DATA: a section named by the set's `SetName` gives a tile's
             // `TileNNAnim`, `TileNNXOffset`, `TileNNYOffset`, `TileNNAttachesTo`.
             if let Some(name) = ini.get(&section, "SetName").map(str::trim) {
@@ -442,6 +448,8 @@ pub struct UnitInfo {
     pub transport_sounds: (Option<String>, Option<String>),
     /// `DeploySound` and `UndeploySound`.
     pub deploy_sounds: (Option<String>, Option<String>),
+    /// `MoveSound`: the engine sound, also heard while turning to deploy.
+    pub move_sound: Option<String>,
     /// `UnloadingClass`: the model shown while a miner empties itself.
     pub unloading: Option<String>,
     /// `ChronoOutSound` and `ChronoInSound`, the type's own or the rules'.
@@ -499,6 +507,8 @@ pub struct Upkeep {
     pub repair_interval: u32,
     pub survivor_divisors: (i32, i32),
     pub crew_types: (Option<u16>, Option<u16>, Option<u16>, Option<u16>),
+    pub third_survivor_divisor: i32,
+    pub third_crew: Option<u16>,
 }
 
 /// A cell of ore the map starts with.
@@ -1016,7 +1026,25 @@ pub struct Enemy {
     pub level: usize,
 }
 
+/// Configuration problems are separate from missing SHP/VXL/TMP art: an asset
+/// can be present while the engine does not yet implement its rule behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleDiagnosticKind {
+    UnresolvedReference,
+    UnsupportedBehavior,
+}
+
+#[derive(Debug)]
+pub struct RuleDiagnostic {
+    pub kind: RuleDiagnosticKind,
+    pub object: String,
+    pub key: String,
+    pub value: String,
+}
+
 pub struct Scene {
+    pub rule_diagnostics: Vec<RuleDiagnostic>,
+    pub slave_rules: ra2_sim::slaves::Rules,
     /// What lights the map while the game runs.
     pub light_setup: crate::lighting::LightSetup,
     /// The kinds of mark explosions leave, by art name.
@@ -1103,7 +1131,7 @@ pub struct Scene {
     /// `[General] TrackedUphill`, `TrackedDownhill`, `WheeledUphill`, `WheeledDownhill`.
     pub slope_speed: [f64; 4],
     /// The player's country (its place in `[Countries]`) and side (0 Allied, 1
-    /// Soviet).
+    /// Soviet, 2 Yuri).
     pub player_country: u8,
     pub player_side: i32,
     /// The map's width and visible rectangle, which bound the playable area.
@@ -1386,7 +1414,7 @@ fn shadow_rgba(frame: &ra2_formats::shp::Frame) -> Vec<u8> {
     frame
         .pixels
         .iter()
-        .flat_map(|&index| if index == 0 { [0; 4] } else { [0, 0, 0, 128] })
+        .flat_map(|&index| if index == 0 { [0; 4] } else { [0, 0, 0, voxel::SHADOW_ALPHA] })
         .collect()
 }
 
@@ -1428,6 +1456,90 @@ impl Default for Player {
     fn default() -> Self {
         Self { country: 0, colour: 0, opponents: vec![Opponent { level: 2, country: None, colour: None }], mode_rules: String::new(), start: None }
     }
+}
+
+/// Selectable countries retain their `[Countries]` indices, because `Owner`
+/// masks, saved matches and network matches use those indices. Neutral and
+/// campaign-only houses must not enter the random-country draw.
+pub fn multiplayer_countries(rules: &Ini) -> Vec<usize> {
+    rules.section("Countries").iter().enumerate().filter_map(|(index, (_, country))| {
+        rules.get(country.trim(), "Multiplay")
+            .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "yes" | "true" | "1"))
+            .then_some(index)
+    }).collect()
+}
+
+/// The three playable `Side` names used by the original rules files. These are
+/// engine identifiers, independent of the localized country names in the CSF.
+pub fn country_side(rules: &Ini, country: usize) -> i32 {
+    let side = rules.section("Countries").get(country)
+        .and_then(|(_, name)| rules.get(name.trim(), "Side"))
+        .unwrap_or("GDI").trim();
+    if side.eq_ignore_ascii_case("ThirdSide") { 2 }
+    else if side.eq_ignore_ascii_case("Nod") { 1 }
+    else { 0 }
+}
+
+fn super_weapon_kind(name: &str) -> i32 {
+    ["MultiMissile", "IronCurtain", "LightningStorm", "ChronoSphere", "ChronoWarp", "ParaDrop", "AmerParaDrop"]
+        .iter().position(|kind| kind.eq_ignore_ascii_case(name.trim())).map_or(-1, |index| index as i32)
+}
+
+fn slave_spawner(rules: &Ini, name: &str) -> Option<ra2_sim::slaves::SpawnerRules> {
+    let worker = rules.get(name, "Enslaves")?.trim();
+    let worker = ["VehicleTypes", "InfantryTypes", "AircraftTypes"].into_iter()
+        .flat_map(|section| rules.section(section).iter().map(|(_, name)| name))
+        .position(|name| name.trim().eq_ignore_ascii_case(worker))? as u16;
+    let number = |key: &str, default: u32| rules.get(name, key).and_then(|value| value.trim().parse::<u32>().ok()).unwrap_or(default);
+    let yes = |key: &str| rules.get(name, key).is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "yes" | "true" | "1"));
+    Some(ra2_sim::slaves::SpawnerRules { worker, count: number("SlavesNumber", 0) as usize,
+        regeneration: number("SlaveRegenRate", 500), reload: number("SlaveReloadRate", 25),
+        resource_gatherer: yes("ResourceGatherer"), resource_destination: yes("ResourceDestination") })
+}
+
+fn rule_diagnostics(rules: &Ini, tech_level: i32) -> Vec<RuleDiagnostic> {
+    let buildings: Vec<_> = rules.section("BuildingTypes").iter().map(|(_, name)| name.trim()).collect();
+    let countries: Vec<_> = rules.section("Countries").iter().map(|(_, name)| name.trim()).collect();
+    let known_building = |name: &str| buildings.iter().any(|kind| kind.eq_ignore_ascii_case(name.trim()));
+    let mut issues = Vec::new();
+    let mut note = |kind, object: &str, key: &str, value: &str| {
+        issues.push(RuleDiagnostic { kind, object: object.to_owned(), key: key.to_owned(), value: value.to_owned() });
+    };
+    // Stock lists contain unused placeholders and campaign objects above the
+    // multiplayer tech level. Only types eligible for this match are checked.
+    for section in ["BuildingTypes", "VehicleTypes", "InfantryTypes", "AircraftTypes"] {
+        for (_, name) in rules.section(section) {
+            let level = rules.get(name, "TechLevel").and_then(|value| value.parse::<i32>().ok()).unwrap_or(-1);
+            if level < 0 || level > tech_level { continue; }
+            if let Some(list) = rules.get(name, "Prerequisite") {
+                for prerequisite in list.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+                    let group = rules.get("General", &format!("Prerequisite{prerequisite}"));
+                    if let Some(group) = group {
+                        for member in group.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+                            if !known_building(member) { note(RuleDiagnosticKind::UnresolvedReference, name, &format!("Prerequisite{prerequisite}"), member); }
+                        }
+                    } else if !known_building(prerequisite) {
+                        note(RuleDiagnosticKind::UnresolvedReference, name, "Prerequisite", prerequisite);
+                    }
+                }
+            }
+            for key in ["Owner", "RequiredHouses", "ForbiddenHouses"] {
+                if let Some(list) = rules.get(name, key) {
+                    for country in list.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+                        if !countries.iter().any(|known| known.eq_ignore_ascii_case(country)) {
+                            note(RuleDiagnosticKind::UnresolvedReference, name, key, country);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (_, name) in rules.section("SuperWeaponTypes") {
+        if let Some(kind) = rules.get(name, "Type").filter(|kind| super_weapon_kind(kind) < 0) {
+            note(RuleDiagnosticKind::UnsupportedBehavior, name, "Type", kind);
+        }
+    }
+    issues
 }
 
 /// The `[Colors]` entry behind each colour offered to players.
@@ -1983,12 +2095,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     let name = name.trim();
                     let get = |key: &str| rules.get(name, key).map(|v| v.split(';').next().unwrap_or("").trim().to_owned());
                     let yes = |key: &str, default: bool| get(key).map_or(default, |v| matches!(v.to_lowercase().as_str(), "yes" | "true" | "1"));
-                    let kind = get("Type").map_or(-1, |v| {
-                        ["MultiMissile", "IronCurtain", "LightningStorm", "ChronoSphere", "ChronoWarp", "ParaDrop", "AmerParaDrop"]
-                            .iter()
-                            .position(|n| n.eq_ignore_ascii_case(&v))
-                            .map_or(-1, |i| i as i32)
-                    });
+                    let kind = get("Type").map_or(-1, |value| super_weapon_kind(&value));
                     SuperInfo {
                         name: name.to_owned(),
                         ui_name: get("UIName").unwrap_or_default(),
@@ -2027,6 +2134,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             let prerequisites = get("Prerequisite")
                 .map(|list| {
                     list.split(',')
+                        .filter(|entry| !entry.trim().is_empty())
                         .map(|entry| {
                             let entry = entry.trim();
                             let group = rules.and_then(|rules| {
@@ -2118,9 +2226,12 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 undeploys: None,
                 art: image,
                 sim: ra2_sim::BuildingType {
+                    slave_spawner: rules.and_then(|rules| slave_spawner(rules, name)),
+                    deploy_facing: number("DeployFacing").map(|facing| ((facing & 7) as u8) << 5),
                     leavings: Default::default(),
                     explosions: Vec::new(),
                     cost: number("Cost").unwrap_or(0),
+                    build_time_multiplier: get("BuildTimeMultiplier").and_then(|value| value.trim().parse().ok()),
                     power: number("Power").unwrap_or(0),
                     size,
                     prerequisites,
@@ -2139,7 +2250,14 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     turret_rot: number("ROT").unwrap_or(0),
                     powered: yes("Powered") && !get("TogglePower").is_some_and(|v| matches!(v.trim().to_lowercase().as_str(), "no" | "false" | "0")),
                     cloning: yes("Cloning"),
+                    grinding: yes("Grinding"),
+                    infantry_absorb: yes("InfantryAbsorb"),
+                    unit_absorb: yes("UnitAbsorb"),
+                    passengers: number("Passengers").unwrap_or(0),
+                    size_limit: number("SizeLimit").unwrap_or(0),
+                    extra_power: number("ExtraPower").unwrap_or(0),
                     soylent: number("Soylent").unwrap_or(0),
+                    unsellable: yes("Unsellable"),
                     crewed: yes("Crewed"),
                     radar: yes("Radar"),
                     reveal_to_all: yes("RevealToAll"),
@@ -2219,6 +2337,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     weapons_factory: yes("WeaponsFactory"),
                     gdi_barracks: yes("GDIBarracks"),
                     nod_barracks: yes("NODBarracks"),
+                    yuri_barracks: yes("YuriBarracks"),
                     // From the rules, not the art.
                     exit_coord: get("ExitCoord")
                         .and_then(|v| {
@@ -2668,6 +2787,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             let prerequisites = get("Prerequisite")
                 .map(|list| {
                     list.split(',')
+                        .filter(|entry| !entry.trim().is_empty())
                         .map(|entry| {
                             let entry = entry.trim();
                             match rules.and_then(|rules| rules.get("General", &format!("Prerequisite{entry}"))) {
@@ -2686,6 +2806,9 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     .map_or_else(|| "xxicon".to_owned(), |c| c.trim().to_lowercase()),
                 alt_cameo: art_rules.as_ref().and_then(|art| art.get(&made.image, "AltCameo")).map(|c| c.trim().to_lowercase()).filter(|c| !c.is_empty()),
                 sim: ra2_sim::UnitType {
+                    slave_spawner: rules.and_then(|rules| slave_spawner(rules, name)),
+                    slave_worker: yes("Slaved").then(|| ra2_sim::slaves::WorkerRules { harvest_rate: number("HarvestRate").unwrap_or(150).max(1) as u32 }),
+                    deploy_facing: number("DeployFacing").map(|facing| ((facing & 7) as u8) << 5),
                     explosions: Vec::new(),
                     death_anims: Vec::new(),
                     leavings: Default::default(),
@@ -2772,6 +2895,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     },
                     dock: get("Dock").map(|list| list.split(',').filter_map(|m| building_index(m)).collect()).unwrap_or_default(),
                     cost: number("Cost").unwrap_or(0),
+                    build_time_multiplier: get("BuildTimeMultiplier").and_then(|value| value.trim().parse().ok()),
+                    soylent: number("Soylent"),
                     tech_level: number("TechLevel").unwrap_or(-1),
                     owners: get("Owner").map_or(0, &country_mask),
                     required_houses: get("RequiredHouses").map(&country_mask),
@@ -2781,7 +2906,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                         .map(|list| list.split(',').filter_map(|m| building_index(m)).collect())
                         .unwrap_or_default(),
                     build_limit: number("BuildLimit"),
-                    requires_stolen_tech: if yes("RequiresStolenSovietTech") { 1 } else if yes("RequiresStolenAlliedTech") { 2 } else { 0 },
+                    requires_stolen_tech: if yes("RequiresStolenSovietTech") { 1 } else if yes("RequiresStolenAlliedTech") { 2 } else if yes("RequiresStolenThirdTech") { 3 } else { 0 },
                     infantry: type_index >= vehicle_count && type_index < infantry_end,
                     naval: yes("Naval"),
                     planning_side: number("AIBasePlanningSide").unwrap_or(-1),
@@ -2805,6 +2930,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                     get("DeploySound").map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()),
                     get("UndeploySound").map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()),
                 ),
+                move_sound: get("MoveSound").map(|v| v.split(';').next().unwrap_or("").trim().to_owned()).filter(|v| !v.is_empty()),
                 // The type's sound, else
                 // the rules' own.
                 chrono_sounds: {
@@ -2932,7 +3058,6 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         Some(drawn) if !all_starts.is_empty() => Some(all_starts[drawn % all_starts.len()]),
         _ => all_starts.first().copied(),
     };
-    let country_name = countries.get(player.country).cloned().unwrap_or_default();
     let base_unit = object_rules.rules.as_ref().and_then(|rules| {
         let list = rules.get("General", "BaseUnit")?;
         let owned = |unit: &&str| {
@@ -2940,12 +3065,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         };
         list.split(',').find(owned).or_else(|| list.split(',').next()).map(|name| name.trim().to_owned())
     });
-    // DATA: the country's `Side`: GDI is the Allies (0), Nod the Soviets (1).
-    let player_side = object_rules
-        .rules
-        .as_ref()
-        .and_then(|rules| rules.get(&country_name, "Side"))
-        .map_or(0, |side| i32::from(side.trim().eq_ignore_ascii_case("Nod")));
+    let player_side = object_rules.rules.as_ref().map_or(0, |rules| country_side(rules, player.country));
     if let (Some(cell), Some(kind)) = (player_start, base_unit.as_deref()) {
         unit_spawns.push(spawn(kind, cell, 64, player_palette, PLAYER));
     }
@@ -2966,12 +3086,15 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 break;
             };
             used.push(start);
-            let country = opponent.country.unwrap_or(((map.width * 31 + map.height * 17 + 5) as usize) % countries.len().clamp(1, 9));
-            let name = countries.get(country).cloned().unwrap_or_default();
             let Some(rules) = object_rules.rules.as_ref() else {
                 break;
             };
-            let side = rules.get(&name, "Side").map_or(0, |side| i32::from(side.trim().eq_ignore_ascii_case("Nod")));
+            let playable = multiplayer_countries(rules);
+            let country = opponent.country.or_else(|| {
+                let draw = (map.width * 31 + map.height * 17 + 5) as usize;
+                playable.get(draw % playable.len().max(1)).copied()
+            }).unwrap_or(0);
+            let side = country_side(rules, country);
             let palette = opponent_palettes[index];
             let Some(list) = rules.get("General", "BaseUnit") else {
                 break;
@@ -3015,12 +3138,14 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             build_refinery: buildings("AI", "BuildRefinery"),
             allied_power: buildings("General", "GDIPowerPlant").first().copied(),
             soviet_power: buildings("General", "NodRegularPower").first().copied(),
+            third_power: buildings("General", "ThirdPowerPlant").first().copied(),
             harvesters: rules
                 .and_then(|rules| rules.get("General", "HarvesterUnit"))
                 .map(|list| list.split(',').filter_map(|name| vehicle_names.iter().position(|n| n.eq_ignore_ascii_case(name.trim())).map(|i| i as u16)).collect())
                 .unwrap_or_default(),
             harvesters_per_refinery: number("General", "HarvestersPerRefinery", 2),
             defence_counts: (counts("AlliedBaseDefenseCounts"), counts("SovietBaseDefenseCounts")),
+            third_defence_counts: counts("ThirdBaseDefenseCounts"),
             base_spacing: number("AI", "AIBaseSpacing", 1),
             rof: ["Easy", "Normal", "Difficult"].map(|section| rules.and_then(|rules| rules.get(section, "ROF")).and_then(|v| v.split(';').next()?.trim().parse::<f64>().ok()).unwrap_or(1.0)),
             repair_delay: ["Easy", "Normal", "Difficult"].map(|section| rules.and_then(|rules| rules.get(section, "RepairDelay")).and_then(|v| v.split(';').next()?.trim().parse::<f64>().ok()).unwrap_or(0.02)),
@@ -3517,6 +3642,7 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
             american: list("AmerParaDropInf", "AmerParaDropNum"),
             allied: list("AllyParaDropInf", "AllyParaDropNum"),
             soviet: list("SovParaDropInf", "SovParaDropNum"),
+            third: list("YuriParaDropInf", "YuriParaDropNum"),
             radius: get("ParadropRadius").and_then(|v| v.parse().ok()).unwrap_or(1024),
             fall_rate: get("ParachuteMaxFallRate").and_then(|v| v.parse::<i32>().ok()).map_or(3, i32::abs),
             curtain_duration: rules.and_then(|rules| rules.get("CombatDamage", "IronCurtainDuration")).and_then(|v| v.split(';').next()?.trim().parse().ok()).unwrap_or(750),
@@ -3589,6 +3715,8 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
                 get("SovietSurvivorDivisor").and_then(|v| v.parse().ok()).unwrap_or(250),
             ),
             crew_types: (unit("AlliedCrew"), unit("SovietCrew"), unit("Engineer"), unit("Technician")),
+            third_survivor_divisor: get("ThirdSurvivorDivisor").and_then(|v| v.parse().ok()).unwrap_or(750),
+            third_crew: unit("ThirdCrew"),
         }
     };
 
@@ -3596,6 +3724,12 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
     let crew_escape = general("CrewEscape").and_then(|v| if v.contains('%') { v.trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0) } else { v.parse::<f64>().ok() }).unwrap_or(0.5);
     let ship_sinking_weight = general("ShipSinkingWeight").and_then(|v| v.parse::<f64>().ok()).unwrap_or(3.0);
     Some(Scene {
+        rule_diagnostics: object_rules.rules.as_ref().map(|rules| rule_diagnostics(rules, tech_level)).unwrap_or_default(),
+        slave_rules: {
+            let number = |key: &str, default: i32| general(key).and_then(|value| value.parse::<i32>().ok()).unwrap_or(default);
+            ra2_sim::slaves::Rules { short_scan: number("SlaveMinerShortScan", 8), worker_scan: number("SlaveMinerSlaveScan", 14),
+                long_scan: number("SlaveMinerLongScan", 48), scan_correction: number("SlaveMinerScanCorrection", 3), kick_delay: number("SlaveMinerKickFrameDelay", 150).max(1) as u32 }
+        },
         crew_escape,
         ship_sinking_weight,
         light_setup,
@@ -3669,4 +3803,293 @@ pub fn build(files: &GameFiles, map: &Map, player: &Player) -> Option<Scene> {
         missing_objects,
         missing_art,
     })
+}
+
+#[cfg(test)]
+mod edition_tests {
+    use super::*;
+    use crate::files::Edition;
+    use ra2_sim::Order;
+
+    #[test]
+    fn multiplayer_country_indices_are_not_localized_or_assumed_contiguous() {
+        let rules = Ini::parse(b"[Countries]\n0=Americans\n1=Neutral\n2=YuriCountry\n[Americans]\nMultiplay=yes\nSide=GDI\n[Neutral]\nMultiplay=no\n[YuriCountry]\nMultiplay=Yes\nSide=ThirdSide\n");
+        assert_eq!(multiplayer_countries(&rules), vec![0, 2]);
+        assert_eq!(country_side(&rules, 0), 0);
+        assert_eq!(country_side(&rules, 2), 2);
+    }
+
+    #[test]
+    fn original_ra2_and_yr_countries_factories_and_technology_enter_the_world() {
+        let dir = crate::files::dev_dir();
+        if !dir.exists() { return; }
+        for (edition, map_name, cases) in [
+            (Edition::RedAlert2, "mp02t2.map", &[(0, 0, "AMCV", "GACNST", "GAPOWR"), (8, 1, "SMCV", "NACNST", "NAPOWR")][..]),
+            (Edition::YuriAssets, "xmp02t2.map", &[(0, 0, "AMCV", "GACNST", "GAPOWR"), (8, 1, "SMCV", "NACNST", "NAPOWR"), (9, 2, "PCV", "YACNST", "YAPOWR")][..]),
+        ] {
+            if edition == Edition::YuriAssets && crate::files::find(&dir, "ra2md.mix").is_none() { continue; }
+            let files = GameFiles::open_for_edition(&dir, edition).expect("installed edition opens");
+            let rules = Ini::parse(files.get("rules.ini").expect("edition rules"));
+            let playable = multiplayer_countries(&rules);
+            let count = if edition == Edition::YuriAssets { 10 } else { 9 };
+            assert_eq!(playable, (0..count).collect::<Vec<_>>(), "{edition:?}");
+            let map = Map::parse(files.get(map_name).expect("edition map")).unwrap();
+            for &(country, side, mcv, yard, plant) in cases {
+                let opponent_country = if edition == Edition::YuriAssets { 9 } else { 8 };
+                let player = Player { country, opponents: vec![Opponent { country: Some(opponent_country), colour: Some(1), level: 2 }], ..Player::default() };
+                let mut scene = build(&files, &map, &player).expect("stock map and rules build a scene");
+                assert_eq!(scene.player_side, side, "{edition:?}/{country}");
+                assert_eq!(scene.enemies[0].side, if edition == Edition::YuriAssets { 2 } else { 1 });
+                assert!(scene.rule_diagnostics.iter().all(|issue| issue.kind != RuleDiagnosticKind::UnresolvedReference), "{edition:?}: {:?}", scene.rule_diagnostics);
+                assert_eq!(scene.building_types.len(), rules.section("BuildingTypes").len());
+                let names: Vec<_> = scene.building_types.iter().map(|kind| kind.name.clone()).collect();
+                let unit_names: Vec<_> = scene.unit_types.iter().map(|kind| kind.name.clone()).collect();
+                let expected_units: Vec<_> = ["VehicleTypes", "InfantryTypes", "AircraftTypes"].into_iter()
+                    .flat_map(|section| rules.section(section).iter().map(|(_, name)| name.clone())).collect();
+                assert_eq!(unit_names, expected_units, "YR additions must keep their rules-list indices");
+                let mut world = crate::units::build_world(&files, &mut scene).world;
+                world.map.shroud_on = false;
+                for house in &mut world.houses { house.ai = None; }
+                let owner = &world.houses[PLAYER as usize];
+                assert_eq!((owner.country, owner.side), (country as u8, side));
+                let initial = world.units().iter().find(|unit| unit.owner == PLAYER).unwrap();
+                assert_eq!(unit_names[initial.stats.kind as usize - 1], mcv);
+                let opponent = world.units().iter().find(|unit| unit.owner == ENEMY).unwrap();
+                assert_eq!(unit_names[opponent.stats.kind as usize - 1], if edition == Edition::YuriAssets { "PCV" } else { "SMCV" });
+                let mcv_id = initial.id;
+                world.order(Order::Deploy { unit: mcv_id });
+                for _ in 0..80 { world.tick(); }
+                let base = world.buildings().iter().find(|building| building.owner == PLAYER).expect("base vehicle deploys");
+                assert_eq!(names[base.kind as usize], yard);
+                let centre = base.cell;
+                let offered = world.buildable(PLAYER);
+                let plants: Vec<_> = offered.iter().map(|&kind| names[kind as usize].as_str())
+                    .filter(|name| ["GAPOWR", "NAPOWR", "YAPOWR"].contains(name)).collect();
+                assert_eq!(plants, vec![plant], "{edition:?}/{country}: only the correct yard satisfies the power-plant prerequisite");
+                if side != 2 { continue; }
+
+                let building = |name: &str| names.iter().position(|n| n == name).unwrap() as u16;
+                let unit = |name: &str| unit_names.iter().position(|n| n == name).unwrap() as u16;
+                let place = |world: &mut ra2_sim::World, name: &str| {
+                    let kind = building(name);
+                    assert!(world.buildable(PLAYER).contains(&kind), "real prerequisites should offer {name}");
+                    let spot = (-16..=16).flat_map(|dy| (-16..=16).map(move |dx| (centre.0 + dx, centre.1 + dy)))
+                        .find(|&cell| world.can_place(PLAYER, kind, cell)).expect("room for Yuri base");
+                    assert!(world.place_now(PLAYER, kind, spot));
+                    for _ in 0..80 { world.tick(); }
+                };
+                place(&mut world, "YAPOWR");
+                place(&mut world, "YABRCK");
+                assert!(world.buildable_units(PLAYER).contains(&unit("INIT")));
+                assert!(!world.buildable_units(PLAYER).contains(&unit("E1")));
+                assert!(!world.buildable_units(PLAYER).contains(&unit("E2")));
+                assert_eq!(world.building_types[building("YABRCK") as usize].factory, Some(ra2_sim::Factory::Infantry));
+                assert!(world.building_types[building("YABRCK") as usize].yuri_barracks);
+                assert_eq!(world.unit_types[unit("INIT") as usize].owners, 1 << country);
+                assert!(world.building_types[building("YACNST") as usize].owners & (1 << country) != 0);
+                place(&mut world, "YAREFN");
+                place(&mut world, "YAWEAP");
+                assert!(world.buildable_units(PLAYER).contains(&unit("LTNK")));
+                assert!(!world.buildable_units(PLAYER).contains(&unit("MTNK")));
+                assert_eq!(world.unit_types[unit("LTNK") as usize].build_time_multiplier, Some(1.5));
+                assert_eq!(world.building_types[building("YAREFN") as usize].build_time_multiplier, Some(1.15));
+                let reactor = &world.building_types[building("YAPOWR") as usize];
+                assert!(reactor.infantry_absorb && !reactor.unit_absorb);
+                assert_eq!((reactor.passengers, reactor.size_limit, reactor.extra_power), (5, 15, 100));
+                assert!(world.building_types[building("YAGRND") as usize].grinding);
+                assert_eq!(world.unit_types[unit("INIT") as usize].soylent, Some(100));
+                assert_eq!(world.unit_types[unit("PTROOP") as usize].requires_stolen_tech, 3);
+                assert!(!world.buildable_units(PLAYER).contains(&unit("PTROOP")));
+                world.houses[PLAYER as usize].third_stolen = true;
+                assert!(world.buildable_units(PLAYER).contains(&unit("PTROOP")));
+                assert_eq!(world.ai_rules.third_power, Some(building("YAPOWR")));
+                assert_eq!(world.ai_rules.third_defence_counts, [25, 22, 6]);
+                assert_eq!(world.third_survivor_divisor, 750);
+                assert_eq!(world.third_crew, Some(unit("INIT")));
+                assert_eq!(world.super_rules.third, vec![(unit("INIT"), 6)]);
+                assert_eq!(world.ability_rules.mind_overload, vec![(3, 0, 30), (6, 50, 60), (10, 100, 60), (50, 500, 60)]);
+                let mind_weapon = world.unit_types[unit("MIND") as usize].stats.fighter.primary.unwrap().weapon;
+                assert!(world.weapons[mind_weapon as usize].infinite_mind_control);
+                for name in ["INIT", "LTNK"] {
+                    let kind = unit(name);
+                    world.order(Order::BuildUnit { house: PLAYER, unit: kind });
+                    for _ in 0..5000 {
+                        if world.units().iter().any(|made| made.owner == PLAYER && made.stats.kind == kind + 1) { break; }
+                        world.tick();
+                    }
+                    for _ in 0..200 { world.tick(); }
+                    let made = world.units().iter().find(|made| made.owner == PLAYER && made.stats.kind == kind + 1)
+                        .unwrap_or_else(|| panic!("{name} must leave its Yuri factory"));
+                    let cell = made.cell();
+                    assert!(!world.buildings().iter().any(|building| (building.cell.0..building.cell.0 + building.size.0).contains(&cell.0)
+                        && (building.cell.1..building.cell.1 + building.size.1).contains(&cell.1)), "{name} must emerge outside the factory footprint");
+                    assert!(world.houses[PLAYER as usize].tab_slot(world.unit_slot(kind)).is_none());
+                }
+                let before_starting: HashSet<_> = world.units().iter().map(|made| made.id).collect();
+                world.create_starting_units(5);
+                let starting: Vec<_> = world.units().iter().filter(|unit| unit.owner == PLAYER && !before_starting.contains(&unit.id)).collect();
+                assert!(!starting.is_empty(), "Yuri receives the configured starting infantry/vehicles");
+                for made in starting {
+                    let kind = &world.unit_types[made.stats.kind as usize - 1];
+                    assert!(kind.owners & (1 << country) != 0);
+                    assert!(kind.stats.allowed_to_start && !kind.stats.base_unit);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_six_original_yr_theaters_load_their_own_palettes_and_tiles() {
+        let dir = crate::files::dev_dir();
+        if crate::files::find(&dir, "ra2md.mix").is_none() { return; }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).expect("installed YR opens");
+        for (name, extension, letter) in [
+            ("TEMPERATE", "tem", 't'), ("SNOW", "sno", 'a'), ("URBAN", "urb", 'u'),
+            ("DESERT", "des", 'd'), ("LUNAR", "lun", 'l'), ("NEWURBAN", "ubn", 'n'),
+        ] {
+            let theater = Theater::load(&files, name).unwrap_or_else(|| panic!("{name}: palettes or configuration missing"));
+            assert_eq!((theater.extension, theater.letter), (extension, letter));
+            assert!(theater.tile_names.len() > 100, "{name}: real tile sets");
+            let clear = format!("{}.{extension}", theater.tile_names[0]);
+            assert!(files.get(&clear).and_then(Tmp::parse).is_some(), "{name}: its own clear tile {clear}");
+        }
+    }
+
+    #[test]
+    fn rule_diagnostics_distinguish_missing_references_from_unsupported_behavior() {
+        let rules = Ini::parse(b"[Countries]\n0=YuriCountry\n[BuildingTypes]\n0=YACNST\n1=UNUSED\n[InfantryTypes]\n0=INIT\n1=CAMPAIGN\n[INIT]\nTechLevel=1\nOwner=YuriCountry\nPrerequisite=LOST\n[CAMPAIGN]\nTechLevel=11\nPrerequisite=IGNORED\n[SuperWeaponTypes]\n0=CustomSpecial\n[CustomSpecial]\nType=FutureWeapon\n");
+        let issues = rule_diagnostics(&rules, 10);
+        assert_eq!(issues.len(), 2, "unused placeholders and campaign tech must not appear as missing art");
+        assert_eq!(issues[0].kind, RuleDiagnosticKind::UnresolvedReference);
+        assert_eq!((&*issues[0].object, &*issues[0].key, &*issues[0].value), ("INIT", "Prerequisite", "LOST"));
+        assert_eq!(issues[1].kind, RuleDiagnosticKind::UnsupportedBehavior);
+        assert_eq!((&*issues[1].object, &*issues[1].value), ("CustomSpecial", "FutureWeapon"));
+    }
+
+    #[test]
+    fn empty_map_prerequisites_override_real_yr_rules() {
+        let dir = crate::files::dev_dir();
+        if crate::files::find(&dir, "ra2md.mix").is_none() { return; }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).expect("installed YR opens");
+        let mut map = Map::parse(files.get("xmp02t2.map").unwrap()).unwrap();
+        // A map may intentionally remove a stock requirement. The empty value
+        // means no requirements, rather than one group no building can satisfy.
+        map.ini.overlay(&Ini::parse(b"[YAPOWR]\nPrerequisite=\n[INIT]\nPrerequisite=\n"));
+        let player = Player { country: 9, opponents: Vec::new(), ..Player::default() };
+        let scene = build(&files, &map, &player).expect("map rule overrides load");
+        assert!(scene.building_types.iter().find(|kind| kind.name == "YAPOWR").unwrap().sim.prerequisites.is_empty());
+        assert!(scene.unit_types.iter().find(|kind| kind.name == "INIT").unwrap().sim.prerequisites.is_empty());
+    }
+
+    #[test]
+    fn original_yr_slave_miner_earns_ore_and_keeps_workers_when_it_packs() {
+        use ra2_sim::slaves::Host;
+        let dir = crate::files::dev_dir();
+        if crate::files::find(&dir, "ra2md.mix").is_none() { return; }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).expect("installed YR opens");
+        let map = Map::parse(files.get("xmp02t2.map").unwrap()).unwrap();
+        let player = Player { country: 9, opponents: Vec::new(), ..Player::default() };
+        let mut scene = build(&files, &map, &player).unwrap();
+        let names: Vec<_> = scene.building_types.iter().map(|kind| kind.name.clone()).collect();
+        let unit_names: Vec<_> = scene.unit_types.iter().map(|kind| kind.name.clone()).collect();
+        let mut world = crate::units::build_world(&files, &mut scene).world;
+        world.map.shroud_on = false;
+        world.end_checks = false;
+        world.set_ore_types(Vec::new());
+        let pcv = world.units().iter().find(|unit| unit.owner == PLAYER).unwrap().id;
+        world.order(Order::Deploy { unit: pcv });
+        for _ in 0..80 { world.tick(); }
+        let centre = world.buildings().iter().find(|building| building.owner == PLAYER).unwrap().cell;
+        let mut refinery = None;
+        for name in ["YAPOWR", "YAREFN"] {
+            let kind = names.iter().position(|entry| entry == name).unwrap() as u16;
+            assert!(world.buildable(PLAYER).contains(&kind));
+            let spot = (-16..=16).flat_map(|dy| (-16..=16).map(move |dx| (centre.0 + dx, centre.1 + dy)))
+                .find(|&cell| world.can_place(PLAYER, kind, cell)).expect("space beside Yuri yard");
+            assert!(world.place_now(PLAYER, kind, spot));
+            if name == "YAREFN" { refinery = world.buildings().iter().find(|building| building.cell == spot).map(|building| building.id); }
+            for _ in 0..80 { world.tick(); }
+        }
+        let refinery = refinery.unwrap();
+        let building = world.buildings().iter().find(|building| building.id == refinery).unwrap();
+        let origin = building.cell;
+        let slave = unit_names.iter().position(|name| name == "SLAV").unwrap();
+        let rules = world.building_types[building.kind as usize].slave_spawner.unwrap();
+        assert!(world.building_types[building.kind as usize].unsellable);
+        assert!(!world.can_sell(refinery));
+        assert_eq!((rules.worker as usize, rules.count, rules.regeneration, rules.reload), (slave, 5, 500, 25));
+        assert_eq!(world.unit_types[slave].slave_worker.unwrap().harvest_rate, 150);
+        assert_eq!(world.unit_types[slave].stats.storage, 4);
+        let credits = world.houses[PLAYER as usize].credits;
+        world.order(Order::Sell { building: refinery });
+        assert_eq!(world.houses[PLAYER as usize].credits, credits);
+        assert!(world.buildings().iter().any(|building| building.id == refinery && building.buildup.is_none()), "Unsellable rejects a sale immediately");
+        let first_worker = world.slave_workers(Host::Building(refinery))[0];
+        // Add a nearby reachable ore patch in this in-memory world. Original
+        // installed map/rules/art archives are opened read-only and stay intact.
+        let ore = (-6..=6).flat_map(|dy| (-6..=6).map(move |dx| (origin.0 + dx, origin.1 + dy)))
+            .find(|&cell| world.map.passable(cell.0, cell.1) && world.can_move_to(first_worker, cell) && !world.buildings().iter().any(|building|
+                (building.cell.0..building.cell.0 + building.size.0).contains(&cell.0) && (building.cell.1..building.cell.1 + building.size.1).contains(&cell.1)))
+            .expect("nearby ore ground");
+        world.map.put_ore(ore.0, ore.1, 0, 11);
+        world.houses[PLAYER as usize].credits = 0;
+        for _ in 0..3000 {
+            world.tick();
+            if world.houses[PLAYER as usize].credits > 0 { break; }
+        }
+        let workers = world.slave_workers(Host::Building(refinery));
+        assert_eq!(workers.len(), 5, "real SlavesNumber creates exactly five workers");
+        assert!(world.houses[PLAYER as usize].credits > 0, "real SLAV workers must dig, walk home and pay credits");
+        assert!(workers.iter().all(|&id| world.unit(id).is_some_and(|unit| unit.stats.kind as usize == slave + 1 && !unit.stats.harvester)));
+        world.order(Order::Undeploy { building: refinery, x: origin.0 + 3, y: origin.1 + 3 });
+        for _ in 0..100 {
+            world.tick();
+            if world.unpacked_into(refinery).is_some() { break; }
+        }
+        let mobile = world.unpacked_into(refinery).expect("real YAREFN packs into SMIN");
+        assert!(world.is_slave_miner(mobile));
+        assert_eq!(unit_names[world.unit(mobile).unwrap().stats.kind as usize - 1], "SMIN");
+        assert_eq!(world.slave_workers(Host::Unit(mobile)), workers, "packing transfers the workforce instead of creating a second one");
+        world.remove_unit(mobile);
+        for _ in 0..3 { world.tick(); }
+        assert!(workers.iter().all(|&id| !world.is_enslaved(id) && world.unit(id).is_some_and(|unit| unit.owner == NEUTRAL)));
+    }
+
+    #[test]
+    fn original_yr_initiate_powers_the_reactor_and_grinds_for_its_soylent_value() {
+        let dir = crate::files::dev_dir();
+        if crate::files::find(&dir, "ra2md.mix").is_none() { return; }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).expect("installed YR opens");
+        let map = Map::parse(files.get("xmp02t2.map").unwrap()).unwrap();
+        let scene = build(&files, &map, &Player { country: 9, opponents: Vec::new(), ..Player::default() }).unwrap();
+        let reactor = scene.building_types.iter().position(|kind| kind.name == "YAPOWR").unwrap() as u16;
+        let grinder = scene.building_types.iter().position(|kind| kind.name == "YAGRND").unwrap() as u16;
+        let initiate = scene.unit_types.iter().position(|kind| kind.name == "INIT").unwrap() as u16;
+        // Keep every figure from the installed rules, with simple ground to
+        // isolate the original unit/building type-index and ability bridge.
+        let mut ground = ra2_sim::Map::new(32, 32);
+        for y in 0..32 { for x in 0..32 { ground.set_cell(x, y, true, 0); } }
+        let mut world = ra2_sim::World::new(ground, None);
+        world.end_checks = false;
+        world.houses = vec![ra2_sim::House::default(), ra2_sim::House { country: 9, side: 2, human: true, ..ra2_sim::House::default() }];
+        world.building_types = scene.building_types.into_iter().map(|kind| kind.sim).collect();
+        world.unit_types = scene.unit_types.into_iter().map(|kind| kind.sim).collect();
+        let reactor_id = world.add_map_building(PLAYER, reactor, (10, 10), 256);
+        let grinder_id = world.add_map_building(PLAYER, grinder, (20, 10), 256);
+        let stats = ra2_sim::UnitStats { kind: initiate + 1, ..world.unit_types[initiate as usize].stats };
+        let id = world.add_infantry((7, 10), 2, 0, stats, PLAYER).unwrap();
+        assert_eq!(world.power(PLAYER).0, 150);
+        world.order(Order::Enter { unit: id, building: reactor_id });
+        for _ in 0..500 { world.tick(); if world.unit(id).is_none() { break; } }
+        assert!(world.unit(id).is_none(), "the real INIT enters its real bio reactor");
+        assert_eq!(world.power(PLAYER).0, 250, "real ExtraPower adds exactly 100");
+        world.order(Order::Evacuate { building: reactor_id });
+        for _ in 0..80 { world.tick(); }
+        assert!(world.unit(id).is_some());
+        assert_eq!(world.power(PLAYER).0, 150);
+        world.order(Order::Enter { unit: id, building: grinder_id });
+        for _ in 0..1000 { world.tick(); if world.unit(id).is_none() { break; } }
+        assert!(world.unit(id).is_none(), "the freed initiate walks to the grinder");
+        assert_eq!(world.houses[PLAYER as usize].credits, 100, "real INIT Soylent=100, independent of Cost=200");
+    }
 }

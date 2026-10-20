@@ -104,6 +104,7 @@ struct Radar {
     stepped: f64,
     frames: Vec<Option<(Handle<Image>, Vec2)>>,
     shown_frame: Option<usize>,
+    art_side: i32,
     layout: Option<Layout>,
     /// The ground, scaled, and what it was made from.
     ground: Vec<[u8; 3]>,
@@ -260,6 +261,13 @@ fn update(
         radar.shown_frame = None;
     }
     let now = time.elapsed_secs_f64();
+    let side = sim.0.houses.get(local() as usize).map_or(0, |house| house.side);
+    if radar.art_side != side {
+        radar.art_side = side;
+        radar.frames.clear();
+        radar.shown_frame = None;
+    }
+    let (shape, palette) = crate::hud::sidebar_radar(&files, side);
 
     // On and off.
     // Turning on only from off or closing,
@@ -297,7 +305,7 @@ fn update(
         }
         let frame = radar.frame;
         let loaded = radar.frames[frame]
-            .get_or_insert_with(|| crate::hud::load(&files, &mut images, "radar.shp", frame, crate::hud::PALETTE).unwrap_or_default())
+            .get_or_insert_with(|| crate::hud::load(&files, &mut images, shape, frame, palette).unwrap_or_default())
             .clone();
         art.0.image = loaded.0;
         art.1.top = Val::Px(crate::hud::CREDITS_HEIGHT + ART_Y - 16.0);

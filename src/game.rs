@@ -90,6 +90,10 @@ pub struct GameSetup {
     pub mode_rules: String,
 }
 
+/// The loading screen has already built the map and simulation.
+#[derive(Resource)]
+pub(crate) struct PreparedGame;
+
 /// A match as it was actually set up: the same as [`GameSetup`] with every
 /// choice left to chance settled, so that setting it up again gives the same
 /// game. Kept in a save (and, later, sent to the other players of a network
@@ -252,7 +256,8 @@ impl Plugin for GamePlugin {
             .init_resource::<ViewCentre>()
             .init_resource::<ScrollBlocked>()
             .init_resource::<RightDrag>()
-            .add_systems(OnEnter(Screen::InGame), load_map)
+            .add_systems(OnEnter(Screen::InGame), load_map.run_if(not(resource_exists::<PreparedGame>)))
+            .add_systems(OnEnter(Screen::InGame), (|mut commands: Commands| { commands.remove_resource::<PreparedGame>(); }).after(load_map))
             .add_systems(OnExit(Screen::InGame), reset_camera)
             .add_systems(
                 Update,
@@ -266,6 +271,9 @@ impl Plugin for GamePlugin {
 #[derive(Resource)]
 pub(crate) struct DrawnCountry(pub usize);
 
+#[derive(Resource)]
+pub(crate) struct DrawnColour(pub usize);
+
 pub(crate) fn load_map(
     mut commands: Commands,
     files: Res<GameFiles>,
@@ -276,15 +284,17 @@ pub(crate) fn load_map(
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut next_screen: ResMut<NextState<Screen>>,
-    drawn: Option<Res<DrawnCountry>>,
+    (drawn, drawn_colour): (Option<Res<DrawnCountry>>, Option<Res<DrawnColour>>),
     mut meshes: ResMut<Assets<Mesh>>,
     mut ground: ResMut<Assets<crate::depth::GroundMaterial>>,
 ) {
     // A random country or colour is settled now, or for the country, on the
     // loading screen before.
-    // Any of the nine countries, any of the
+    // Any selectable country in this edition, any of the
     // eight colours. Not original behaviour: the clock as the source of chance.
     let options = setup.options;
+    let countries = files.get("rules.ini").map(ra2_formats::ini::Ini::parse)
+        .map(|rules| terrain::multiplayer_countries(&rules)).filter(|countries| !countries.is_empty()).unwrap_or_else(|| vec![0]);
     // Drawn in this order: the human's
     // country, the human's colour, then each row's country and colour; a colour
     // is drawn again until nobody has it.
@@ -300,6 +310,7 @@ pub(crate) fn load_map(
     let room = setup.max_players.saturating_sub(1);
     let rows: Vec<crate::game::Opponent> = options.opponents.iter().copied().take(room).filter(|row| row.level >= 0).collect();
     let mut colours: Vec<usize> = std::iter::once(options.colour).chain(rows.iter().map(|row| row.colour)).filter(|&c| c >= 0).map(|c| c as usize).collect();
+    if let Some(colour) = &drawn_colour { colours.push(colour.0); }
     let mut colour_for = |chosen: i32, draw: &mut dyn FnMut(usize) -> usize| {
         if chosen >= 0 {
             return chosen as usize;
@@ -321,15 +332,18 @@ pub(crate) fn load_map(
             commands.remove_resource::<DrawnCountry>();
             drawn.0
         }
-        None if options.country < 0 => draw(9),
+        None if options.country < 0 => countries[draw(countries.len())],
         None => options.country as usize,
     };
-    let colour = colour_for(options.colour, &mut draw);
+    let colour = match drawn_colour {
+        Some(colour) => { commands.remove_resource::<DrawnColour>(); colour.0 }
+        None => colour_for(options.colour, &mut draw),
+    };
     let opponents = rows
         .iter()
         .map(|row| terrain::Opponent {
             level: row.level as usize,
-            country: Some(if row.country < 0 { draw(9) } else { row.country as usize }),
+            country: Some(if row.country < 0 { countries[draw(countries.len())] } else { row.country as usize }),
             colour: Some(colour_for(row.colour, &mut draw)),
         })
         .collect();
@@ -378,6 +392,10 @@ pub(crate) fn load_map(
         scene.placements.len(),
         scene.pages.len()
     );
+    for issue in &scene.rule_diagnostics {
+        warn!(kind = ?issue.kind, object = %issue.object, key = %issue.key, value = %issue.value,
+            "rule configuration needs engine support");
+    }
 
     let mut built = crate::units::build_world(&files, &mut scene);
     let built_levels: std::collections::HashMap<(i32, i32), i32> =

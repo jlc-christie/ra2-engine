@@ -34,6 +34,13 @@ pub const HUMAN_ROW: i32 = 3;
 #[derive(Resource)]
 pub struct NetActive;
 
+/// Live session membership, for the in-game player/connection list.
+#[derive(Resource, Default, PartialEq, Eq)]
+pub(crate) struct Connections {
+    pub peers: Vec<u8>,
+    pub waiting: Option<u8>,
+}
+
 /// The house this machine's player sits at in a network game.
 #[derive(Resource, Clone, Copy)]
 pub struct NetSeat(pub u8);
@@ -389,6 +396,7 @@ pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<Connections>();
         app.insert_non_send(NetStart::default())
             .init_resource::<Lobby>()
             .add_systems(Update, arrange.run_if(not(in_state(Screen::InGame))))
@@ -397,6 +405,7 @@ impl Plugin for NetPlugin {
                 world.remove_non_send::<NetGame>();
                 world.remove_resource::<NetActive>();
                 world.remove_resource::<NetSeat>();
+                *world.resource_mut::<Connections>() = Connections::default();
                 world.non_send_mut::<NetStart>().0 = Phase::Idle;
                 let mut lobby = world.resource_mut::<Lobby>();
                 lobby.mode = LobbyMode::Off;
@@ -426,7 +435,7 @@ impl Plugin for NetPlugin {
 }
 
 /// Arranges a game from the menus: the host's lobby, or a joiner's place in it.
-fn arrange(mut commands: Commands, mut start: NonSendMut<NetStart>, mut lobby: ResMut<Lobby>, mut setup: ResMut<GameSetup>, mut next: ResMut<NextState<Screen>>) {
+fn arrange(mut commands: Commands, files: Res<crate::files::GameFiles>, mut start: NonSendMut<NetStart>, mut lobby: ResMut<Lobby>, mut setup: ResMut<GameSetup>, mut next: ResMut<NextState<Screen>>) {
     let lobby = &mut *lobby;
     let mut say = |status: &mut String, text: String| {
         if *status != text {
@@ -654,7 +663,9 @@ fn arrange(mut commands: Commands, mut start: NonSendMut<NetStart>, mut lobby: R
                     let options = &mut setup.options;
                     let taken = |colour: i32| colour >= 0 && (options.colour == colour || options.opponents.iter().enumerate().any(|(n, row)| n + 1 != client.row && row.level >= 0 && row.colour == colour));
                     let colour = if (-2..8).contains(&asked.colour) && asked.colour != -1 && !taken(asked.colour) { asked.colour } else { options.opponents[client.row - 1].colour };
-                    let country = if asked.country == -2 || (0..9).contains(&asked.country) { asked.country } else { options.opponents[client.row - 1].country };
+                    let selectable = files.get("rules.ini").map(ra2_formats::ini::Ini::parse)
+                        .map(|rules| crate::terrain::multiplayer_countries(&rules)).unwrap_or_default();
+                    let country = if asked.country == -2 || selectable.contains(&(asked.country as usize)) { asked.country } else { options.opponents[client.row - 1].country };
                     options.opponents[client.row - 1] = crate::game::Opponent { level: HUMAN_ROW, country, colour };
                     client.sent = None;
                 }
@@ -881,6 +892,7 @@ fn step(
     mut status: MessageWriter<crate::bar::Status>,
     mut said: Local<Option<String>>,
     lobby: Res<Lobby>,
+    mut connections: ResMut<Connections>,
 ) {
     let who = |house: u8| lobby.house_names.get(house as usize).filter(|name| !name.is_empty()).cloned().unwrap_or_else(|| format!("player {house}"));
     let Some(mut net) = net else {
@@ -905,6 +917,15 @@ fn step(
     };
     let Sim(world, _, log) = &mut *sim;
     let result = net.session.step(now, &mut Lockstep(world, log));
+    let waiting = match result {
+        Step::Wait { house, .. } => Some(house),
+        Step::Idle => connections.waiting,
+        _ => None,
+    };
+    connections.set_if_neq(Connections {
+        peers: if matches!(result, Step::Ended(_) | Step::OutOfSync { .. }) { Vec::new() } else { net.session.peers() },
+        waiting,
+    });
     if matches!(result, Step::Run) {
         crate::units::debug_orders(&mut sim);
     }

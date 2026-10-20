@@ -147,7 +147,7 @@ pub fn in_range(world: &World, me: Target, target: Aim, mods: Mods) -> bool {
 /// selection.
 pub fn for_object(world: &World, me: Target, object: Target, alone: bool, selected: bool, mods: Mods) -> Action {
     let mods = mods.settled();
-    if owner_of(world, me) != Some(local()) {
+    if owner_of(world, me) != Some(local()) || matches!(me, Target::Unit(id) if world.is_enslaved(id)) {
         return Action::None;
     }
     let base = techno_object(world, me, object, alone, selected, mods);
@@ -244,7 +244,7 @@ fn infantry_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Ac
         // Steps 7 and 8: a hospital for the hurt, an armory for those not yet
         // elite. (Tested here, ahead of the occupier's rule, because the
         // simulation answers both through one question.)
-        if !mods.ctrl && world.entry_action(unit.id, building) == Some(Entry::Treat) {
+        if !mods.ctrl && matches!(world.entry_action(unit.id, building), Some(Entry::Treat | Entry::Absorb | Entry::Grind)) {
             return Action::Enter;
         }
         // Step 3: a building it can go into and fire from, unless forcing fire.
@@ -334,6 +334,9 @@ fn vehicle_object(world: &World, unit: &ra2_sim::Unit, object: Target, base: Act
     }
     // Step 3: a friendly building that will take it.
     if let Target::Building(id) = object {
+        if matches!(world.entry_action(unit.id, id), Some(Entry::Absorb | Entry::Grind)) {
+            return Action::Enter;
+        }
         let takes = world.buildings().iter().find(|b| b.id == id).is_some_and(|b| {
             b.owner == unit.owner
                 && unit.stats.harvester
@@ -427,7 +430,7 @@ fn building_object(world: &World, id: u32, base: Action) -> Action {
 // game as played show "cannot move" over ground it cannot enter, which is kept.
 pub fn for_cell(world: &World, me: Target, cell: (i32, i32), mods: Mods) -> Action {
     let mods = mods.settled();
-    if owner_of(world, me) != Some(local()) {
+    if owner_of(world, me) != Some(local()) || matches!(me, Target::Unit(id) if world.is_enslaved(id)) {
         return Action::None;
     }
     match me {
@@ -463,7 +466,7 @@ pub fn for_cell(world: &World, me: Target, cell: (i32, i32), mods: Mods) -> Acti
                 return Action::NoMove;
             }
             // A miner over ore it can reach digs.
-            if a == Action::Move && unit.stats.harvester && world.map.ore_at(cell.0, cell.1).is_some() {
+            if a == Action::Move && (unit.stats.harvester || world.is_slave_miner(id)) && world.map.ore_at(cell.0, cell.1).is_some() {
                 return Action::Harvest;
             }
             a

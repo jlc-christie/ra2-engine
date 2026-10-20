@@ -5,7 +5,7 @@
 //! and (mind control, the parasite class, dogs).
 //!
 
-use crate::combat::{Aim, Event, FireError, Fighter, Warhead};
+use crate::combat::{Aim, Event, FireError, Fighter, Warhead, Weapon};
 use crate::path::code;
 use crate::{entry_code, Other, Unit, World, LEPTONS_PER_CELL};
 
@@ -143,11 +143,13 @@ pub struct Rules {
     pub ivan_damage: i32,
     pub ivan_warhead: u16,
     pub ivan_delay: u32,
+    /// Yuri's Revenge overload bands: maximum controlled count, damage, ticks.
+    pub mind_overload: Vec<(u32, i32, u32)>,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { death_weapon: None, disguises: [None; 2], mirage_looks: 0, infantry_blink: 20, c4_warhead: None, spy_blackout: 1000, spy_steal: 0.5, build_tech: Vec::new(), prism_type: None, prism_max: 8, prism_modifier: 1.5, prism_delay: 60, ivan_damage: 400, ivan_warhead: 0, ivan_delay: 450 }
+        Self { death_weapon: None, disguises: [None; 2], mirage_looks: 0, infantry_blink: 20, c4_warhead: None, spy_blackout: 1000, spy_steal: 0.5, build_tech: Vec::new(), prism_type: None, prism_max: 8, prism_modifier: 1.5, prism_delay: 60, ivan_damage: 400, ivan_warhead: 0, ivan_delay: 450, mind_overload: Vec::new() }
     }
 }
 
@@ -171,7 +173,7 @@ impl World {
         }
         if warhead.mind_control {
             let free = match target {
-                Aim::Unit(id) => self.unit(id).is_some_and(|unit| !unit.stats.fighter.immune_to_psionics && unit.controlled_by.is_none()),
+                Aim::Unit(id) => self.unit(id).is_some_and(|unit| !unit.stats.fighter.immune_to_psionics && unit.controlled_by.is_none() && !unit.permanently_controlled),
                 _ => false,
             };
             if !free {
@@ -192,7 +194,7 @@ impl World {
 
     /// What a hit by one of these weapons does instead of damage. Returns whether
     /// it was one of them.
-    pub(crate) fn special_hit(&mut self, warhead: &Warhead, by: Option<Aim>, house: u8, target: Aim) -> bool {
+    pub(crate) fn special_hit(&mut self, warhead: &Warhead, by: Option<Aim>, house: u8, target: Aim, weapon: &Weapon) -> bool {
         if warhead.ivan_bomb {
             // Planted only by a foot soldier, on a
             // thing with no bomb yet; it goes off `IvanTimedDelay` later.
@@ -226,8 +228,8 @@ impl World {
             return true;
         }
         if warhead.mind_control {
-            if let (Some(Aim::Unit(controller)), Aim::Unit(victim)) = (by, target) {
-                self.capture_mind(controller, victim);
+            if let (Some(Aim::Unit(controller) | Aim::Building(controller)), Aim::Unit(victim)) = (by, target) {
+                self.capture_mind(controller, victim, weapon.damage, weapon.infinite_mind_control);
             }
             return true;
         }
@@ -458,7 +460,7 @@ impl World {
         } else if rules.build_tech.contains(&which) {
             let side = self.houses.get(victim as usize).map_or(0, |h| h.side);
             if let Some(house) = self.houses.get_mut(spy as usize) {
-                house.stolen[if side == 0 { 1 } else { 0 }] = true;
+                match side { 0 => house.stolen[1] = true, 1 => house.stolen[0] = true, 2 => house.third_stolen = true, _ => {} }
             }
             4
         } else if kind.storage > 0 {
@@ -487,40 +489,121 @@ impl World {
     }
 
     /// A controller takes a victim.
-    // The one it held before is
-    // let go first, always; the victim joins the controller's house, forgets
-    // where it was going and what it was shooting, and stands guard.
-    fn capture_mind(&mut self, controller: u32, victim: u32) {
-        let Some(owner) = self.unit(controller).map(|unit| unit.owner) else {
-            return;
-        };
-        self.release_mind(controller);
-        let free = self.unit(victim).is_some_and(|unit| unit.owner != owner && unit.controlled_by.is_none() && !unit.stats.fighter.immune_to_psionics);
-        if !free {
-            return;
+    fn mind_controller_owner(&self, id: u32) -> Option<u8> {
+        self.unit(id).filter(|u| u.health > 0).map(|u| u.owner).or_else(|| self.buildings.iter().find(|b| b.id == id && b.health > 0 && self.online(b)).map(|b| b.owner))
+    }
+
+    /// All temporary links, including passengers currently off the map.
+    pub fn mind_controlled_units(&self, controller: u32) -> Vec<u32> {
+        fn visit(unit: &Unit, controller: u32, ids: &mut Vec<u32>) {
+            if unit.health > 0 && unit.controlled_by.is_some_and(|(id, _)| id == controller) { ids.push(unit.id); }
+            for child in unit.cargo.iter().chain(&unit.parasite) { visit(child, controller, ids); }
         }
+        let mut ids = Vec::new();
+        for unit in &self.units { visit(unit, controller, &mut ids); }
+        for building in &self.buildings {
+            for unit in building.occupants.iter().chain(building.patients.iter().map(|(_, unit)| unit)) { visit(unit, controller, &mut ids); }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    fn stored_unit_mut(&mut self, id: u32) -> Option<&mut Unit> {
+        fn find(unit: &mut Unit, id: u32) -> Option<&mut Unit> {
+            if unit.id == id { return Some(unit); }
+            for child in unit.cargo.iter_mut().chain(&mut unit.parasite) {
+                if let Some(found) = find(child, id) { return Some(found); }
+            }
+            None
+        }
+        for unit in &mut self.units { if let Some(found) = find(unit, id) { return Some(found); } }
+        for building in &mut self.buildings {
+            for unit in building.occupants.iter_mut().chain(building.patients.iter_mut().map(|(_, unit)| unit)) {
+                if let Some(found) = find(unit, id) { return Some(found); }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn refresh_mind_controller(&mut self, controller: u32) {
+        let victims = self.mind_controlled_units(controller);
+        let first = victims.first().copied();
+        let count = victims.len() as u32;
+        let overloaded = self.ability_rules.mind_overload.iter().find(|(upper, _, _)| count <= *upper).or_else(|| self.ability_rules.mind_overload.last()).is_some_and(|(_, damage, _)| *damage > 0);
+        if let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
+            unit.controls = first;
+            if first.is_none() || !overloaded { unit.mind_overload_at = 0; }
+        }
+    }
+
+    /// Forget one victim without releasing the controller's other victims.
+    pub(crate) fn detach_mind_control(&mut self, victim: u32) {
+        let controller = self.stored_unit_mut(victim).and_then(|unit| unit.controlled_by.take()).map(|(id, _)| id);
+        if let Some(controller) = controller { self.refresh_mind_controller(controller); }
+    }
+
+    pub(crate) fn can_capture_mind(&self, controller: u32, victim: u32, capacity: i32, infinite: bool) -> bool {
+        let Some(owner) = self.mind_controller_owner(controller) else { return false };
+        let free = self.unit(victim).is_some_and(|unit| unit.health > 0 && unit.owner != owner && unit.controlled_by.is_none() && !unit.permanently_controlled && !unit.stats.fighter.immune_to_psionics);
+        free && (infinite || capacity == 1 || (capacity > 0 && self.mind_controlled_units(controller).len() < capacity as usize))
+    }
+
+    fn capture_mind(&mut self, controller: u32, victim: u32, capacity: i32, infinite: bool) {
+        if !self.can_capture_mind(controller, victim, capacity, infinite) { return; }
+        let owner = self.mind_controller_owner(controller).unwrap();
+        // Preserve the single-link Yuri's replacement behaviour. Multi-link
+        // towers retain their existing links until one is freed.
+        if !infinite && capacity == 1 { self.release_mind(controller); }
+        self.release_mind(victim);
         if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim) {
             unit.controlled_by = Some((controller, unit.owner));
             unit.owner = owner;
         }
         self.changed_sides(victim);
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
-            unit.controls = Some(victim);
-        }
+        self.refresh_mind_controller(controller);
+        self.run_mind_overload(controller);
         self.events.push(Event::MindControlled { controller, victim });
     }
 
     /// A controller lets go of whatever it holds, which goes back to its house.
     pub(crate) fn release_mind(&mut self, controller: u32) {
-        let Some(victim) = self.units.iter_mut().find(|u| u.id == controller).and_then(|unit| unit.controls.take()) else {
-            return;
-        };
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim) {
-            if let Some((_, home)) = unit.controlled_by.take() {
-                unit.owner = home;
+        let victims = self.mind_controlled_units(controller);
+        for victim in victims {
+            if let Some(unit) = self.stored_unit_mut(victim) {
+                if let Some((_, home)) = unit.controlled_by.take() { unit.owner = home; }
             }
+            self.changed_sides(victim);
         }
+        self.refresh_mind_controller(controller);
+    }
+
+    /// Psychic Dominator captures persist after the super weapon ends and are
+    /// immune to an ordinary controller taking another temporary link.
+    pub(crate) fn permanently_control_unit(&mut self, victim: u32, owner: u8) -> bool {
+        if owner as usize >= self.houses.len() || !self.unit(victim).is_some_and(|u| u.health > 0 && !u.stats.fighter.immune_to_psionics) { return false; }
+        self.release_mind(victim);
+        self.detach_mind_control(victim);
+        if let Some(unit) = self.units.iter_mut().find(|u| u.id == victim) { unit.owner = owner; unit.permanently_controlled = true; }
         self.changed_sides(victim);
+        true
+    }
+
+    fn run_mind_overload(&mut self, controller: u32) {
+        let weapon = self.unit(controller).and_then(|u| [u.stats.fighter.primary, u.stats.fighter.secondary].into_iter().flatten().find_map(|m| self.weapons.get(m.weapon as usize).filter(|w| w.infinite_mind_control))).cloned();
+        let Some(weapon) = weapon else { return };
+        let count = self.mind_controlled_units(controller).len() as u32;
+        let band = self.ability_rules.mind_overload.iter().find(|(upper, _, _)| count <= *upper).or_else(|| self.ability_rules.mind_overload.last()).copied();
+        let Some((_, damage, frames)) = band else { return };
+        let tick = self.tick;
+        let Some(unit) = self.units.iter_mut().find(|u| u.id == controller && u.health > 0) else { return };
+        if damage <= 0 || count == 0 { unit.mind_overload_at = 0; return; }
+        if unit.mind_overload_at == 0 { unit.mind_overload_at = tick + frames.max(1) as u64; return; }
+        if tick < unit.mind_overload_at { return; }
+        unit.mind_overload_at = tick + frames.max(1) as u64;
+        let warhead = self.ability_rules.c4_warhead.unwrap_or(weapon.warhead);
+        self.receive_damage(Aim::Unit(controller), damage, 0, warhead, None);
+        self.events.push(Event::MindOverload { controller, count, damage });
     }
 
     /// What goes with a unit passing to another house.
@@ -994,21 +1077,27 @@ impl World {
             self.receive_damage(Aim::Unit(host), damage, 0, weapon.warhead, Some(source));
         }
 
-        // A victim that has gone is forgotten; a controller that has gone frees.
-        let gone: Vec<u32> = self.units.iter().filter(|u| u.controls.is_some_and(|victim| self.unit(victim).is_none())).map(|u| u.id).collect();
-        for id in gone {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
-                unit.controls = None;
-            }
+        // Reconcile every link, including off-map passengers. A missing first
+        // victim must not discard a Master's other links.
+        fn links(unit: &Unit, controllers: &mut Vec<u32>) {
+            if unit.controls.is_some() { controllers.push(unit.id); }
+            if let Some((controller, _)) = unit.controlled_by { controllers.push(controller); }
+            for child in unit.cargo.iter().chain(&unit.parasite) { links(child, controllers); }
         }
-        let orphans: Vec<u32> = self.units.iter().filter(|u| u.controlled_by.is_some_and(|(controller, _)| self.unit(controller).is_none())).map(|u| u.id).collect();
-        for id in orphans {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
-                if let Some((_, home)) = unit.controlled_by.take() {
-                    unit.owner = home;
-                    unit.arms.target = None;
-                }
-            }
+        let mut controllers = Vec::new();
+        for unit in &self.units { links(unit, &mut controllers); }
+        for building in &self.buildings {
+            for unit in building.occupants.iter().chain(building.patients.iter().map(|(_, unit)| unit)) { links(unit, &mut controllers); }
+        }
+        controllers.sort_unstable();
+        controllers.dedup();
+        for controller in controllers {
+            let owner = self.mind_controller_owner(controller);
+            // An engineer or script can transfer a psychic tower without
+            // going through capture_mind. Its old links must not stay behind.
+            let changed_owner = owner.is_some_and(|owner| self.mind_controlled_units(controller).into_iter().any(|victim| self.stored_unit_mut(victim).is_some_and(|unit| unit.owner != owner)));
+            if owner.is_none() || changed_owner { self.release_mind(controller); }
+            else { self.refresh_mind_controller(controller); self.run_mind_overload(controller); }
         }
     }
 
@@ -1036,21 +1125,8 @@ impl World {
             self.explode(point, damage, warhead, bomb.owner.filter(|&id| self.unit(id).is_some()).map(Aim::Unit));
             self.blast_event(warhead, damage, point, false);
         }
-        if let Some(controller) = dead.controlled_by.map(|(controller, _)| controller) {
-            if let Some(unit) = self.units.iter_mut().find(|u| u.id == controller) {
-                unit.controls = None;
-            }
-        }
-        if dead.controls.is_some() {
-            let id = dead.id;
-            // The dead unit is already off the list: free its victim directly.
-            if let Some(unit) = self.units.iter_mut().find(|u| u.controlled_by.is_some_and(|(controller, _)| controller == id)) {
-                if let Some((_, home)) = unit.controlled_by.take() {
-                    unit.owner = home;
-                    unit.arms.target = None;
-                }
-            }
-        }
+        if let Some(controller) = dead.controlled_by.map(|(controller, _)| controller) { self.refresh_mind_controller(controller); }
+        self.release_mind(dead.id);
         if let Some(spawner) = dead.spawner.take() {
             self.orphan_spawns(&spawner);
         }
@@ -1097,5 +1173,225 @@ impl World {
         for id in out {
             self.scatter_unit(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod mind_control_tests {
+    use super::*;
+    use crate::{BuildingType, House, Map, UnitStats, UnitType};
+    use crate::combat::{Arms, Mount, Projectile, Warhead, Weapon};
+
+    fn field(count: usize) -> (World, u32, Vec<u32>) {
+        let mut map = Map::new(32, 32);
+        for y in 0..32 { for x in 0..32 { map.set_cell(x, y, true, 0); } }
+        let mut world = World::new(map, None);
+        world.houses = vec![House::default(), House::default(), House::default()];
+        world.weapons = vec![Weapon { damage: 3, infinite_mind_control: true, range: 256, rof: 10, fire_once: true, ..Weapon::default() }];
+        world.warheads = vec![Warhead { mind_control: true, ..Warhead::default() }];
+        world.ability_rules.mind_overload = vec![(3, 0, 30), (6, 50, 60), (10, 100, 60), (50, 500, 60)];
+        world.unit_types = vec![UnitType { cost: 200, soylent: Some(75), size: 1, ..UnitType::default() }];
+        let stats = UnitStats { strength: 2000, fighter: Fighter { primary: Some(Mount { weapon: 0, ..Mount::default() }), ..Fighter::default() }, ..UnitStats::default() };
+        let controller = world.add_unit((2, 2), 0, stats, 1);
+        let victims = (0..count).map(|i| world.add_unit((12 + i as i32 % 16, 12 + i as i32 / 16), 0, UnitStats { strength: 100, kind: 1, ..UnitStats::default() }, 2)).collect();
+        (world, controller, victims)
+    }
+
+    fn take(world: &mut World, controller: u32, victims: &[u32]) {
+        for &victim in victims { world.capture_mind(controller, victim, 3, true); }
+    }
+
+    fn advance(world: &mut World, frames: usize) {
+        for _ in 0..frames { world.tick(); }
+    }
+
+    #[test]
+    fn real_weapon_hits_use_infinite_flag_and_allow_a_building_controller() {
+        let (mut world, controller, victims) = field(8);
+        world.projectiles = vec![Projectile { inviso: true, ..Projectile::default() }];
+        let fighter = world.unit(controller).unwrap().stats.fighter;
+        let mut arms = Arms::default();
+        for &victim in &victims[..4] {
+            let from = world.aim_point(Aim::Unit(controller)).unwrap();
+            assert!(world.fire(Aim::Unit(controller), from, 0, 0, 1, &fighter, &mut arms, Aim::Unit(victim), 0));
+            advance(&mut world, 1);
+            assert_eq!(world.unit(victim).unwrap().health, 100, "a mind-control hit must not apply Damage=3 as ordinary damage");
+        }
+        assert_eq!(world.mind_controlled_units(controller), victims[..4]);
+        world.weapons[0].infinite_mind_control = false;
+        world.building_types = vec![BuildingType { strength: 100, size: (1, 1), ..BuildingType::default() }];
+        world.add_building(1, 0, (4, 4));
+        let tower = world.buildings[0].id;
+        for (index, &victim) in victims[4..].iter().enumerate() {
+            let from = world.aim_point(Aim::Building(tower)).unwrap();
+            assert_eq!(world.fire(Aim::Building(tower), from, 0, 0, 1, &fighter, &mut arms, Aim::Unit(victim), 0), index < 3);
+            advance(&mut world, 1);
+        }
+        assert_eq!(world.mind_controlled_units(tower), victims[4..7]);
+        assert_eq!(world.unit(victims[7]).unwrap().owner, 2);
+    }
+
+    #[test]
+    fn infinite_controller_keeps_every_link_and_single_yuri_replaces_only_on_a_valid_hit() {
+        let (mut world, controller, victims) = field(5);
+        take(&mut world, controller, &victims[..4]);
+        assert_eq!(world.mind_controlled_units(controller), victims[..4]);
+        for &id in &victims[..4] {
+            let unit = world.unit(id).unwrap();
+            assert_eq!((unit.owner, unit.controlled_by), (1, Some((controller, 2))));
+        }
+        world.units.iter_mut().find(|u| u.id == victims[4]).unwrap().stats.fighter.immune_to_psionics = true;
+        world.capture_mind(controller, victims[4], 1, false);
+        assert_eq!(world.mind_controlled_units(controller), victims[..4], "a rejected hit cannot drop existing links");
+        world.units.iter_mut().find(|u| u.id == victims[4]).unwrap().stats.fighter.immune_to_psionics = false;
+        world.capture_mind(controller, victims[4], 1, false);
+        assert_eq!(world.mind_controlled_units(controller), vec![victims[4]]);
+        for &id in &victims[..4] { assert_eq!(world.unit(id).unwrap().owner, 2); }
+    }
+
+    #[test]
+    fn psychic_tower_capacity_is_freed_by_a_victim_death_and_power_loss_releases_all() {
+        let (mut world, _, victims) = field(4);
+        world.building_types = vec![BuildingType { strength: 100, size: (1, 1), powered: true, power: -100, ..BuildingType::default() }, BuildingType { strength: 100, size: (1, 1), power: 100, ..BuildingType::default() }];
+        world.add_building(1, 0, (4, 4));
+        world.add_building(1, 1, (6, 6));
+        let tower = world.buildings[0].id;
+        for &victim in &victims { world.capture_mind(tower, victim, 3, false); }
+        assert_eq!(world.mind_controlled_units(tower), victims[..3]);
+        world.receive_damage(Aim::Unit(victims[0]), 100, 0, 0, None);
+        world.capture_mind(tower, victims[3], 3, false);
+        assert_eq!(world.mind_controlled_units(tower), victims[1..]);
+        world.buildings[1].health = 0;
+        world.run_abilities();
+        assert!(world.mind_controlled_units(tower).is_empty());
+        for &id in &victims[1..] { assert_eq!(world.unit(id).unwrap().owner, 2); }
+    }
+
+    #[test]
+    fn capturing_a_psychic_tower_releases_its_previous_owners_links() {
+        let (mut world, _, victims) = field(3);
+        world.building_types = vec![BuildingType { strength: 100, size: (1, 1), ..BuildingType::default() }];
+        world.add_building(1, 0, (4, 4));
+        let tower = world.buildings[0].id;
+        for &victim in &victims { world.capture_mind(tower, victim, 3, false); }
+        world.buildings[0].owner = 2;
+        world.run_abilities();
+        assert!(world.mind_controlled_units(tower).is_empty());
+        for &victim in &victims {
+            let unit = world.unit(victim).unwrap();
+            assert_eq!((unit.owner, unit.controlled_by), (2, None));
+        }
+    }
+
+    #[test]
+    fn overload_uses_the_stock_upper_bound_bands_and_exact_frame_delay() {
+        for (count, damage) in [(3, 0), (4, 50), (6, 50), (7, 100), (10, 100), (11, 500), (51, 500)] {
+            let (mut world, controller, victims) = field(count);
+            take(&mut world, controller, &victims);
+            advance(&mut world, 59);
+            assert_eq!(world.unit(controller).unwrap().health, 2000, "count {count} before the damage frame");
+            advance(&mut world, 1);
+            assert_eq!(world.unit(controller).unwrap().health, 2000 - damage, "count {count} at the damage frame");
+            assert_eq!(world.events.iter().filter(|e| matches!(e, Event::MindOverload { .. })).count(), usize::from(damage != 0));
+        }
+    }
+
+    #[test]
+    fn returning_to_three_cancels_the_timer_and_a_new_overload_gets_a_full_delay() {
+        let (mut world, controller, victims) = field(5);
+        take(&mut world, controller, &victims[..4]);
+        advance(&mut world, 40);
+        world.receive_damage(Aim::Unit(victims[0]), 100, 0, 0, None);
+        // A dead victim no longer contributes even before the burial pass.
+        world.refresh_mind_controller(controller);
+        assert_eq!(world.unit(controller).unwrap().mind_overload_at, 0);
+        advance(&mut world, 40);
+        world.capture_mind(controller, victims[4], 3, true);
+        advance(&mut world, 59);
+        assert_eq!(world.unit(controller).unwrap().health, 2000);
+        advance(&mut world, 1);
+        assert_eq!(world.unit(controller).unwrap().health, 1950);
+    }
+
+    #[test]
+    fn fatal_overload_releases_every_surviving_victim_in_the_same_tick() {
+        let (mut world, controller, victims) = field(11);
+        world.units.iter_mut().find(|u| u.id == controller).unwrap().health = 400;
+        take(&mut world, controller, &victims);
+        advance(&mut world, 60);
+        assert!(world.unit(controller).is_none());
+        assert!(world.mind_controlled_units(controller).is_empty());
+        for &id in &victims {
+            let unit = world.unit(id).unwrap();
+            assert_eq!((unit.owner, unit.controlled_by), (2, None));
+        }
+    }
+
+    #[test]
+    fn grinding_one_victim_preserves_the_others_and_controller_death_restores_them() {
+        let (mut world, controller, victims) = field(4);
+        take(&mut world, controller, &victims);
+        world.building_types = vec![BuildingType { strength: 100, size: (2, 2), grinding: true, ..BuildingType::default() }];
+        world.add_building(1, 0, (12, 12));
+        let grinder = world.buildings[0].id;
+        world.units.iter_mut().find(|u| u.id == victims[0]).unwrap().capture = Some(grinder);
+        let credits = world.houses[1].credits;
+        world.enter_buildings();
+        assert!(world.unit(victims[0]).is_none());
+        assert_eq!(world.houses[1].credits, credits + 75);
+        assert_eq!(world.mind_controlled_units(controller), victims[1..]);
+        assert_eq!(world.unit(controller).unwrap().controls, Some(victims[1]));
+        world.receive_damage(Aim::Unit(controller), 2000, 0, 0, None);
+        advance(&mut world, 1);
+        for &id in &victims[1..] {
+            let unit = world.unit(id).unwrap();
+            assert_eq!((unit.owner, unit.controlled_by), (2, None));
+        }
+    }
+
+    #[test]
+    fn permanent_capture_is_not_a_temporary_controller_link() {
+        let (mut world, controller, victims) = field(2);
+        take(&mut world, controller, &victims);
+        assert!(world.permanently_control_unit(victims[0], 1));
+        assert_eq!(world.mind_controlled_units(controller), vec![victims[1]]);
+        let enemy_controller = world.add_unit((6, 6), 0, UnitStats::default(), 2);
+        assert!(!world.can_capture_mind(enemy_controller, victims[0], 3, true));
+        world.receive_damage(Aim::Unit(controller), 2000, 0, 0, None);
+        advance(&mut world, 1);
+        let permanent = world.unit(victims[0]).unwrap();
+        assert_eq!((permanent.owner, permanent.controlled_by, permanent.permanently_controlled), (1, None, true));
+        assert_eq!(world.unit(victims[1]).unwrap().owner, 2);
+    }
+
+    #[test]
+    fn controlled_passengers_still_count_for_overload_and_are_released_off_map() {
+        let (mut world, controller, victims) = field(4);
+        take(&mut world, controller, &victims);
+        let passenger_index = world.units.iter().position(|u| u.id == victims[0]).unwrap();
+        let passenger = world.lift(passenger_index);
+        let carrier = world.add_unit((8, 8), 0, UnitStats::default(), 1);
+        world.units.iter_mut().find(|u| u.id == carrier).unwrap().cargo.push(passenger);
+        assert_eq!(world.mind_controlled_units(controller), victims);
+        advance(&mut world, 60);
+        assert_eq!(world.unit(controller).unwrap().health, 1950);
+        world.receive_damage(Aim::Unit(controller), 2000, 0, 0, None);
+        advance(&mut world, 1);
+        let passenger = &world.unit(carrier).unwrap().cargo[0];
+        assert_eq!((passenger.owner, passenger.controlled_by), (2, None));
+    }
+
+    #[test]
+    fn snapshot_keeps_links_and_the_partly_elapsed_overload_timer() {
+        let (mut world, controller, victims) = field(7);
+        take(&mut world, controller, &victims);
+        advance(&mut world, 23);
+        let saved = world.snapshot();
+        let (mut restored, _, _) = field(7);
+        restored.restore(&saved).unwrap();
+        advance(&mut world, 100);
+        advance(&mut restored, 100);
+        assert_eq!(world.state_hashes(), restored.state_hashes());
+        assert_eq!(world.unit(controller).unwrap().health, 1800);
     }
 }

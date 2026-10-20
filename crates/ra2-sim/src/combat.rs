@@ -136,6 +136,8 @@ impl Default for Projectile {
 #[derive(Clone, Debug)]
 pub struct Weapon {
     pub damage: i32,
+    /// Yuri's Revenge `InfiniteMindControl`: no link cap; overload rules apply.
+    pub infinite_mind_control: bool,
     /// Frames between shots.
     pub rof: i32,
     /// `Range` and `MinimumRange` in leptons; a range of -512 is "anywhere".
@@ -178,6 +180,7 @@ impl Default for Weapon {
         Self {
             fake_blink: 0,
             damage: 0,
+            infinite_mind_control: false,
             rof: 0,
             range: 0,
             minimum_range: 0,
@@ -412,6 +415,10 @@ pub enum Entry {
     Treat,
     /// An engineer into a bridge repair hut.
     RepairBridge,
+    /// Enter a Yuri's Revenge building as a power-producing passenger.
+    Absorb,
+    /// Recycle a friendly unit for its type's `Soylent` value.
+    Grind,
 }
 
 impl Arms {
@@ -555,6 +562,7 @@ pub enum Event {
     /// A soldier has left a plane under a parachute.
     Parachuted { unit: u32, from: u32 },
     MindControlled { controller: u32, victim: u32 },
+    MindOverload { controller: u32, count: u32, damage: i32 },
     /// An aircraft has left the ground, or come down.
     TookOff { unit: u32 },
     Landed { unit: u32 },
@@ -576,6 +584,10 @@ pub enum Event {
     /// Something was hurt: whose, where, whether a building, and whether a
     /// miner that lived through it.
     Attacked { owner: u8, at: (i32, i32), building: bool, miner: bool },
+    /// An MCV has stopped and begun turning to its deployment facing.
+    DeployTurning { unit: u32, kind: u16, owner: u8, at: (i32, i32, i32) },
+    /// An MCV became its building; the buildup animation starts now.
+    Deployed { unit: u32, kind: u16, owner: u8, at: (i32, i32, i32) },
 }
 
 /// Fire-test answers.
@@ -998,6 +1010,11 @@ impl World {
         let Some(weapon) = self.weapons.get(mount.weapon as usize).cloned() else {
             return false;
         };
+        if self.warheads.get(weapon.warhead as usize).is_some_and(|w| w.mind_control) {
+            if let (Aim::Unit(controller) | Aim::Building(controller), Aim::Unit(victim)) = (by, target) {
+                if !self.can_capture_mind(controller, victim, weapon.damage, weapon.infinite_mind_control) { return false; }
+            }
+        }
         let Some(projectile) = self.projectiles.get(weapon.projectile as usize).cloned() else {
             return false;
         };
@@ -1359,6 +1376,7 @@ impl World {
         if dead {
             self.record_kill(victim, source);
             self.score_kill(victim, source);
+            self.slave_host_died(victim, source.and_then(|who| self.owner_of(who)));
         }
         if let (Some(owner), Some(at)) = (self.owner_of(victim), self.aim_point(victim)) {
             let miner = !dead && matches!(victim, Aim::Unit(id) if self.unit(id).is_some_and(|unit| unit.stats.harvester));
@@ -1758,6 +1776,23 @@ impl World {
         let unit = self.unit(unit)?;
         let building = self.buildings.iter().find(|b| b.id == building && b.buildup.is_none())?;
         let kind = self.building_types.get(building.kind as usize)?;
+        // Utility buildings take the owner's ground units, including ordinary
+        // occupiers; those must not fall through to the garrison-only branch.
+        if unit.owner == building.owner && unit.health > 0 && self.altitude(unit) == 0 && unit.stats.plane.is_none() && unit.stance == Stance::Standing && self.online(building) {
+            if kind.grinding && unit.cargo.is_empty() && unit.parasite.is_empty() {
+                return Some(Entry::Grind);
+            }
+            let absorbs = if unit.stats.infantry { kind.infantry_absorb } else { kind.unit_absorb };
+            let size = self.kind_of(unit).map_or(1, |k| k.size.max(1));
+            let aboard: i32 = building.occupants.iter().map(|u| self.kind_of(u).map_or(1, |k| k.size.max(1))).sum();
+            // Off-map controlled passengers need capture-manager ownership
+            // transfer, which the current single-target mind control lacks.
+            // Tank bunkers also use UnitAbsorb, but need a separate mounted
+            // passenger weapon system rather than this power-plant path.
+            if absorbs && kind.extra_power > 0 && unit.controlled_by.is_none() && size <= kind.size_limit && aboard + size <= kind.passengers {
+                return Some(Entry::Absorb);
+            }
+        }
         // A soldier into an allied `Hospital` when hurt, or into an allied
         // `Armory` when not yet elite; the building must be working and, where
         // its type counts uses (`Ammo`), have some left.
@@ -1846,32 +1881,46 @@ impl World {
             entry_code(&world.map, &world.claims, (&world.spots, &world.spot_house), &others, &world.buildings, who, cell, None, cell, -1) == code::OK
         };
         let Some(exit) = order.iter().copied().find(|&cell| free(self, &occupants[0], cell)) else {
+            self.buildings[index].occupants = occupants;
             return;
         };
         let mut cells = vec![exit];
         cells.extend(crate::path::DIRECTIONS.iter().map(|d| (exit.0 + d.0, exit.1 + d.1)));
         let mut out = Vec::new();
+        let mut blocked = Vec::new();
         while let Some(mut soldier) = occupants.pop() {
             let place = cells.iter().copied().find_map(|cell| {
                 let at = self.map.index(cell.0, cell.1)?;
                 if !free(self, &soldier, cell) {
                     return None;
                 }
-                (2..=4usize).find(|spot| self.spots[at] & (1 << spot) == 0).map(|spot| (cell, at, spot))
+                if soldier.stats.infantry {
+                    (2..=4usize).find(|spot| self.spots[at] & (1 << spot) == 0).map(|spot| (cell, at, Some(spot)))
+                } else {
+                    Some((cell, at, None))
+                }
             });
             let Some((cell, at, spot)) = place else {
+                blocked.push(soldier);
                 continue;
             };
-            soldier.x = cell.0 * LEPTONS_PER_CELL + crate::SPOT_OFFSETS[spot].0;
-            soldier.y = cell.1 * LEPTONS_PER_CELL + crate::SPOT_OFFSETS[spot].1;
-            self.spots[at] |= 1 << spot;
-            self.spot_house[at] = soldier.owner;
+            (soldier.x, soldier.y) = crate::cell_centre(cell);
+            if let Some(spot) = spot {
+                soldier.x = cell.0 * LEPTONS_PER_CELL + crate::SPOT_OFFSETS[spot].0;
+                soldier.y = cell.1 * LEPTONS_PER_CELL + crate::SPOT_OFFSETS[spot].1;
+                self.spots[at] |= 1 << spot;
+                self.spot_house[at] = soldier.owner;
+            } else {
+                self.claims[at] = soldier.id + 1;
+            }
             soldier.arms = Arms::default();
             soldier.dest = None;
             soldier.capture = None;
             out.push(soldier.id);
             self.put_back(soldier);
         }
+        blocked.reverse();
+        self.buildings[index].occupants = blocked;
         for id in out {
             self.scatter_unit(id);
         }
@@ -1946,6 +1995,27 @@ impl World {
                 && (building.cell.1..building.cell.1 + building.size.1).contains(&cell.1);
             let (id, owner) = (unit.id, unit.owner);
             match self.entry_action(id, target).filter(|_| near) {
+                Some(Entry::Grind) => {
+                    let Some(index) = self.units.iter().position(|u| u.id == id) else { continue };
+                    let refund = self.kind_of(&self.units[index]).map_or(0, |k| k.soylent.unwrap_or((k.cost as f64 * self.refund_percent) as i32)).max(0);
+                    self.release_mind(id);
+                    self.detach_mind_control(id);
+                    let removed = self.lift(index);
+                    if let Some(spawner) = removed.spawner { self.orphan_spawns(&spawner); }
+                    if let Some(house) = self.houses.get_mut(owner as usize) { house.credits = house.credits.saturating_add(refund); }
+                    return self.enter_buildings();
+                }
+                Some(Entry::Absorb) => {
+                    let Some(index) = self.units.iter().position(|u| u.id == id) else { continue };
+                    self.release_mind(id);
+                    let mut passenger = self.lift(index);
+                    passenger.arms = Arms::default();
+                    passenger.dest = None;
+                    passenger.head_to = None;
+                    passenger.drop_path();
+                    self.buildings[at].occupants.push(passenger);
+                    return self.enter_buildings();
+                }
                 // The building is wired to go off
                 // `C4Delay` later (27 frames), unless it is being sold; the
                 // soldier stays on the map and is sent off the building. One
@@ -2249,7 +2319,7 @@ impl World {
             }
             let at = (at.0 as i32, at.1 as i32, at.2 as i32);
             self.bullets.remove(index);
-            let special = self.warheads.get(weapon.warhead as usize).cloned().is_some_and(|warhead| self.special_hit(&warhead, bullet.owner, bullet.house, bullet.target));
+            let special = self.warheads.get(weapon.warhead as usize).cloned().is_some_and(|warhead| self.special_hit(&warhead, bullet.owner, bullet.house, bullet.target, &weapon));
             if special {
             } else if self.warheads.get(weapon.warhead as usize).is_some_and(|w| w.temporal) {
                 self.temporal_hit(bullet.owner, bullet.target);
@@ -2581,6 +2651,7 @@ impl World {
         self.enter_buildings();
         // Units.
         for index in 0..self.units.len() {
+            if self.is_enslaved(self.units[index].id) { continue; }
             // Digging in and getting up take the
             // length of their sequences.
             // A
@@ -3112,6 +3183,8 @@ impl World {
                     let Some(index) = self.units.iter().position(|u| u.id == id) else {
                         continue;
                     };
+                    self.release_mind(id);
+                    self.detach_mind_control(id);
                     self.leave_dock(index);
                     let unit = self.units.remove(index);
                     for claim in &mut self.claims {
@@ -3180,6 +3253,7 @@ impl World {
                     let Some(index) = self.buildings.iter().position(|b| b.id == id) else {
                         continue;
                     };
+                    self.release_mind(id);
                     // Those inside are put out first.
                     self.remove_occupants(index);
                     let building = self.demolish(index);

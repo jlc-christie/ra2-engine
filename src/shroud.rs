@@ -32,7 +32,7 @@ struct ShroudArt {
     frames: Vec<Option<Handle<Image>>>,
     table: Vec<i8>,
     shown: HashMap<(i32, i32), (Entity, usize)>,
-    drawn_for: Option<(u64, IVec2)>,
+    drawn_for: Option<(u64, IVec2, UVec2)>,
 }
 
 pub struct ShroudPlugin;
@@ -136,8 +136,8 @@ fn show(
     if !map.shroud_on {
         return;
     }
-    // Redrawn when the shroud changes or the view has moved a cell's worth.
-    let stamp = (map.shroud_version, (centre.0 / 30.0).round().as_ivec2());
+    // DPI changes and resizing can expose more cells without moving the view.
+    let stamp = (map.shroud_version, (centre.0 / 30.0).round().as_ivec2(), window.size().ceil().as_uvec2());
     if art.drawn_for == Some(stamp) {
         return;
     }

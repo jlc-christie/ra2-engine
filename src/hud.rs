@@ -10,6 +10,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use ra2_formats::csf::Csf;
 use ra2_formats::fnt::Font;
+use ra2_formats::ini::Ini;
 use ra2_formats::pal::Palette;
 use ra2_formats::shp::Shp;
 use ra2_sim::Order;
@@ -43,6 +44,7 @@ const STRIP_Y: f32 = 227.0;
 // tabs at a pitch of 29).
 const REPAIR_AT: (f32, f32) = (20.0, 166.0);
 const SELL_AT: (f32, f32) = (84.0, 166.0);
+const MODE_BUTTON_SIZE: Vec2 = Vec2::new(64.0, 31.0);
 const TAB_X: f32 = 26.0;
 const TAB_PITCH: f32 = 29.0;
 const TAB_Y: f32 = 197.0;
@@ -55,12 +57,98 @@ const POWER_X: f32 = 5.0;
 const DIPLOMACY_AT: (f32, f32) = (11.0, 4.0);
 const OPTIONS_AT: (f32, f32) = (83.0, 4.0);
 
+pub(crate) fn top_button_at(window: &Window, at: Vec2) -> Option<crate::pause::Menu> {
+    let at = at - Vec2::new(window.width() - SIDEBAR_WIDTH, CREDITS_HEIGHT);
+    [(DIPLOMACY_AT, crate::pause::Menu::Players), (OPTIONS_AT, crate::pause::Menu::Options)]
+        .into_iter()
+        .find(|(p, _)| contains(Rect::from_corners(Vec2::from(*p), Vec2::from(*p) + Vec2::new(72.0, 18.0)), at))
+        .map(|(_, menu)| menu)
+}
+
+/// Adjacent controls share an edge, never the pixels that receive a click.
+fn contains(rect: Rect, at: Vec2) -> bool {
+    at.x >= rect.min.x && at.y >= rect.min.y && at.x < rect.max.x && at.y < rect.max.y
+}
+
+fn mode_button_at(at: Vec2) -> Option<crate::control::Mode> {
+    [(REPAIR_AT, crate::control::Mode::Repair), (SELL_AT, crate::control::Mode::Sell)]
+        .into_iter()
+        .find(|(corner, _)| contains(Rect::from_corners(Vec2::from(*corner), Vec2::from(*corner) + MODE_BUTTON_SIZE), at))
+        .map(|(_, mode)| mode)
+}
+
 pub(crate) const PALETTE: &str = "sidebar.pal";
 const CAMEO_PALETTE: &str = "cameo.pal";
 
 /// Sidebar text colour for the first side.
 // The other side uses (255, 255, 0).
 pub(crate) const TEXT: [u8; 3] = [164, 210, 255];
+
+/// Tooltip borders follow the player's faction, independently of text language
+/// and owner remap colour. ThirdSide is a UI theme here, not a simulation mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SidebarTheme {
+    #[default]
+    Allied,
+    Soviet,
+    Yuri,
+}
+
+impl SidebarTheme {
+    fn from_side(side: &str) -> Option<Self> {
+        match side.trim().to_ascii_lowercase().as_str() {
+            "gdi" | "allied" | "allies" => Some(Self::Allied),
+            "nod" | "soviet" | "soviets" => Some(Self::Soviet),
+            "thirdside" | "yuri" => Some(Self::Yuri),
+            _ => None,
+        }
+    }
+
+    fn for_house(countries: &[Option<Self>], house: &ra2_sim::House) -> Self {
+        countries.get(house.country as usize).copied().flatten().unwrap_or(match house.side {
+            1 => Self::Soviet,
+            2 => Self::Yuri,
+            _ => Self::Allied,
+        })
+    }
+
+    fn border(self) -> Color {
+        let rgb = match self {
+            Self::Allied => TEXT,
+            Self::Soviet => [255, 96, 48],
+            Self::Yuri => [196, 112, 255],
+        };
+        Color::srgb_u8(rgb[0], rgb[1], rgb[2])
+    }
+}
+
+fn country_themes(rules: &Ini) -> Vec<Option<SidebarTheme>> {
+    rules.section("Countries").iter().map(|(_, country)| rules.get(country, "Side").and_then(SidebarTheme::from_side)).collect()
+}
+
+/// Yuri adds only these backgrounds and radar frames to the Soviet sidebar;
+/// shared buttons and strips continue to use the original Soviet resources.
+pub(crate) fn sidebar_background<'a>(files: &GameFiles, name: &'a str, side: i32) -> (&'a str, &'static str) {
+    let palette = if name.starts_with("bkgd") { "uibkgd.pal" } else { PALETTE };
+    let yuri = match name {
+        "bkgdlg.shp" => Some("bkgdlgy.shp"),
+        "bkgdmd.shp" => Some("bkgdmdy.shp"),
+        "bkgdsm.shp" => Some("bkgdsmy.shp"),
+        _ => None,
+    };
+    if files.edition() == crate::files::Edition::YuriAssets && side == 2 {
+        if let Some(yuri) = yuri.filter(|name| files.get(name).is_some() && files.get("uibkgdy.pal").is_some()) {
+            return (yuri, "uibkgdy.pal");
+        }
+    }
+    (name, palette)
+}
+
+pub(crate) fn sidebar_radar(files: &GameFiles, side: i32) -> (&'static str, &'static str) {
+    if files.edition() == crate::files::Edition::YuriAssets && side == 2 && files.get("radary.shp").is_some() && files.get("radaryuri.pal").is_some() {
+        ("radary.shp", "radaryuri.pal")
+    } else { ("radar.shp", PALETTE) }
+}
 
 /// A tooltip appears after the mouse has been still
 /// this long, in seconds.
@@ -76,6 +164,8 @@ struct Hud {
     size: Vec2,
     font: Option<Font>,
     strings: Option<Csf>,
+    theme: SidebarTheme,
+    country_themes: Vec<Option<SidebarTheme>>,
     /// How many strip rows fit.
     rows: usize,
     /// The tab on show, and which tabs had anything in them last time.
@@ -142,12 +232,200 @@ struct PowerPart;
 struct StripPart;
 #[derive(Component)]
 struct TipPart;
+#[derive(Component)]
+struct ButtonTipPart;
+#[derive(Component)]
+struct TooltipFrame;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarButton {
+    Diplomacy,
+    Options,
+    Repair,
+    Sell,
+}
+
+/// Only fallback text needs a language choice: an existing CSF label always
+/// wins. Csf does not retain its header's language code, so consult UI labels
+/// from the imported game, never the desktop language or unit/map names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TooltipLanguage {
+    English,
+    TraditionalChinese,
+    SimplifiedChinese,
+}
+
+impl TooltipLanguage {
+    fn of(strings: Option<&Csf>) -> Self {
+        for key in ["TIP:DiplomacyButton", "TIP:OptionsButton", "TIP:Repair", "GUI:Options", "GUI:LoadGame", "GUI:SaveGame", "GUI:Tooltips"] {
+            let Some(text) = strings.and_then(|strings| strings.get(key)) else { continue };
+            if text.chars().any(|ch| "鈕選項復遊戲儲載設圖體".contains(ch)) { return Self::TraditionalChinese }
+            if text.chars().any(|ch| "钮选项复游戏储载设图体".contains(ch)) { return Self::SimplifiedChinese }
+        }
+        Self::English
+    }
+}
+
+impl SidebarButton {
+    fn text(self, strings: Option<&Csf>) -> &str {
+        let (key, english, traditional, simplified) = match self {
+            Self::Diplomacy => ("TIP:DiplomacyButton", "Diplomacy Button", "外交按鈕", "外交按钮"),
+            Self::Options => ("TIP:OptionsButton", "Options Button", "選項按鈕", "选项按钮"),
+            Self::Repair => ("TIP:Repair", "Repair", "修復", "修复"),
+            Self::Sell => ("TIP:Sell", "Sell", "出售", "出售"),
+        };
+        strings.and_then(|strings| strings.get(key)).unwrap_or_else(|| match TooltipLanguage::of(strings) {
+            TooltipLanguage::English => english,
+            TooltipLanguage::TraditionalChinese => traditional,
+            TooltipLanguage::SimplifiedChinese => simplified,
+        })
+    }
+}
+
+/// All rectangles here are local to the sidebar, in logical pixels.
+fn button_tip_at(window: &Window, menu: crate::pause::Menu, at: Vec2) -> Option<(SidebarButton, Rect)> {
+    if let Some(menu) = top_button_at(window, at) {
+        let (button, corner) = match menu {
+            crate::pause::Menu::Players => (SidebarButton::Diplomacy, DIPLOMACY_AT),
+            crate::pause::Menu::Options => (SidebarButton::Options, OPTIONS_AT),
+            _ => return None,
+        };
+        let corner = Vec2::from(corner) + Vec2::new(0.0, CREDITS_HEIGHT);
+        return Some((button, Rect::from_corners(corner, corner + Vec2::new(72.0, 18.0))));
+    }
+    // Menus blank the repair and sell controls; only describe visible buttons.
+    if menu != crate::pause::Menu::Closed { return None }
+    let at = at - Vec2::new(window.width() - SIDEBAR_WIDTH, 0.0);
+    let (button, corner) = match mode_button_at(at)? {
+        crate::control::Mode::Repair => (SidebarButton::Repair, REPAIR_AT),
+        crate::control::Mode::Sell => (SidebarButton::Sell, SELL_AT),
+        _ => return None,
+    };
+    let corner = Vec2::from(corner);
+    Some((button, Rect::from_corners(corner, corner + MODE_BUTTON_SIZE)))
+}
+
+/// The same diagonal placement as a cameo tooltip, clamped inside the sidebar.
+fn tooltip_rect(anchor: Rect, size: Vec2, bounds: Vec2) -> Rect {
+    let x = if anchor.min.x < bounds.x / 2.0 { anchor.max.x - 5.0 } else { anchor.min.x - size.x + 5.0 };
+    let y = if anchor.min.y < bounds.y / 2.0 { anchor.max.y - 5.0 } else { anchor.min.y - size.y + 5.0 };
+    let corner = Vec2::new(x, y).clamp(Vec2::ZERO, (bounds - size).max(Vec2::ZERO));
+    Rect::from_corners(corner, corner + size)
+}
+
+/// Button and cameo tooltips share their frame, padding and text. They never
+/// participate in picking, including when displayed over a menu.
+fn spawn_tooltip(
+    parent: &mut ChildSpawnerCommands,
+    marker: impl Component,
+    image: Handle<Image>,
+    size: Vec2,
+    corner: Vec2,
+    z: i32,
+    theme: SidebarTheme,
+) {
+    parent.spawn((
+        marker,
+        TooltipFrame,
+        Node { border: UiRect::all(Val::Px(1.0)), ..absolute(corner.x, corner.y, size + Vec2::new(8.0, 4.0)) },
+        BackgroundColor(Color::BLACK),
+        BorderColor::all(theme.border()),
+        GlobalZIndex(z),
+        Pickable::IGNORE,
+    )).with_children(|tip| {
+        tip.spawn((absolute(3.0, 1.0, size), ImageNode::new(image), Pickable::IGNORE));
+    });
+}
+
+#[derive(Default)]
+struct ButtonTooltip {
+    pointer: Option<Vec2>,
+    hovered: Option<SidebarButton>,
+    menu: crate::pause::Menu,
+    since: f32,
+    root: Option<Entity>,
+    shown: Option<(SidebarButton, Entity, Vec2)>,
+}
+
+fn button_tooltips(
+    mut commands: Commands,
+    hud: Res<Hud>,
+    prefs: Res<crate::prefs::Prefs>,
+    menu: Res<crate::pause::Menu>,
+    time: Res<Time<Real>>,
+    pointer: Res<crate::cursor::Pointer>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut state: Local<ButtonTooltip>,
+    mut images: ResMut<Assets<Image>>,
+    parts: Query<Entity, With<ButtonTipPart>>,
+) {
+    let hovered = pointer.0.and_then(|at| button_tip_at(&window, *menu, at));
+    let target = hovered.map(|(button, _)| button);
+    let now = time.elapsed_secs();
+    let pressed = buttons.pressed(MouseButton::Left) || buttons.pressed(MouseButton::Right);
+    if state.pointer != pointer.0 || state.hovered != target || state.menu != *menu || state.root != Some(hud.root) || pressed {
+        state.pointer = pointer.0;
+        state.hovered = target;
+        state.menu = *menu;
+        state.root = Some(hud.root);
+        state.since = now;
+    }
+    let shown = target.filter(|_| prefs.tooltips && !pressed && now - state.since >= TIP_DELAY)
+        .map(|button| (button, hud.root, window.size()));
+    if shown == state.shown { return }
+    for entity in &parts { commands.entity(entity).despawn(); }
+    state.shown = shown;
+    if let (Some((button, _, _)), Some((_, anchor)), Some(font)) = (shown, hovered, &hud.font) {
+        let (image, size) = text_image(font, &mut images, button.text(hud.strings.as_ref()));
+        let area = tooltip_rect(anchor, size + Vec2::new(8.0, 4.0), Vec2::new(SIDEBAR_WIDTH, window.height()));
+        commands.entity(hud.root).with_children(|parent| {
+            // The menu uses z=100; the still-visible top buttons retain tips.
+            spawn_tooltip(parent, ButtonTipPart, image, size, area.min, 110, hud.theme);
+        });
+    }
+}
+
+/// Update existing frames as well as future tooltips, so changing the local
+/// house or its country cannot leave a visible tooltip in the previous theme.
+fn sync_tooltip_theme(
+    mut hud: ResMut<Hud>,
+    sim: Res<Sim>,
+    mut frames: Query<&mut BorderColor, With<TooltipFrame>>,
+) {
+    let theme = sim.0.houses.get(local() as usize).map_or(SidebarTheme::Allied, |house| SidebarTheme::for_house(&hud.country_themes, house));
+    if hud.theme == theme { return }
+    hud.theme = theme;
+    for mut border in &mut frames { *border = BorderColor::all(theme.border()); }
+}
 
 pub struct HudPlugin;
 
 /// The pressed picture of the repair or sell button.
 #[derive(Component)]
 struct ModeLight(crate::control::Mode);
+
+#[derive(Component)]
+struct TopButtonArt {
+    menu: crate::pause::Menu,
+    up: Handle<Image>,
+    down: Handle<Image>,
+}
+
+fn top_button_lights(
+    press: Res<crate::pause::ButtonPress>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    pointer: Res<crate::cursor::Pointer>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut buttons: Query<(&TopButtonArt, &mut ImageNode)>,
+) {
+    let over = pointer.0.and_then(|at| top_button_at(&window, at));
+    for (button, mut image) in &mut buttons {
+        let down = mouse.pressed(MouseButton::Left) && press.top() == Some(button.menu) && over == Some(button.menu);
+        let wanted = if down { &button.down } else { &button.up };
+        if image.image != *wanted { image.image = wanted.clone() }
+    }
+}
 
 fn mode_lights(mode: Res<crate::control::Mode>, mut lights: Query<(&ModeLight, &mut Visibility)>) {
     for (light, mut visibility) in &mut lights {
@@ -186,7 +464,10 @@ impl Plugin for HudPlugin {
                 .run_if(resource_exists::<Hud>)
                 .run_if(resource_exists::<Sim>),
         )
-        .add_systems(Update, mode_lights.run_if(in_state(Screen::InGame)).run_if(resource_exists::<crate::control::Mode>));
+        .add_systems(Update, mode_lights.run_if(in_state(Screen::InGame)).run_if(resource_exists::<crate::control::Mode>))
+        .add_systems(Update, top_button_lights.run_if(in_state(Screen::InGame)))
+        .add_systems(Update, button_tooltips.after(update_sidebar).after(relayout).run_if(in_state(Screen::InGame)).run_if(resource_exists::<Hud>))
+        .add_systems(Update, sync_tooltip_theme.after(relayout).before(update_sidebar).before(button_tooltips).run_if(in_state(Screen::InGame)).run_if(resource_exists::<Hud>).run_if(resource_exists::<Sim>));
     }
 }
 
@@ -240,8 +521,12 @@ fn blit(rgba: &mut [u8], stride: usize, shp: &Shp, frame: usize, palette: &Palet
 
 /// Lines of text in the game font, in the sidebar's colour, centred on each other.
 pub(crate) fn text_image(font: &Font, images: &mut Assets<Image>, text: &str) -> (Handle<Image>, Vec2) {
+    text_image_coloured(font, images, text, TEXT)
+}
+
+pub(crate) fn text_image_coloured(font: &Font, images: &mut Assets<Image>, text: &str, colour: [u8; 3]) -> (Handle<Image>, Vec2) {
     let lines: Vec<(usize, Vec<u8>)> = text.lines().map(|line| font.rasterize(line)).collect();
-    let width = lines.iter().map(|(width, _)| *width).max().unwrap_or(1);
+    let width = lines.iter().map(|(width, _)| *width).max().unwrap_or(1).max(1);
     let height = font.height * lines.len().max(1);
     let mut rgba = vec![0u8; width * height * 4];
     for (index, (line_width, mask)) in lines.iter().enumerate() {
@@ -249,7 +534,7 @@ pub(crate) fn text_image(font: &Font, images: &mut Assets<Image>, text: &str) ->
             for col in 0..*line_width {
                 if mask[row * line_width + col] != 0 {
                     let at = ((index * font.height + row) * width + col) * 4;
-                    rgba[at..at + 4].copy_from_slice(&[TEXT[0], TEXT[1], TEXT[2], 255]);
+                    rgba[at..at + 4].copy_from_slice(&[colour[0], colour[1], colour[2], 255]);
                 }
             }
         }
@@ -290,6 +575,13 @@ fn spawn_sidebar(
         .into_iter()
         .filter_map(|(name, at, mode)| load(&files, &mut images, name, 1, PALETTE).map(|(image, size)| (image, size, at, mode)))
         .collect();
+    let top_buttons: Vec<_> = [("diplobtn.shp", DIPLOMACY_AT, crate::pause::Menu::Players), ("optbtn.shp", OPTIONS_AT, crate::pause::Menu::Options)]
+        .into_iter()
+        .filter_map(|(name, at, menu)| {
+            let (up, size) = load(&files, &mut images, name, 0, PALETTE)?;
+            let (down, _) = load(&files, &mut images, name, 1, PALETTE)?;
+            Some((TopButtonArt { menu, up, down }, at, size))
+        }).collect();
     let mut piece = |parent: &mut ChildSpawnerCommands, name: &str, frame: usize, x: f32, y: f32| {
         let Some((image, size)) = load(&files, &mut images, name, frame, PALETTE) else {
             warn!("sidebar piece {name} not found");
@@ -319,8 +611,9 @@ fn spawn_sidebar(
             piece(parent, "credits.shp", 0, 0.0, 0.0);
             let top = CREDITS_HEIGHT;
             piece(parent, "top.shp", 0, 0.0, top);
-            piece(parent, "diplobtn.shp", 0, DIPLOMACY_AT.0, top + DIPLOMACY_AT.1);
-            piece(parent, "optbtn.shp", 0, OPTIONS_AT.0, top + OPTIONS_AT.1);
+            for (button, at, size) in top_buttons {
+                parent.spawn((absolute(at.0, top + at.1, size), ImageNode::new(button.up.clone()), button));
+            }
             // Frame 0 is the radar's closed state.
             // The radar: its art, which `radar` animates, and the map picture.
             parent.spawn((
@@ -396,6 +689,8 @@ fn spawn_sidebar(
         size: Vec2::new(window.width(), window.height()),
         font: files.get("game.fnt").and_then(Font::parse),
         strings: files.get("ra2.csf").and_then(Csf::parse),
+        theme: SidebarTheme::Allied,
+        country_themes: rules.as_ref().map(country_themes).unwrap_or_default(),
         rows,
         tab,
         enabled,
@@ -512,7 +807,7 @@ fn update_sidebar(
     if buttons.just_pressed(MouseButton::Left) {
         let tab = (0..4).find(|&tab| {
             let corner = Vec2::new(TAB_X + TAB_PITCH * tab as f32, TAB_Y);
-            mouse.is_some_and(|at| Rect::from_corners(corner, corner + Vec2::new(TAB_PITCH, 26.0)).contains(at))
+            mouse.is_some_and(|at| contains(Rect::from_corners(corner, corner + Vec2::new(TAB_PITCH, 26.0)), at))
         });
         if let Some(tab) = tab.filter(|&tab| enabled[tab]) {
             hud.tab = tab;
@@ -524,16 +819,13 @@ fn update_sidebar(
     // With `GUIMainButtonSound`, whether or
     // not the mode can be turned on.
     if buttons.just_pressed(MouseButton::Left) {
-        for (name, corner, which) in [("repair.shp", REPAIR_AT, crate::control::Mode::Repair), ("sell.shp", SELL_AT, crate::control::Mode::Sell)] {
-            let size = files.get(name).and_then(Shp::parse).map_or(Vec2::ZERO, |shp| Vec2::new(shp.width as f32, shp.height as f32));
-            let corner = Vec2::new(corner.0, corner.1);
-            if mouse.is_some_and(|at| Rect::from_corners(corner, corner + size).contains(at)) {
-                let (mode, selection) = &mut modes;
-                mode.toggle(which, &sim.0, selection, &placing);
-                cues.write_batch(rules_sound(&files, "GUIMainButtonSound").map(Cue::Sound));
-            }
+        if let Some(which) = mouse.and_then(mode_button_at) {
+            let (mode, selection) = &mut modes;
+            mode.toggle(which, &sim.0, selection, &placing);
+            cues.write_batch(rules_sound(&files, "GUIMainButtonSound").map(Cue::Sound));
         }
     }
+
     // DATA: the game's default keys (keyboard.ini): Q structures, W defences, E
     // infantry, R vehicles.
     // The keys are silent, do nothing for an
@@ -864,33 +1156,9 @@ fn update_sidebar(
             // outline, text inset by (4, 2), placed diagonally off the cameo
             // towards the middle of the sidebar, overlapping it by 5 pixels.
             let box_size = size + Vec2::new(8.0, 4.0);
-            let cameo = slot_rect(slot);
-            let x = if cameo.min.x < SIDEBAR_WIDTH / 2.0 {
-                cameo.max.x - 5.0
-            } else {
-                cameo.min.x - box_size.x + 5.0
-            };
-            let y = if cameo.min.y < window.height() / 2.0 {
-                cameo.max.y - 5.0
-            } else {
-                cameo.min.y - box_size.y + 5.0
-            };
-            let x = x.min(SIDEBAR_WIDTH - box_size.x).max(0.0);
+            let area = tooltip_rect(slot_rect(slot), box_size, Vec2::new(SIDEBAR_WIDTH, window.height()));
             commands.entity(root).with_children(|parent| {
-                parent
-                    .spawn((
-                        TipPart,
-                        Node {
-                            border: UiRect::all(Val::Px(1.0)),
-                            ..absolute(x, y.max(0.0), box_size)
-                        },
-                        BackgroundColor(Color::BLACK),
-                        BorderColor::all(text_color()),
-                        GlobalZIndex(10),
-                    ))
-                    .with_children(|tip| {
-                        tip.spawn((absolute(3.0, 1.0, size), ImageNode::new(image)));
-                    });
+                spawn_tooltip(parent, TipPart, image, size, area.min, 10, hud.theme);
             });
         }
         hud.shown.tip = Some(tip);
@@ -986,4 +1254,190 @@ fn draw_cameo(
             }
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Small real-format tables exercise CSF parsing and case-insensitive labels
+    /// without requiring a particular imported edition of the game.
+    fn csf(entries: &[(&str, &str)]) -> Csf {
+        let mut data = b" FSC".to_vec();
+        for value in [3, entries.len() as u32, entries.len() as u32, 0, 0] { data.extend(value.to_le_bytes()); }
+        for &(key, value) in entries {
+            data.extend(b" LBL");
+            data.extend(1u32.to_le_bytes());
+            data.extend((key.len() as u32).to_le_bytes());
+            data.extend(key.as_bytes());
+            data.extend(b" RTS");
+            let units: Vec<_> = value.encode_utf16().collect();
+            data.extend((units.len() as u32).to_le_bytes());
+            for unit in units { data.extend((!unit).to_le_bytes()); }
+        }
+        Csf::parse(&data).expect("valid CSF fixture")
+    }
+
+    fn faction_rules() -> Ini {
+        Ini::parse(b"[Countries]\n0=Americans\n1=Russians\n2=YuriCountry\n3=YuriAlias\n[Americans]\nSide=GDI\n[Russians]\nSide=Nod\n[YuriCountry]\nSide=ThirdSide\n[YuriAlias]\nSide=Yuri\n")
+    }
+
+    #[test]
+    fn yuri_sidebar_uses_native_background_and_radar_over_the_soviet_base() {
+        let dir = crate::files::dev_dir();
+        let Ok(files) = GameFiles::open_for_edition(&dir, crate::files::Edition::YuriAssets) else { return };
+        files.set_side(2);
+        for (regular, yuri) in [("bkgdsm.shp", "bkgdsmy.shp"), ("bkgdmd.shp", "bkgdmdy.shp"), ("bkgdlg.shp", "bkgdlgy.shp")] {
+            assert_eq!(sidebar_background(&files, regular, 2), (yuri, "uibkgdy.pal"));
+            assert!(Shp::parse(files.get(yuri).unwrap()).is_some());
+            assert_eq!(sidebar_background(&files, regular, 1), (regular, "uibkgd.pal"));
+        }
+        assert_eq!(sidebar_radar(&files, 2), ("radary.shp", "radaryuri.pal"));
+        assert!(Shp::parse(files.get("radary.shp").unwrap()).is_some());
+        assert!(Palette::parse(files.get("radaryuri.pal").unwrap()).is_some());
+        assert!(Palette::parse(files.get("uibkgdy.pal").unwrap()).is_some());
+        // Shared strip/button art is supplied by GameFiles' Soviet fallback.
+        assert_eq!(sidebar_background(&files, "side1.shp", 2), ("side1.shp", PALETTE));
+        assert!(Shp::parse(files.get("side1.shp").unwrap()).is_some());
+    }
+
+    #[test]
+    fn tooltip_border_switches_between_all_three_factions_from_country_side() {
+        let countries = country_themes(&faction_rules());
+        // Country metadata also identifies the theme in old snapshots whose
+        // saved side value predates the third-side simulation enum.
+        let mut house = ra2_sim::House { side: 0, ..default() };
+        for (country, expected) in [(0, SidebarTheme::Allied), (1, SidebarTheme::Soviet), (2, SidebarTheme::Yuri), (1, SidebarTheme::Soviet), (0, SidebarTheme::Allied), (3, SidebarTheme::Yuri)] {
+            house.country = country;
+            assert_eq!(SidebarTheme::for_house(&countries, &house), expected);
+        }
+        assert_eq!(SidebarTheme::Allied.border(), Color::srgb_u8(164, 210, 255));
+        assert_eq!(SidebarTheme::Soviet.border(), Color::srgb_u8(255, 96, 48));
+        assert_eq!(SidebarTheme::Yuri.border(), Color::srgb_u8(196, 112, 255));
+        for (side, expected) in [(0, SidebarTheme::Allied), (1, SidebarTheme::Soviet), (2, SidebarTheme::Yuri)] {
+            house.side = side;
+            assert_eq!(SidebarTheme::for_house(&[], &house), expected);
+        }
+    }
+
+    #[test]
+    fn switching_factions_recolours_already_visible_button_and_cameo_tooltips() {
+        let mut world = ra2_sim::World::new(ra2_sim::Map::new(4, 4), None);
+        // Do not mutate the process-wide local player used by other tests.
+        world.houses = vec![ra2_sim::House::default(); 256];
+        let mut app = App::new();
+        app.insert_resource(Sim(world, Vec::new(), Vec::new()))
+            .insert_resource(Hud {
+                root: Entity::PLACEHOLDER, size: Vec2::ZERO, font: None, strings: None,
+                theme: SidebarTheme::Allied, country_themes: country_themes(&faction_rules()),
+                rows: 0, tab: 0, enabled: [false; 4], tab_sound: None, build_sound: None,
+                scold_sound: None, credit_sounds: None, credits: None, credits_tick: 0,
+                pips: [0; 3], pips_stepped: 0.0, mouse: Vec2::ZERO,
+                mouse_still_since: 0.0, shown: Shown::default(),
+            })
+            .add_systems(Update, sync_tooltip_theme);
+        let button = app.world_mut().spawn((Node::default(), Visibility::Visible, ButtonTipPart, TooltipFrame, BorderColor::all(SidebarTheme::Allied.border()))).id();
+        let cameo = app.world_mut().spawn((Node::default(), Visibility::Visible, TipPart, TooltipFrame, BorderColor::all(SidebarTheme::Allied.border()))).id();
+        for (country, expected) in [(1, SidebarTheme::Soviet), (2, SidebarTheme::Yuri), (0, SidebarTheme::Allied), (2, SidebarTheme::Yuri)] {
+            for house in &mut app.world_mut().resource_mut::<Sim>().0.houses { house.country = country; }
+            app.update();
+            assert_eq!(app.world().resource::<Hud>().theme, expected);
+            for entity in [button, cameo] {
+                assert_eq!(app.world().get::<BorderColor>(entity).unwrap(), &BorderColor::all(expected.border()));
+                assert_eq!(app.world().get::<Visibility>(entity), Some(&Visibility::Visible));
+            }
+        }
+    }
+
+    #[test]
+    fn tooltip_theme_does_not_depend_on_language_or_desktop_dpi() {
+        use bevy::window::WindowResolution;
+        let countries = country_themes(&faction_rules());
+        for words in ["Options Button", "選項按鈕", "选项按钮"] {
+            let strings = csf(&[("TIP:OptionsButton", words)]);
+            for dpi in [1.0, 1.5, 2.0] {
+                let mut window = Window { resolution: WindowResolution::new(1600, 1200), ..default() };
+                window.resolution.set_scale_factor(dpi);
+                let at = Vec2::new(window.width() - SIDEBAR_WIDTH + 119.0, 29.0);
+                let button = button_tip_at(&window, crate::pause::Menu::Closed, at).unwrap().0;
+                assert_eq!(button.text(Some(&strings)), words);
+                for (country, expected) in [(0, SidebarTheme::Allied), (1, SidebarTheme::Soviet), (2, SidebarTheme::Yuri)] {
+                    let house = ra2_sim::House { country, side: 0, ..default() };
+                    assert_eq!(SidebarTheme::for_house(&countries, &house).border(), expected.border());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tooltips_use_the_imported_ui_language_for_missing_labels() {
+        let english = csf(&[("tip:diplomacybutton", "Diplomacy Button"), ("TIP:OptionsButton", "Options Button"), ("TIP:Repair", "Repair"), ("GUI:Options", "Options"), ("Name:ChineseUnit", "中國單位")]);
+        let traditional = csf(&[("TIP:DiplomacyButton", "外交按鈕"), ("TIP:OptionsButton", "選項按鈕"), ("TIP:Repair", "修復"), ("GUI:Options", "選項")]);
+        let simplified = csf(&[("TIP:DiplomacyButton", "外交按钮"), ("TIP:OptionsButton", "选项按钮"), ("TIP:Repair", "修复"), ("GUI:Options", "选项")]);
+        for (strings, language, labels) in [
+            (&english, TooltipLanguage::English, ["Diplomacy Button", "Options Button", "Repair", "Sell"]),
+            (&traditional, TooltipLanguage::TraditionalChinese, ["外交按鈕", "選項按鈕", "修復", "出售"]),
+            (&simplified, TooltipLanguage::SimplifiedChinese, ["外交按钮", "选项按钮", "修复", "出售"]),
+        ] {
+            assert_eq!(TooltipLanguage::of(Some(strings)), language);
+            for (button, expected) in [SidebarButton::Diplomacy, SidebarButton::Options, SidebarButton::Repair, SidebarButton::Sell].into_iter().zip(labels) {
+                assert_eq!(button.text(Some(strings)), expected);
+            }
+        }
+        assert_eq!(SidebarButton::Sell.text(None), "Sell");
+    }
+
+    #[test]
+    fn native_tooltip_labels_override_language_fallbacks() {
+        let strings = csf(&[("GUI:Options", "選項"), ("TIP:Sell", "Native sell description")]);
+        assert_eq!(SidebarButton::Sell.text(Some(&strings)), "Native sell description");
+        assert_eq!(SidebarButton::Diplomacy.text(Some(&strings)), "外交按鈕");
+        assert_eq!(SidebarButton::Options.text(Some(&strings)), "選項按鈕");
+        assert_eq!(SidebarButton::Repair.text(Some(&strings)), "修復");
+        let strings = csf(&[("GUI:Options", "选项")]);
+        assert_eq!(SidebarButton::Options.text(Some(&strings)), "选项按钮");
+        assert_eq!(SidebarButton::Repair.text(Some(&strings)), "修复");
+    }
+
+    #[test]
+    fn button_tooltips_follow_logical_positions_at_desktop_dpi() {
+        use crate::pause::Menu;
+        use bevy::window::WindowResolution;
+        let mut window = Window { resolution: WindowResolution::new(1600, 1200), ..default() };
+        window.resolution.set_scale_factor(2.0);
+        assert_eq!(window.size(), Vec2::new(800.0, 600.0));
+        let side = window.width() - SIDEBAR_WIDTH;
+        for (at, expected) in [
+            (Vec2::new(side + 47.0, 29.0), SidebarButton::Diplomacy),
+            (Vec2::new(side + 119.0, 29.0), SidebarButton::Options),
+            (Vec2::new(side + 52.0, 180.0), SidebarButton::Repair),
+            (Vec2::new(side + 116.0, 180.0), SidebarButton::Sell),
+        ] {
+            assert_eq!(button_tip_at(&window, Menu::Closed, at).map(|hit| hit.0), Some(expected));
+        }
+        // The top buttons remain visible over paused menus, the mode buttons do not.
+        assert_eq!(button_tip_at(&window, Menu::Options, Vec2::new(side + 47.0, 29.0)).map(|hit| hit.0), Some(SidebarButton::Diplomacy));
+        assert!(button_tip_at(&window, Menu::Options, Vec2::new(side + 52.0, 180.0)).is_none());
+        assert!(button_tip_at(&window, Menu::Closed, Vec2::new(side + 52.0, 197.0)).is_none());
+    }
+
+    #[test]
+    fn tooltip_frames_stay_inside_the_sidebar_near_all_edges() {
+        let bounds = Vec2::new(SIDEBAR_WIDTH, 600.0);
+        for anchor in [Rect::new(11.0, 20.0, 83.0, 38.0), Rect::new(83.0, 20.0, 155.0, 38.0), Rect::new(85.0, 570.0, 145.0, 600.0)] {
+            let area = tooltip_rect(anchor, Vec2::new(110.0, 22.0), bounds);
+            assert!(area.min.cmpge(Vec2::ZERO).all());
+            assert!(area.max.cmple(bounds).all());
+        }
+    }
+
+    #[test]
+    fn mode_buttons_do_not_share_clicks_with_each_other_or_the_tabs() {
+        assert!(mode_button_at(Vec2::new(83.99, 180.0)) == Some(crate::control::Mode::Repair));
+        assert!(mode_button_at(Vec2::new(84.0, 180.0)) == Some(crate::control::Mode::Sell));
+        assert!(mode_button_at(Vec2::new(147.99, 180.0)) == Some(crate::control::Mode::Sell));
+        assert!(mode_button_at(Vec2::new(148.0, 180.0)).is_none());
+        assert!(mode_button_at(Vec2::new(52.0, 196.99)) == Some(crate::control::Mode::Repair));
+        assert!(mode_button_at(Vec2::new(52.0, 197.0)).is_none());
+    }
 }

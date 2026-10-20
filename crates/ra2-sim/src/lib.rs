@@ -12,6 +12,7 @@ pub mod path;
 pub mod radiation;
 pub mod remains;
 pub mod ore;
+pub mod slaves;
 pub mod smudge;
 pub mod snapshot;
 pub mod spawns;
@@ -1348,9 +1349,16 @@ pub struct Unit {
     capture: Option<u32>,
     /// The cell it last looked round from, for the shroud.
     looked: Option<(i32, i32)>,
-    /// The unit whose mind it holds, and for a held unit who holds it and the
-    /// house it comes from.
+    /// First temporary victim, for the single-link Yuri and presentation.
+    /// All victims carry their own `controlled_by` link, including off-map ones.
     pub controls: Option<u32>,
+    /// Next damage tick while an infinite mind controller is overloaded.
+    #[serde(default)]
+    pub mind_overload_at: u64,
+    /// Psychic Dominator ownership has no live controller to release it.
+    #[serde(default)]
+    pub permanently_controlled: bool,
+    /// Temporary controller and the house this unit returns to when released.
     pub controlled_by: Option<(u32, u8)>,
     /// A drone or dog inside it; and for one that is inside something, the
     /// weapon it bites with and when it next does.
@@ -1504,6 +1512,8 @@ impl Unit {
             rally: None,
             looked: None,
             controls: None,
+            mind_overload_at: 0,
+            permanently_controlled: false,
             controlled_by: None,
             parasite: Vec::new(),
             bite: None,
@@ -1639,8 +1649,13 @@ pub struct AnimatedTerrain {
 /// A kind of building, from rules.ini and art.ini.
 #[derive(Clone, Debug, Default)]
 pub struct BuildingType {
+    /// Yuri slave-miner workforce; separate from an ordinary refinery.
+    pub slave_spawner: Option<slaves::SpawnerRules>,
+    pub deploy_facing: Option<u8>,
     /// `Cost`.
     pub cost: i32,
+    /// `BuildTimeMultiplier`; absent means 1.0 without changing the price.
+    pub build_time_multiplier: Option<f64>,
     /// `Power`: positive is output, negative is drain.
     pub power: i32,
     /// art.ini `Foundation`, in cells.
@@ -1702,10 +1717,19 @@ pub struct BuildingType {
     pub turret_rot: i32,
     /// `Cloning`: it copies every soldier the house's barracks turn out.
     pub cloning: bool,
+    /// Yuri's Revenge recycling and passenger-powered buildings.
+    pub grinding: bool,
+    pub infantry_absorb: bool,
+    pub unit_absorb: bool,
+    pub passengers: i32,
+    pub size_limit: i32,
+    pub extra_power: i32,
     /// `Powered` and not `TogglePower=no`: it stops when power is short.
     pub powered: bool,
     /// `Soylent`: what it sells for, if not zero; and `Crewed`: people come out.
     pub soylent: i32,
+    /// `Unsellable`: a deployed slave miner must be packed up, never sold.
+    pub unsellable: bool,
     pub crewed: bool,
     /// `Radar`: gives its owner the radar while it has power.
     pub radar: bool,
@@ -1784,6 +1808,8 @@ pub struct BuildingType {
     /// `GDIBarracks` and `NODBarracks`: which cell soldiers come out at first.
     pub gdi_barracks: bool,
     pub nod_barracks: bool,
+    /// Yuri's Revenge `YuriBarracks`.
+    pub yuri_barracks: bool,
     /// rules.ini `ExitCoord`, in leptons from the centre of the top cell.
     pub exit_coord: (i32, i32),
     /// `DeployTime` × 900, in ticks: how long its door takes to open or close.
@@ -1800,7 +1826,14 @@ pub struct BuildingType {
 /// A kind of vehicle (or, in time, foot soldier) that can be produced.
 #[derive(Clone, Debug, Default)]
 pub struct UnitType {
+    pub slave_spawner: Option<slaves::SpawnerRules>,
+    pub slave_worker: Option<slaves::WorkerRules>,
+    pub deploy_facing: Option<u8>,
     pub stats: UnitStats,
+    /// `BuildTimeMultiplier`; absent means 1.0 without changing the price.
+    pub build_time_multiplier: Option<f64>,
+    /// `Soylent`: cash returned by a grinder; absent uses the normal refund.
+    pub soylent: Option<i32>,
     /// `CarriesCrate`: destroyed, it leaves a crate (see `crate_from_unit`).
     pub carries_crate: bool,
     /// `Passengers` (room, in `Size` points) and `SizeLimit` (the biggest it takes).
@@ -1873,6 +1906,7 @@ pub enum Item {
 /// The rules for producing an item, whichever kind it is.
 struct Terms<'a> {
     cost: i32,
+    build_time_multiplier: f64,
     tech_level: i32,
     owners: u32,
     required: Option<u32>,
@@ -1981,7 +2015,7 @@ pub struct House {
     pub aircraft_queue: Vec<u16>,
     /// The house's country, as its place in rules.ini `[Countries]`.
     pub country: u8,
-    /// Its side: 0 for the Allied countries, 1 for the Soviet ones.
+    /// Its side: 0 Allied, 1 Soviet, 2 Yuri.
     pub side: i32,
     /// The highest `TechLevel` it may build.
     pub tech_level: i32,
@@ -1999,6 +2033,9 @@ pub struct House {
     /// What its spies have brought it: Soviet and Allied technology, and
     /// soldiers and vehicles that start as veterans.
     pub stolen: [bool; 2],
+    /// Yuri's Revenge laboratory technology; independent of the two RA2 flags.
+    #[serde(default)]
+    pub third_stolen: bool,
     pub veterans: [bool; 2],
     /// Until when a spy has put its power out.
     pub blackout_until: u64,
@@ -2344,6 +2381,8 @@ pub struct World {
     pub repair_interval: u32,
     pub survivor_divisors: (i32, i32),
     pub crew_types: (Option<u16>, Option<u16>, Option<u16>, Option<u16>),
+    pub third_survivor_divisor: i32,
+    pub third_crew: Option<u16>,
     /// Debris, crews and sinking ships, and the pieces and wrecks now shown.
     pub remains_rules: remains::Rules,
     wreckage: remains::Wreckage,
@@ -2428,6 +2467,8 @@ pub struct World {
     pub ore_types: Vec<ore::OreType>,
     ore_queues: Vec<ore::Queues>,
     ore_ready: bool,
+    pub slave_rules: slaves::Rules,
+    pub(crate) slave_pools: Vec<slaves::Pool>,
     random: u64,
     /// The stream soldiers' fidgets are drawn from.
     // Not original behaviour: the engine draws them from its one stream; kept
@@ -2483,6 +2524,8 @@ impl World {
             repair_interval: 14,
             survivor_divisors: (500, 250),
             crew_types: (None, None, None, None),
+            third_survivor_divisor: 750,
+            third_crew: None,
             remains_rules: remains::Rules::default(),
             wreckage: remains::Wreckage::default(),
             weapons: Vec::new(),
@@ -2547,6 +2590,8 @@ impl World {
             ],
             ore_queues: vec![Default::default(); 2],
             ore_ready: false,
+            slave_rules: slaves::Rules::default(),
+            slave_pools: Vec::new(),
             random: 0x2545_f491_4f6c_dd1d,
             idle_random: 0x9e37_79b9_7f4a_7c15,
             tick: 0,
@@ -2879,6 +2924,7 @@ impl World {
         match item {
             Item::Building(index) => self.building_types.get(index as usize).map(|kind| Terms {
                 cost: kind.cost,
+                build_time_multiplier: kind.build_time_multiplier.unwrap_or(1.0),
                 tech_level: kind.tech_level,
                 owners: kind.owners,
                 required: kind.required_houses,
@@ -2893,6 +2939,7 @@ impl World {
             }),
             Item::Unit(index) => self.unit_types.get(index as usize).map(|kind| Terms {
                 cost: kind.cost,
+                build_time_multiplier: kind.build_time_multiplier.unwrap_or(1.0),
                 tech_level: kind.tech_level,
                 owners: kind.owners,
                 required: kind.required_houses,
@@ -2938,7 +2985,7 @@ impl World {
             // A type that needs stolen technology
             // waits for a spy to have been in the right laboratory.
             if terms.tech_level < 0
-                || (terms.stolen_tech != 0 && !owner.stolen[(terms.stolen_tech as usize - 1).min(1)])
+                || !match terms.stolen_tech { 0 => true, 1 => owner.stolen[0], 2 => owner.stolen[1], 3 => owner.third_stolen, _ => false }
                 || terms.required.is_some_and(|mask| mask & bit == 0)
                 || terms.forbidden.is_some_and(|mask| mask & bit != 0)
                 || terms.tech_level > owner.tech_level
@@ -2960,6 +3007,7 @@ impl World {
                 return false;
             };
             b.owner == house
+                && b.health > 0
                 && b.buildup.is_none_or(|buildup| buildup.packing.is_none() && !buildup.selling)
                 && self.building_types.get(b.kind as usize).is_some_and(|factory| {
                     factory.factory == Some(terms.factory)
@@ -3024,7 +3072,7 @@ impl World {
             return 1;
         };
         let rules = &self.build_rules;
-        let mut time = (terms.cost as f64 * rules.build_speed * 0.9) as i32;
+        let mut time = (terms.cost as f64 * terms.build_time_multiplier.max(0.0) * rules.build_speed * 0.9) as i32;
         let (output, drain) = self.power(house);
         let fraction = if output < drain && drain != 0 { output as f64 / drain as f64 } else { 1.0 };
         let mut speed = 1.0 - (1.0 - fraction) * rules.low_power_penalty;
@@ -3132,14 +3180,49 @@ impl World {
 
     // The front of the queue is started.
     fn start_next_queued(&mut self, house: u8, tab: usize) {
-        let Some(owner) = self.houses.get_mut(house as usize) else {
-            return;
-        };
-        if owner.queue_mut(tab).is_empty() {
-            return;
+        loop {
+            let Some(owner) = self.houses.get_mut(house as usize) else { return };
+            if owner.queue_mut(tab).is_empty() { return }
+            let unit = owner.queue_mut(tab).remove(0);
+            if self.has_factory(house, Item::Unit(unit)) {
+                self.start_unit(house, unit);
+                return;
+            }
         }
-        let unit = owner.queue_mut(tab).remove(0);
-        self.start_unit(house, unit);
+    }
+
+    /// Abandons the current item using the same refund as a manual cancellation.
+    fn cancel_production(&mut self, house: u8, tab: usize) {
+        let Some(production) = self.houses.get(house as usize).and_then(|h| h.tab_slot(tab)) else { return };
+        let item = if tab < 2 { Item::Building(production.building) } else { Item::Unit(production.building) };
+        let cost = self.terms(item).map_or(0, |terms| terms.cost);
+        let owner = &mut self.houses[house as usize];
+        *owner.tab_slot_mut(tab) = None;
+        owner.credits += cost - production.balance;
+    }
+
+    /// Production belongs to a house, but still needs a compatible factory.
+    /// Selling and packing are permanent losses from the moment they begin;
+    /// ordinary construction, low power and temporary disabling are not.
+    /// Losing a prerequisite alone must not discard work already paid for.
+    fn cancel_orphaned_production(&mut self) {
+        for house in 0..self.houses.len() {
+            for tab in 0..6 {
+                let lost = self.houses[house].tab_slot(tab).is_some_and(|production| {
+                    let item = if tab < 2 { Item::Building(production.building) } else { Item::Unit(production.building) };
+                    !self.has_factory(house as u8, item)
+                });
+                if lost { self.cancel_production(house as u8, tab) }
+                if tab >= 2 {
+                    // Queued items have not been charged for yet. Keep the
+                    // items another compatible factory can still produce.
+                    let mut queue = std::mem::take(self.houses[house].queue_mut(tab));
+                    queue.retain(|&unit| self.has_factory(house as u8, Item::Unit(unit)));
+                    *self.houses[house].queue_mut(tab) = queue;
+                    if lost { self.start_next_queued(house as u8, tab) }
+                }
+            }
+        }
     }
 
     /// Puts a finished unit on the map at its factory.
@@ -3212,7 +3295,7 @@ impl World {
         let made = self.exit_on_foot(index, stats, house);
         if made == Exit::Out && stats.infantry && !factory.cloning {
             let vats: Vec<usize> = (0..self.buildings.len())
-                .filter(|&i| self.buildings[i].owner == house && self.building_types.get(self.buildings[i].kind as usize).is_some_and(|k| k.cloning))
+                .filter(|&i| self.buildings[i].owner == house && self.buildings[i].buildup.is_none() && self.online(&self.buildings[i]) && self.building_types.get(self.buildings[i].kind as usize).is_some_and(|k| k.cloning))
                 .collect();
             for vat in vats {
                 self.exit_on_foot(vat, stats, house);
@@ -3348,6 +3431,7 @@ impl World {
     /// Takes a building off the map and opens its cells again.
     pub(crate) fn demolish(&mut self, index: usize) -> Building {
         let building = self.buildings.remove(index);
+        self.cancel_orphaned_production();
         for dy in 0..building.size.1 {
             for dx in 0..building.size.0 {
                 let cell = (building.cell.0 + dx, building.cell.1 + dy);
@@ -3378,6 +3462,12 @@ impl World {
             self.dying.push((combat::Aim::Unit(id), 0));
         }
         building
+    }
+
+    /// Whether a standing building permits a sale to begin.
+    pub fn can_sell(&self, building: u32) -> bool {
+        self.buildings.iter().any(|b| b.id == building && b.health > 0 && b.buildup.is_none() && b.c4.is_none()
+            && self.building_types.get(b.kind as usize).is_some_and(|kind| !kind.unsellable))
     }
 
     /// Whether a building is damaged and standing, so that repairs would help.
@@ -4292,7 +4382,10 @@ impl World {
         // leaves the house with no output for `SpyPowerBlackout` frames.
         let dark = self.houses.get(house as usize).is_some_and(|h| self.tick < h.blackout_until);
         for building in self.buildings.iter().filter(|b| b.owner == house) {
-            let (power, strength) = self.building_types.get(building.kind as usize).map_or((0, 1), |kind| (kind.power, kind.strength.max(1)));
+            let (power, strength) = self.building_types.get(building.kind as usize).map_or((0, 1), |kind| {
+                let extra = if kind.infantry_absorb || kind.unit_absorb { kind.extra_power.saturating_mul(building.occupants.len() as i32) } else { 0 };
+                (kind.power.saturating_add(extra), kind.strength.max(1))
+            });
             if power >= 0 && dark {
             } else if power >= 0 {
                 totals.0 += (building.health as f64 / strength as f64 * power as f64) as i32;
@@ -4565,6 +4658,7 @@ impl World {
         if let Some(building) = self.buildings.iter_mut().find(|b| b.id == building) {
             building.owner = house;
         }
+        self.cancel_orphaned_production();
     }
 
     /// Halves the health of a house's buildings, for tests.
@@ -4598,6 +4692,8 @@ impl World {
     }
 
     pub fn order(&mut self, order: Order) {
+        if order.unit().is_some_and(|id| self.is_enslaved(id)) { return; }
+        if self.slave_order(order) { return; }
         // A soldier still falling starts no new
         // mission; what it is told waits until it is down.
         if let Some(id) = order.unit() {
@@ -4774,6 +4870,7 @@ impl World {
                     Some(buildup) => self.buildings[index].buildup = Some(buildup),
                     None => self.finish_packing(building, (x, y)),
                 }
+                self.cancel_orphaned_production();
             }
             Order::Board { unit, transport } => {
                 // The Enter mission,
@@ -4894,7 +4991,8 @@ impl World {
                 // it come out as the build-up starts to run backwards; the money
                 // comes at the end. There is no taking it back.
                 // Not while a charge is planted in it.
-                let Some(index) = self.buildings.iter().position(|b| b.id == building && b.buildup.is_none() && b.c4.is_none()) else {
+                if !self.can_sell(building) { return }
+                let Some(index) = self.buildings.iter().position(|b| b.id == building) else {
                     return;
                 };
                 self.buildings[index].repairing = false;
@@ -4909,6 +5007,7 @@ impl World {
                     }
                     None => self.finish_sale(building),
                 }
+                self.cancel_orphaned_production();
             }
             Order::Attack { unit, target } => {
                 // A `C4` soldier told to attack a
@@ -5119,7 +5218,6 @@ impl World {
                 // none is left is the one in hand abandoned, with what was paid
                 // refunded, and the next in the queue started.
                 let tab = self.unit_slot(unit);
-                let cost = self.unit_types.get(unit as usize).map_or(0, |kind| kind.cost);
                 let Some(owner) = self.houses.get_mut(house as usize) else {
                     return;
                 };
@@ -5128,9 +5226,7 @@ impl World {
                     return;
                 }
                 if owner.tab_slot(tab).is_some_and(|p| p.building == unit) {
-                    if let Some(production) = owner.tab_slot_mut(tab).take() {
-                        owner.credits += cost - production.balance;
-                    }
+                    self.cancel_production(house, tab);
                     self.start_next_queued(house, tab);
                 }
             }
@@ -5147,13 +5243,8 @@ impl World {
             Order::CancelBuild { house, building } => {
                 // The refund is what has been paid.
                 let combat = self.is_defence(building);
-                let cost = self.building_types.get(building as usize).map_or(0, |kind| kind.cost);
-                if let Some(house) = self.houses.get_mut(house as usize) {
-                    if house.slot(combat).is_some_and(|p| p.building == building) {
-                        if let Some(production) = house.slot_mut(combat).take() {
-                            house.credits += cost - production.balance;
-                        }
-                    }
+                if self.houses.get(house as usize).and_then(|h| h.slot(combat)).is_some_and(|p| p.building == building) {
+                    self.cancel_production(house, usize::from(combat));
                 }
             }
             Order::Place { house, building, x, y } => {
@@ -5188,6 +5279,7 @@ impl World {
     /// Advances the simulation by one step.
     pub fn tick(&mut self) {
         self.tick += 1;
+        self.cancel_orphaned_production();
         // Production advances a tick at a time and is paid for as it goes. When a
         // stage's time is up the stage goes on and the step is paid: the balance
         // over the stages left. A house that cannot pay keeps the stage back and
@@ -5200,6 +5292,11 @@ impl World {
                 };
                 let item = if tab < 2 { Item::Building(production.building) } else { Item::Unit(production.building) };
                 if production.is_ready() && tab >= 2 {
+                    // A temporary outage must not be mistaken for the last
+                    // factory disappearing, even when the item is complete.
+                    if !self.factories(index as u8, item).any(|factory| self.online(factory)) {
+                        continue;
+                    }
                     // A person's finished unit leaves
                     // its factory at once, and if it cannot (the factory busy or
                     // the way shut) it is abandoned and its whole cost handed
@@ -5332,6 +5429,7 @@ impl World {
             self.grand_opening(building);
         }
         self.run_miners();
+        self.run_slaves();
 
         self.unload_factories();
         self.board_and_unload();
@@ -5482,6 +5580,8 @@ impl World {
         for (unit, (x, y)) in going {
             self.order(Order::Move { unit, x, y });
         }
+        // Engineers and garrisons can change ownership during this tick.
+        self.cancel_orphaned_production();
     }
 
     /// Asks whatever vehicle is resting in a cell to move to a neighbouring one.
@@ -5660,6 +5760,7 @@ impl World {
             return;
         };
         let packed = self.buildings.remove(index);
+        self.cancel_orphaned_production();
         let kind = self.building_types[packed.kind as usize].clone();
         for dy in 0..packed.size.1 {
             for dx in 0..packed.size.0 {
@@ -5671,7 +5772,9 @@ impl World {
         let Some(stats) = kind.undeploys_into else {
             return;
         };
-        let id = self.add_unit((packed.cell.0 + 1, packed.cell.1 + 1), DEPLOY_FACING, stats, packed.owner);
+        let facing = kind.deploy_facing.unwrap_or(DEPLOY_FACING);
+        let id = self.add_unit((packed.cell.0 + 1, packed.cell.1 + 1), facing, stats, packed.owner);
+        self.transfer_slave_host(slaves::Host::Building(building), slaves::Host::Unit(id));
         if let Some(unit) = self.units.iter_mut().find(|u| u.id == id) {
             let health = packed.health as i64 * stats.strength as i64 / kind.strength.max(1) as i64;
             unit.health = (health as i32).max(1);
@@ -5695,13 +5798,19 @@ impl World {
             self.units[index].deploying = false;
             return;
         }
+        let source = &self.units[index];
+        let (tag, owner, at) = (source.stats.kind, source.owner, (source.x, source.y, self.ground_z(source.x, source.y)));
+        let deploy_facing = (tag as usize).checked_sub(1).and_then(|kind| self.unit_types.get(kind)).and_then(|kind| kind.deploy_facing).unwrap_or(DEPLOY_FACING);
         let unit = &mut self.units[index];
-        if unit.facing != DEPLOY_FACING {
-            unit.turn = Turn::start(unit.turn.current(), (DEPLOY_FACING as u16) << 8, unit.stats.rot);
+        if unit.facing != deploy_facing {
+            let desired = (deploy_facing as u16) << 8;
+            let starting = unit.turn.desired != desired || unit.turn.remaining <= 0;
+            unit.turn = Turn::start(unit.turn.current(), desired, unit.stats.rot);
             if unit.turn.remaining > 0 {
+                if starting { self.events.push(combat::Event::DeployTurning { unit: id, kind: tag, owner, at }) }
                 return;
             }
-            unit.facing = DEPLOY_FACING;
+            unit.facing = deploy_facing;
         }
         let deployed = self.units.remove(index);
         for claim in self.claims.iter_mut().filter(|claim| **claim == deployed.id + 1) {
@@ -5709,11 +5818,15 @@ impl World {
         }
         if let Some(kind) = deployed.stats.deploys_into {
             self.add_building(deployed.owner, kind, Self::deploy_origin(deployed.cell()));
+            if let Some(building) = self.buildings.last() {
+                self.transfer_slave_host(slaves::Host::Unit(id), slaves::Host::Building(building.id));
+            }
             let full = self.building_types.get(kind as usize).map_or(1, |kind| kind.strength);
             if let Some(building) = self.buildings.last_mut() {
                 let health = deployed.health as i64 * full as i64 / deployed.stats.strength.max(1) as i64;
                 building.health = (health as i32).max(1);
             }
+            self.events.push(combat::Event::Deployed { unit: id, kind: tag, owner, at });
         }
     }
 
@@ -5783,6 +5896,13 @@ impl World {
             for &step in &unit.path {
                 mix(step as i64);
             }
+            if self.is_enslaved(unit.id) {
+                for amount in unit.work.cargo { mix(amount as i64); }
+                mix(unit.health as i64);
+            }
+        }
+        if !self.slave_pools.is_empty() {
+            for byte in bincode::serialize(&self.slave_pools).expect("slave miner state serializes") { mix(byte as i64); }
         }
         hash
     }
@@ -7561,6 +7681,224 @@ mod tests {
         assert_eq!(world.houses[1].credits, 200);
     }
 
+    /// All six production slots, with distinct land/sea factories and an
+    /// unrelated technology prerequisite. Factory sales themselves cost zero.
+    fn production_factories() -> (World, Vec<u32>, u32) {
+        let mut world = World::new(open_field(40), None);
+        world.houses = vec![House::default(), House { credits: 20_000, tech_level: 10, human: true, ..House::default() }, House::default()];
+        for (factory, naval) in [(Factory::Building, false), (Factory::Infantry, false), (Factory::Unit, false), (Factory::Unit, true), (Factory::Aircraft, false)] {
+            world.building_types.push(BuildingType {
+                factory: Some(factory), naval, owners: 1, size: (1, 1), strength: 1000,
+                fighter: combat::Fighter { capturable: true, ..combat::Fighter::default() },
+                ..BuildingType::default()
+            });
+        }
+        for combat in [false, true] {
+            world.building_types.push(BuildingType {
+                cost: 1080, owners: 1, tech_level: 1, combat, prerequisites: vec![vec![7]],
+                ..BuildingType::default()
+            });
+        }
+        world.building_types.push(BuildingType { size: (1, 1), strength: 1000, ..BuildingType::default() });
+        for tab in 2..6 {
+            let plane = (tab == 5).then_some(aircraft::PlaneStats {
+                flight_level: 1000, fighter: false, airport_bound: false, landable: true,
+                ammo: 1, slowdown: 500, pitch_speed: 250,
+            });
+            world.unit_types.push(UnitType {
+                cost: 1080, owners: 1, tech_level: 1, infantry: tab == 2, naval: tab == 4,
+                prerequisites: vec![vec![7]], stats: UnitStats { infantry: tab == 2, plane, ..UnitStats::default() },
+                ..UnitType::default()
+            });
+        }
+        let factories = (0..5).map(|kind| world.add_map_building(1, kind, (3 + kind as i32 * 5, 3), 256)).collect();
+        let technology = world.add_map_building(1, 7, (3, 10), 256);
+        (world, factories, technology)
+    }
+
+    fn begin_all_production(world: &mut World) {
+        for building in [5, 6] { world.order(Order::Build { house: 1, building }) }
+        for unit in 0..4 {
+            for _ in 0..3 { world.order(Order::BuildUnit { house: 1, unit }) }
+        }
+        for _ in 0..72 { world.tick() }
+        for tab in 0..6 {
+            let production = world.houses[1].tab_slot(tab).expect("each production must have started");
+            assert!(production.stage > 0 && !production.is_ready());
+        }
+    }
+
+    #[test]
+    fn losing_the_last_factory_refunds_each_slot_and_clears_unpaid_queues() {
+        // Sale begins cancelling before its animation ends; destruction and
+        // ownership transfer use the same rule for all five factory kinds.
+        for loss in 0..3 {
+            for factory in 0..5 {
+                let (mut world, factories, _) = production_factories();
+                begin_all_production(&mut world);
+                let before = world.houses[1].clone();
+                let affected: &[usize] = match factory { 0 => &[0, 1], 1 => &[2], 2 => &[3], 3 => &[4], _ => &[5] };
+                let refund: i32 = affected.iter().map(|&tab| 1080 - before.tab_slot(tab).unwrap().balance).sum();
+                assert!(refund > 0);
+                match loss {
+                    0 => {
+                        world.building_types[factory].buildup_frames = 4;
+                        world.buildup_ticks = 40;
+                        world.order(Order::Sell { building: factories[factory] });
+                        assert!(world.buildings.iter().any(|b| b.id == factories[factory]), "sale animation must still be running");
+                    }
+                    1 => world.kill(combat::Aim::Building(factories[factory])),
+                    _ => world.give_building_for_tests(factories[factory], 2),
+                }
+                assert_eq!(world.houses[1].credits, before.credits + refund, "loss {loss}, factory {factory}");
+                for tab in 0..6 {
+                    assert_eq!(world.houses[1].tab_slot(tab), if affected.contains(&tab) { None } else { before.tab_slot(tab) });
+                    if tab >= 2 {
+                        assert_eq!(world.houses[1].queue(tab).as_slice(), if affected.contains(&tab) { &[] } else { before.queue(tab).as_slice() });
+                    }
+                }
+                for tab in 0..6 {
+                    if let Some(production) = world.houses[1].tab_slot_mut(tab).as_mut() { production.suspended = true }
+                }
+                for _ in 0..100 { world.tick() }
+                assert_eq!(world.houses[1].credits, before.credits + refund, "a later tick must not refund again or restart a lost queue");
+                for &tab in affected { assert!(world.houses[1].tab_slot(tab).is_none()) }
+            }
+        }
+    }
+
+    #[test]
+    fn packing_the_last_yard_refunds_ready_and_held_buildings_immediately() {
+        let (mut world, factories, _) = production_factories();
+        world.order(Order::Build { house: 1, building: 5 });
+        world.order(Order::Build { house: 1, building: 6 });
+        for _ in 0..72 { world.tick() }
+        world.order(Order::Suspend { house: 1, building: 6 });
+        for _ in 0..700 { world.tick() }
+        assert!(world.houses[1].production.unwrap().is_ready());
+        assert!(world.houses[1].defence.unwrap().on_hold());
+        let refund = [world.houses[1].production, world.houses[1].defence].into_iter().flatten().map(|p| 1080 - p.balance).sum::<i32>();
+        let credits = world.houses[1].credits;
+        world.mcv_repacks = true;
+        world.buildup_ticks = 40;
+        world.building_types[0].buildup_frames = 4;
+        world.building_types[0].construction_yard = true;
+        world.building_types[0].undeploys_into = Some(UnitStats { deploys_into: Some(0), ..UnitStats::default() });
+        world.order(Order::Undeploy { building: factories[0], x: 10, y: 15 });
+        assert!(world.buildings.iter().any(|b| b.id == factories[0]));
+        assert!(world.houses[1].production.is_none() && world.houses[1].defence.is_none());
+        assert_eq!(world.houses[1].credits, credits + refund);
+    }
+
+    #[test]
+    fn another_factory_preserves_held_work_even_while_building_or_power_is_out() {
+        for factory in 0..5 {
+            let (mut world, factories, _) = production_factories();
+            begin_all_production(&mut world);
+            for tab in 0..6 { world.houses[1].tab_slot_mut(tab).as_mut().unwrap().suspended = true }
+            let before = world.houses[1].clone();
+            let other = world.add_map_building(1, factory as u16, (3 + factory as i32 * 5, 15), 256);
+            world.buildup_ticks = 400;
+            world.building_types[factory].buildup_frames = 4;
+            world.building_types[factory].powered = true;
+            world.building_types[factory].power = -100;
+            let buildup = world.start_buildup(factory as u16, None);
+            let remaining = world.buildings.iter_mut().find(|b| b.id == other).unwrap();
+            remaining.buildup = buildup;
+            remaining.frozen = Some(50);
+            world.houses[1].blackout_until = world.tick + 100;
+            world.order(Order::Sell { building: factories[factory] });
+            for _ in 0..10 { world.tick() }
+            assert_eq!(world.houses[1].credits, before.credits);
+            for tab in 0..6 {
+                assert_eq!(world.houses[1].tab_slot(tab), before.tab_slot(tab));
+                if tab >= 2 { assert_eq!(world.houses[1].queue(tab), before.queue(tab)) }
+            }
+        }
+    }
+
+    #[test]
+    fn losing_only_a_technology_prerequisite_keeps_existing_production() {
+        let (mut world, _, technology) = production_factories();
+        begin_all_production(&mut world);
+        let before = world.houses[1].clone();
+        world.kill(combat::Aim::Building(technology));
+        assert!(!world.buildable(1).contains(&5) && !world.buildable(1).contains(&6));
+        assert!(world.buildable_units(1).is_empty());
+        for _ in 0..20 { world.tick() }
+        for tab in 0..6 {
+            assert!(world.houses[1].tab_slot(tab).unwrap().stage > before.tab_slot(tab).unwrap().stage);
+            if tab >= 2 { assert_eq!(world.houses[1].queue(tab), before.queue(tab)) }
+        }
+    }
+
+    #[test]
+    fn a_ready_unit_waits_through_a_temporary_factory_outage() {
+        let (mut world, _, _) = production_factories();
+        begin_all_production(&mut world);
+        let mut remaining_payment = 0;
+        for tab in 0..6 {
+            let p = world.houses[1].tab_slot_mut(tab).as_mut().unwrap();
+            p.suspended = true;
+            if tab >= 2 { remaining_payment += p.balance; p.stage = PRODUCTION_STAGES; p.balance = 0 }
+        }
+        world.houses[1].credits -= remaining_payment;
+        for factory in &mut world.building_types[..5] { factory.powered = true; factory.power = -100 }
+        world.houses[1].blackout_until = world.tick + 100;
+        let before = world.houses[1].clone();
+        for _ in 0..10 { world.tick() }
+        assert_eq!(world.houses[1].credits, before.credits);
+        for tab in 2..6 {
+            assert_eq!(world.houses[1].tab_slot(tab), before.tab_slot(tab));
+            assert_eq!(world.houses[1].queue(tab), before.queue(tab));
+        }
+        // Restore this factory while the others remain offline. The paid
+        // vehicle leaves once, and the next queued one starts without a refund.
+        world.building_types[2].power = 0;
+        world.tick();
+        assert_eq!(world.units.iter().filter(|u| u.owner == 1 && u.stats.kind == 2).count(), 1);
+        assert_eq!(world.houses[1].credits, before.credits);
+        assert_eq!(world.houses[1].vehicles.unwrap().stage, 0);
+        assert_eq!(world.houses[1].vehicle_queue, vec![1]);
+        for _ in 0..3 { world.tick() }
+        assert_eq!(world.units.iter().filter(|u| u.owner == 1 && u.stats.kind == 2).count(), 1);
+    }
+
+    #[test]
+    fn an_engineer_capture_cancels_the_previous_owners_production_in_the_same_tick() {
+        let (mut world, factories, _) = production_factories();
+        begin_all_production(&mut world);
+        for tab in 0..6 { world.houses[1].tab_slot_mut(tab).as_mut().unwrap().suspended = true }
+        let before = world.houses[1].clone();
+        let cell = world.buildings.iter().find(|b| b.id == factories[2]).unwrap().cell;
+        let engineer = world.add_infantry(cell, 2, 0, UnitStats {
+            fighter: combat::Fighter { engineer: true, ..combat::Fighter::default() }, ..UnitStats::default()
+        }, 2).unwrap();
+        world.units.iter_mut().find(|u| u.id == engineer).unwrap().capture = Some(factories[2]);
+        world.tick();
+        assert_eq!(world.buildings.iter().find(|b| b.id == factories[2]).unwrap().owner, 2);
+        assert!(world.houses[1].vehicles.is_none() && world.houses[1].vehicle_queue.is_empty());
+        assert_eq!(world.houses[1].credits, before.credits + 1080 - before.vehicles.unwrap().balance);
+        assert!(world.houses[2].vehicles.is_none() && world.houses[2].vehicle_queue.is_empty());
+    }
+
+    #[test]
+    fn a_different_factions_factory_only_keeps_compatible_queued_units() {
+        let (mut world, factories, _) = production_factories();
+        begin_all_production(&mut world);
+        for tab in 0..6 { world.houses[1].tab_slot_mut(tab).as_mut().unwrap().suspended = true }
+        world.building_types.push(BuildingType { owners: 2, ..world.building_types[2].clone() });
+        world.add_map_building(1, 8, (30, 15), 256);
+        world.unit_types.push(UnitType { owners: 2, ..world.unit_types[1].clone() });
+        for _ in 0..2 { world.order(Order::BuildUnit { house: 1, unit: 4 }) }
+        let before = world.houses[1].clone();
+        world.kill(combat::Aim::Building(factories[2]));
+        let next = world.houses[1].vehicles.unwrap();
+        assert_eq!((next.building, next.stage, next.balance), (4, 0, 1080));
+        assert_eq!(world.houses[1].vehicle_queue, vec![4]);
+        assert_eq!(world.houses[1].credits, before.credits + 1080 - before.vehicles.unwrap().balance);
+    }
+
     #[test]
     fn a_unit_deploys_into_a_building_that_blocks_its_cells() {
         let mut world = base_world();
@@ -7592,6 +7930,139 @@ mod tests {
             assert!(!(inside(unit.x) && inside(unit.y)), "drove through the building");
         }
         assert_eq!(world.unit(other).unwrap().cell(), (10, 5));
+    }
+
+    fn deployment_world(facing: u8) -> (World, u32) {
+        let mut world = base_world();
+        world.buildup_ticks = 100;
+        world.building_types[0].strength = 1000;
+        world.building_types[0].buildup_frames = 10;
+        let id = world.add_unit((5, 5), facing, UnitStats { kind: 42, deploys_into: Some(0), strength: 1000, ..UnitStats::default() }, 1);
+        (world, id)
+    }
+
+    fn deployment_events(world: &mut World) -> Vec<(&'static str, u32, u16, u8, (i32, i32, i32))> {
+        world.take_events().into_iter().filter_map(|event| match event {
+            combat::Event::DeployTurning { unit, kind, owner, at } => Some(("turning", unit, kind, owner, at)),
+            combat::Event::Deployed { unit, kind, owner, at } => Some(("deployed", unit, kind, owner, at)),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn deployment_events_follow_the_actual_turn_and_building_transition_once() {
+        let (mut world, unit) = deployment_world(0);
+        let at = (5 * LEPTONS_PER_CELL + 128, 5 * LEPTONS_PER_CELL + 128, 0);
+        world.order(Order::Deploy { unit });
+        assert!(deployment_events(&mut world).is_empty(), "the order itself must not make deployment sounds");
+        world.tick();
+        assert_eq!(deployment_events(&mut world), vec![("turning", unit, 42, 1, at)]);
+        // ROT 5 needs 25 ticks for the half-circle. Repeated clicks must not
+        // restart that turn or duplicate either event.
+        for _ in 1..25 {
+            world.order(Order::Deploy { unit });
+            world.tick();
+            assert!(deployment_events(&mut world).is_empty());
+            assert!(world.unit(unit).is_some() && world.buildings().is_empty());
+        }
+        world.tick();
+        assert_eq!(deployment_events(&mut world), vec![("deployed", unit, 42, 1, at)]);
+        assert!(world.unit(unit).is_none());
+        assert!(world.buildings()[0].buildup.is_some(), "the deployment event belongs at buildup start");
+        for _ in 0..30 { world.tick(); assert!(deployment_events(&mut world).is_empty()) }
+    }
+
+    #[test]
+    fn an_aligned_or_sub_tick_turn_deploys_without_a_false_turning_event() {
+        for facing in [DEPLOY_FACING, DEPLOY_FACING - 1] {
+            let (mut world, unit) = deployment_world(facing);
+            world.order(Order::Deploy { unit });
+            assert!(deployment_events(&mut world).is_empty());
+            world.tick();
+            let events = deployment_events(&mut world);
+            assert_eq!(events.len(), 1);
+            assert_eq!((events[0].0, events[0].1, events[0].2), ("deployed", unit, 42));
+        }
+    }
+
+    #[test]
+    fn cancelling_or_blocking_deployment_never_emits_the_building_transition() {
+        for action in 0..3 {
+            let (mut world, unit) = deployment_world(0);
+            world.order(Order::Deploy { unit });
+            world.tick();
+            assert_eq!(deployment_events(&mut world)[0].0, "turning");
+            match action {
+                0 => world.order(Order::Stop { unit }),
+                1 => world.order(Order::Move { unit, x: 12, y: 5 }),
+                _ => { world.add_unit((6, 6), 0, UnitStats::default(), 0); }
+            }
+            for _ in 0..100 { world.tick(); assert!(deployment_events(&mut world).is_empty()) }
+            assert!(world.unit(unit).is_some() && world.buildings().is_empty());
+        }
+        let (mut world, unit) = deployment_world(0);
+        world.add_unit((6, 6), 0, UnitStats::default(), 0);
+        world.order(Order::Deploy { unit });
+        for _ in 0..30 { world.tick(); assert!(deployment_events(&mut world).is_empty()) }
+        assert!(world.unit(unit).is_some() && world.buildings().is_empty());
+    }
+
+    #[test]
+    fn resuming_the_same_deployment_turn_does_not_repeat_the_turning_event() {
+        let (mut world, unit) = deployment_world(0);
+        world.order(Order::Deploy { unit });
+        world.tick();
+        assert_eq!(deployment_events(&mut world)[0].0, "turning");
+        world.order(Order::Stop { unit });
+        world.order(Order::Deploy { unit });
+        let mut deployed = 0;
+        for _ in 0..40 {
+            world.tick();
+            for event in deployment_events(&mut world) {
+                assert_eq!(event.0, "deployed", "the original physical turn is still in progress");
+                deployed += 1;
+            }
+        }
+        assert_eq!(deployed, 1);
+
+        let (mut world, unit) = deployment_world(0);
+        world.order(Order::Deploy { unit });
+        world.tick();
+        assert_eq!(deployment_events(&mut world)[0].0, "turning");
+        world.kill(combat::Aim::Unit(unit));
+        for _ in 0..40 { world.tick(); assert!(deployment_events(&mut world).is_empty()) }
+        assert!(world.buildings().is_empty());
+    }
+
+    #[test]
+    fn a_driving_vehicle_reports_deployment_only_after_its_current_track_ends() {
+        let (mut world, unit) = deployment_world(0);
+        world.order(Order::Move { unit, x: 12, y: 5 });
+        for _ in 0..100 {
+            world.tick();
+            if world.unit(unit).unwrap().drive.is_some() { break }
+        }
+        assert!(world.unit(unit).unwrap().drive.is_some());
+        world.order(Order::Deploy { unit });
+        assert!(deployment_events(&mut world).is_empty());
+        let mut turning = false;
+        for _ in 0..200 {
+            world.tick();
+            if let Some(event) = deployment_events(&mut world).first() {
+                assert_eq!(event.0, "turning");
+                assert!(world.unit(unit).unwrap().drive.is_none());
+                turning = true;
+                break;
+            }
+            assert!(world.unit(unit).is_some() && world.buildings().is_empty());
+        }
+        assert!(turning);
+        let mut deployed = 0;
+        for _ in 0..40 {
+            world.tick();
+            for event in deployment_events(&mut world) { assert_eq!(event.0, "deployed"); deployed += 1 }
+        }
+        assert_eq!(deployed, 1);
     }
 
     #[test]
@@ -7818,5 +8289,133 @@ mod sight_step_tests {
         assert_eq!(super::sight_step(-1, -3), (0, 1));
         assert_eq!(super::sight_step(3, 1), (-1, 0));
         assert_eq!(super::sight_step(0, 0), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod yr_tests {
+    use super::*;
+
+    fn world() -> World {
+        let mut map = Map::new(24, 24);
+        for y in 0..24 { for x in 0..24 { map.set_cell(x, y, true, 0); } }
+        let mut world = World::new(map, None);
+        world.houses = vec![House::default(), House { credits: 1000, tech_level: 10, side: 2, ..House::default() }, House { side: 2, ..House::default() }];
+        world.unit_types.push(UnitType { cost: 200, size: 1, infantry: true, owners: 1, tech_level: 1, stats: UnitStats { infantry: true, strength: 100, speed: 10, accelerates: false, kind: 1, ..UnitStats::default() }, ..UnitType::default() });
+        world
+    }
+
+    fn enter(world: &mut World, unit: u32, building: u32) {
+        world.order(Order::Enter { unit, building });
+        for _ in 0..1000 { if world.unit(unit).is_none() { return } world.tick(); }
+        panic!("unit {unit} did not enter building {building}: {:?}", world.unit(unit).map(|u| (u.cell(), u.is_moving())));
+    }
+
+    #[test]
+    fn yr_build_time_multiplier_changes_time_without_discounting_the_item() {
+        let mut world = world();
+        world.building_types.push(BuildingType { cost: 800, build_time_multiplier: Some(1.5), strength: 100, size: (1, 1), owners: 1, tech_level: 1, ..BuildingType::default() });
+        assert_eq!(world.time_to_build(1, 0), 756);
+        world.unit_types[0].build_time_multiplier = Some(0.5);
+        assert_eq!(world.time_to_produce(1, Item::Unit(0)), 63);
+        assert_eq!(world.terms(Item::Building(0)).unwrap().cost, 800);
+        assert_eq!(world.terms(Item::Unit(0)).unwrap().cost, 200);
+    }
+
+    #[test]
+    fn yr_third_stolen_technology_is_independent_of_allied_and_soviet_technology() {
+        let mut world = world();
+        world.unit_types[0].requires_stolen_tech = 3;
+        world.houses[1].stolen = [true, true];
+        assert!(!world.may_build(1, Item::Unit(0)));
+        world.building_types.push(BuildingType { strength: 100, size: (1, 1), ..BuildingType::default() });
+        world.add_building(2, 0, (12, 12));
+        world.ability_rules.build_tech.push(0);
+        world.infiltrate(0, 1);
+        assert!(world.houses[1].third_stolen);
+        assert!(world.may_build(1, Item::Unit(0)));
+        world.houses[1].stolen = [false, false];
+        world.unit_types[0].requires_stolen_tech = 1;
+        assert!(!world.may_build(1, Item::Unit(0)));
+    }
+
+    #[test]
+    fn yr_bio_reactor_absorbs_infantry_adds_power_and_releases_them() {
+        let mut world = world();
+        world.building_types.push(BuildingType { strength: 100, size: (2, 2), power: 200, infantry_absorb: true, passengers: 2, size_limit: 1, extra_power: 100, ..BuildingType::default() });
+        world.add_building(1, 0, (8, 8));
+        let building = world.buildings[0].id;
+        let stats = world.unit_types[0].stats;
+        let a = world.add_infantry((5, 8), 2, 0x40, stats, 1).unwrap();
+        let b = world.add_infantry((5, 9), 2, 0x40, stats, 1).unwrap();
+        assert_eq!(world.entry_action(a, building), Some(combat::Entry::Absorb));
+        enter(&mut world, a, building);
+        assert_eq!(world.power(1), (300, 0));
+        enter(&mut world, b, building);
+        assert_eq!(world.power(1), (400, 0));
+        let passable = world.map.passable.clone();
+        world.map.passable.fill(false);
+        world.order(Order::Evacuate { building });
+        assert_eq!(world.buildings[0].occupants.len(), 2, "a blocked exit must not delete absorbed infantry");
+        assert_eq!(world.power(1), (400, 0));
+        world.map.passable = passable;
+        let c = world.add_infantry((5, 10), 2, 0x40, stats, 1).unwrap();
+        assert_eq!(world.entry_action(c, building), None);
+        world.order(Order::Evacuate { building });
+        assert!(world.unit(a).is_some() && world.unit(b).is_some());
+        assert_eq!(world.power(1), (200, 0));
+        assert!(world.buildings[0].occupants.is_empty());
+    }
+
+    #[test]
+    fn yr_grinder_consumes_own_unit_for_soylent_and_frees_its_controller() {
+        let mut world = world();
+        world.houses[1].credits = 10;
+        world.unit_types[0].soylent = Some(75);
+        world.building_types.push(BuildingType { strength: 100, size: (2, 2), grinding: true, ..BuildingType::default() });
+        world.add_building(1, 0, (8, 8));
+        let building = world.buildings[0].id;
+        let stats = world.unit_types[0].stats;
+        let captive = world.add_infantry((5, 8), 2, 0x40, stats, 1).unwrap();
+        let controller = world.add_unit((2, 2), 0, UnitStats::default(), 1);
+        world.units.iter_mut().find(|u| u.id == captive).unwrap().controlled_by = Some((controller, 2));
+        world.units.iter_mut().find(|u| u.id == controller).unwrap().controls = Some(captive);
+        assert_eq!(world.entry_action(captive, building), Some(combat::Entry::Grind));
+        enter(&mut world, captive, building);
+        assert_eq!(world.houses[1].credits, 85);
+        assert_eq!(world.unit(controller).unwrap().controls, None);
+        let enemy = world.add_infantry((5, 9), 2, 0x40, stats, 2).unwrap();
+        assert_eq!(world.entry_action(enemy, building), None);
+    }
+
+    #[test]
+    fn yr_third_building_survivors_use_the_third_divisor_and_crew() {
+        let mut world = world();
+        world.third_crew = Some(37);
+        world.third_survivor_divisor = 750;
+        world.building_types.push(BuildingType { strength: 100, size: (1, 1), crewed: true, soylent: 3000, ..BuildingType::default() });
+        world.add_building(1, 0, (8, 8));
+        let building = world.buildings[0].clone();
+        let kind = world.building_types[0].clone();
+        assert_eq!(world.crew_count(&building, &kind), 4);
+        assert_eq!(world.building_crew_kind(&building, &kind), Some(37));
+    }
+
+    #[test]
+    fn yr_cloning_vats_copy_once_and_stop_when_unpowered() {
+        let mut world = world();
+        world.building_types = vec![
+            BuildingType { strength: 100, size: (2, 2), factory: Some(Factory::Infantry), owners: 1, ..BuildingType::default() },
+            BuildingType { strength: 100, size: (2, 2), cloning: true, powered: true, power: -100, ..BuildingType::default() },
+            BuildingType { strength: 100, size: (1, 1), power: 100, ..BuildingType::default() },
+        ];
+        world.add_building(1, 0, (3, 3));
+        world.add_building(1, 1, (12, 12));
+        world.add_building(1, 2, (18, 18));
+        assert_eq!(world.exit_unit(1, 0), Exit::Out);
+        assert_eq!(world.units.len(), 2);
+        world.buildings[2].health = 0;
+        assert_eq!(world.exit_unit(1, 0), Exit::Out);
+        assert_eq!(world.units.len(), 3);
     }
 }

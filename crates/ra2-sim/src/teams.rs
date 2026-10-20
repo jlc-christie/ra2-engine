@@ -13,6 +13,26 @@
 use crate::combat::{Aim, FireError};
 use crate::{Factory, Order, Unit, World, LEPTONS_PER_CELL};
 
+#[cfg(test)]
+mod yr_tests {
+    use super::*;
+    use crate::{House, Map};
+
+    #[test]
+    fn yr_third_ai_triggers_do_not_run_for_allied_or_soviet_houses() {
+        let mut world = World::new(Map::new(1, 1), None);
+        world.houses = (0..3).map(|side| House { side, tech_level: 10, ..House::default() }).collect();
+        world.team_data.task_forces.push(Vec::new());
+        world.team_data.team_types.push(TeamType { base_defense: true, max: 10, ..TeamType::default() });
+        world.team_data.triggers.push(Trigger { team1: Some(0), team2: None, owner: Some(None), condition: -1, object: None, operand: 0, operator: 0, weight: 1.0, min_weight: 1.0, max_weight: 1.0, skirmish: true, side: 3, enabled: [true; 3], successes: 0, completed: 0 });
+        assert!(!world.trigger_eligible(0, 0, None, false, &[]));
+        assert!(!world.trigger_eligible(0, 1, None, false, &[]));
+        assert!(world.trigger_eligible(0, 2, None, false, &[]));
+        world.team_data.triggers[0].side = 0;
+        assert!((0..3).all(|house| world.trigger_eligible(0, house, None, false, &[])));
+    }
+}
+
 /// What an AI trigger counts: a building type or a unit type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Thing {
@@ -820,7 +840,7 @@ impl World {
             Some(Some(country)) if country != owner.country => return false,
             _ => {}
         }
-        if (trigger.side == 1 && owner.side != 0) || (trigger.side == 2 && owner.side != 1) {
+        if trigger.side > 0 && owner.side != trigger.side - 1 {
             return false;
         }
         if owner.tech_level < self.task_force_tech(Some(team1)).max(self.task_force_tech(trigger.team2)).max(0) {

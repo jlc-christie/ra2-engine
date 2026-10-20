@@ -414,7 +414,7 @@ impl World {
     }
 
     /// The soldier who gets out of something: the side's crew (`AlliedCrew`,
-    /// `SovietCrew`), a `Technician` for any other side, and for an armed
+    /// `SovietCrew`, `ThirdCrew`), a `Technician` for any other side, and for an armed
     /// thing a technician one time in seven or so (15 in 100).
     fn crew_kind(&mut self, owner: u8, armed: bool) -> Option<u16> {
         let side = self.houses.get(owner as usize).map_or(0, |h| h.side);
@@ -422,6 +422,7 @@ impl World {
         let crew = match side {
             0 => allied,
             1 => soviet,
+            2 => self.third_crew,
             _ => technician,
         };
         if armed && self.random_below(100) < 15 {
@@ -540,7 +541,7 @@ impl World {
     /// How many people a building holds.
     pub(crate) fn crew_count(&self, building: &crate::Building, kind: &crate::BuildingType) -> i32 {
         let side = self.houses.get(building.owner as usize).map_or(0, |house| house.side);
-        let mut divisor = if side == 1 { self.survivor_divisors.1 } else { self.survivor_divisors.0 };
+        let mut divisor = match side { 1 => self.survivor_divisors.1, 2 => self.third_survivor_divisor, _ => self.survivor_divisors.0 };
         if !kind.crewed || divisor == 0 {
             return 0;
         }

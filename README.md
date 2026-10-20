@@ -49,6 +49,58 @@ cargo test -p ra2-sim -p ra2-formats -p ra2-net
 cargo test --release --bin ra2-rust
 ```
 
+The menu animation reads `ra2ts_l.bik` from your game files and uses `ffmpeg`
+from `PATH` to decode it. Install FFmpeg to enable the animation; without it,
+the menus still work with their static backdrop. Only two decoded frames are
+queued, and the compressed movie is cached under the player's `cache/` folder.
+
+Window resolutions use logical pixels and follow the desktop's DPI scaling,
+including when moving between displays. Fullscreen scales to the selected game
+resolution; leaving fullscreen restores the desktop's DPI. Window sizes that
+exceed the current display are maximised into the desktop's available area.
+When the picture is enlarged (fullscreen or scaled menus), a Catmull-Rom pass
+filters the final world and UI together, matching the filter used by cnc-ddraw.
+`RA2_NEAREST=1` disables this pass for comparison.
+
+**Experimental Yuri's Revenge support** is available with
+`RA2_EDITION=yr cargo run --release`. For a custom installation, use
+`RA2_DIR="/path/to/Red Alert II" RA2_EDITION=yr cargo run --release`.
+It requires the installed RA2 and YR 1.001
+archives together, reads MD rules, art, strings and maps ahead of the base assets,
+and reports missing YR data instead of switching back to RA2. `RA2_DIR` can select
+that installation. Original game files are opened read-only.
+
+It loads the patched MD rules, art, AI, sound, EVA, music, string and map lists.
+The skirmish menu offers the ten original countries, including Yuri, with the
+original country loading pictures and their individual YR palettes. The third
+side uses its original radar and dialog backgrounds, and all six original
+theatres load their own tile sets and palettes. Rule identifiers remain English;
+displayed names and descriptions use the installed game's CSF language.
+
+Implemented expansion mechanics include the third side's production and AI
+configuration, slave-miner harvesting/reloading/regeneration and mobile/deployed
+conversion, Bio Reactor passenger power, Grinder refunds, and MasterMind multiple
+control with overload damage. Original game assets are never rewritten. Shared
+engine tables still come only from a validated RA2 `game.exe`; `gamemd.exe`
+offsets are never reused.
+
+This is **not yet a complete recreation of Yuri's Revenge**. Expansion super
+weapons, Gattling weapon stages, Magnetron lifting, Chaos Drone berserk effects,
+Battle Fortress passenger fire, Tank Bunker bonuses, Siege Chopper deployment,
+and Yuri Prime building control still need implementation. Slave-miner economic
+state and rule timings are tested, but its exact boarding animation and mission
+scheduling have not been matched frame by frame. Unsupported super-weapon types
+are reported separately from missing assets. Adding a type to the MD lists does
+not by itself implement its special behavior.
+
+The additional simulation state changes the engine's snapshot format. Saves from
+older engine builds are rejected rather than interpreted with the wrong layout.
+
+For example, `RA2_EDITION=yr RA2_SCREEN=game RA2_MAP=xmp02t2 cargo run --release`
+starts a compatible YR map. `RA2_EDITION=yr RA2_SCREEN=game cargo run --release`
+uses the default map from the YR map list; set `RA2_MAP` to select a particular map.
+Omitting `RA2_EDITION` keeps the normal RA2 mode.
+
 ## Known Issues
 > [!NOTE]
 > This is a mostly vibe-coded rewrite and is not a direct translation of the original game. The focus of this project

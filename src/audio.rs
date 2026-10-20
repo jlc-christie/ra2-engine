@@ -54,11 +54,17 @@ pub fn rules_list(files: &GameFiles, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn announcer_key(side: i32) -> &'static str {
+    match side { 1 => "Russian", 2 => "Yuri", _ => "Allied" }
+}
+
 #[derive(Resource)]
 struct Audio {
-    index: Option<AudioIndex>,
+    indices: Vec<Option<AudioIndex>>,
     sounds: Option<Ini>,
     eva: Option<Ini>,
+    /// Side of each country, retaining the rule file's country indices.
+    announcer_sides: Vec<i32>,
     themes: Option<Ini>,
     /// `GUIMainButtonSound`.
     button_sound: Option<String>,
@@ -157,9 +163,11 @@ fn setup(mut commands: Commands, files: Res<GameFiles>, prefs: Res<crate::prefs:
         _ => prefs.music,
     };
     commands.insert_resource(Audio {
-        index: files.get("audio.idx").and_then(AudioIndex::parse),
+        indices: files.audio_banks().map(|(index, _)| AudioIndex::parse(index)).collect(),
         sounds: ini("sound.ini"),
         eva: ini("eva.ini"),
+        announcer_sides: ini("rules.ini").map(|rules| (0..rules.section("Countries").len())
+            .map(|country| crate::terrain::country_side(&rules, country)).collect()).unwrap_or_default(),
         themes: ini("theme.ini"),
         button_sound: rules_sound(&files, "GUIMainButtonSound"),
         sound_volume: volume("SoundVolume", 0.7),
@@ -195,7 +203,8 @@ impl Audio {
         if let Some(handle) = self.decoded.get(&name) {
             return Some(handle.clone());
         }
-        let banked = || self.index.as_ref()?.decode(&name, files.get("audio.bag")?);
+        let banked = || self.indices.iter().zip(files.audio_banks())
+            .find_map(|(index, (_, bag))| index.as_ref()?.decode(&name, bag));
         let pcm = banked().or_else(|| Pcm::from_wav(files.get(&format!("{name}.wav"))?))?;
         let handle = sources.add(AudioSource { bytes: Arc::from(pcm.to_wav()) });
         self.decoded.insert(name, handle.clone());
@@ -223,6 +232,7 @@ fn play_cues(
     files: Res<GameFiles>,
     time: Res<Time<Real>>,
     setup: Option<Res<crate::game::GameSetup>>,
+    sim: Option<Res<crate::units::Sim>>,
     centre: Option<Res<crate::game::ViewCentre>>,
     window: Single<&Window, With<bevy::window::PrimaryWindow>>,
     mut sources: ResMut<Assets<AudioSource>>,
@@ -285,9 +295,11 @@ fn play_cues(
             let first = audio.eva_first.take().and_then(|first| audio.eva_waiting.iter().position(|(line, ..)| *line == first));
             let at = first.unwrap_or_else(|| (0..audio.eva_waiting.len()).min_by_key(|&at| rank(&audio.eva_waiting[at])).unwrap_or(0));
             let (line, ..) = audio.eva_waiting.remove(at);
-            // `Allied=` for the first side, `Russian=` for the others.
-            let soviet = setup.as_ref().is_some_and(|setup| setup.options.country >= 5);
-            let key = if soviet { "Russian" } else { "Allied" };
+            // EVA follows the actual house, including a network/local-seat
+            // switch. Yuri has its own lines in EVAMD, not the Soviet voice.
+            let side = sim.as_ref().and_then(|sim| sim.0.houses.get(crate::terrain::local() as usize)).map(|house| house.side)
+                .or_else(|| setup.as_ref().and_then(|setup| audio.announcer_sides.get(setup.options.country.max(0) as usize)).copied()).unwrap_or(0);
+            let key = announcer_key(side);
             let name = audio.eva.as_ref().and_then(|eva| eva.get(line, key)).map(|name| name.trim().to_owned());
             if let Some(handle) = name.and_then(|name| audio.sample(&files, &mut sources, &name)) {
                 commands.spawn((
@@ -508,5 +520,32 @@ fn on_button(
     }
     if let Some(sound) = audio.and_then(|audio| audio.button_sound.clone()) {
         cues.write(Cue::Sound(sound));
+    }
+}
+
+#[cfg(test)]
+mod edition_tests {
+    use super::*;
+
+    #[test]
+    fn original_yr_uses_distinct_decodable_announcers_for_all_three_sides() {
+        let dir = crate::files::dev_dir();
+        if crate::files::find(&dir, "ra2md.mix").is_none() { return }
+        let files = GameFiles::open_for_edition(&dir, crate::files::Edition::YuriAssets).unwrap();
+        let rules = Ini::parse(files.get("rules.ini").unwrap());
+        let eva = Ini::parse(files.get("eva.ini").unwrap());
+        let indices: Vec<_> = files.audio_banks().map(|(index, _)| AudioIndex::parse(index)).collect();
+        let mut voices = Vec::new();
+        for (country, expected) in [(0, "Allied"), (5, "Russian"), (9, "Yuri")] {
+            let key = announcer_key(crate::terrain::country_side(&rules, country));
+            assert_eq!(key, expected);
+            let voice = eva.get("EVA_ConstructionComplete", key).expect("each side has an original announcer");
+            let pcm = indices.iter().zip(files.audio_banks()).find_map(|(index, (_, bag))| index.as_ref()?.decode(voice, bag))
+                .or_else(|| Pcm::from_wav(files.get(&format!("{voice}.wav"))?))
+                .unwrap_or_else(|| panic!("the selected YR {key} voice {voice} must decode"));
+            assert!(!pcm.samples.is_empty());
+            voices.push(voice);
+        }
+        assert!(voices[0] != voices[1] && voices[1] != voices[2] && voices[0] != voices[2]);
     }
 }

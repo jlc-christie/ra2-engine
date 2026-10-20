@@ -180,7 +180,7 @@ enum OverlayKey {
     /// Frames of PIPS2.SHP and where each goes.
     Pips(Vec<(usize, IVec2)>),
     Wrench(usize),
-    UnitBar { lit: i32, frame: usize, border: bool },
+    UnitBar { lit: i32, frame: usize, border: bool, infantry: bool },
     Group(usize, bool),
     TargetLine(IVec2),
     BuildingBar { size: (i32, i32), height: i32, lit: i32, frame: usize },
@@ -395,7 +395,7 @@ fn placement_origin(sim: &World, cell: (i32, i32), building: u16) -> (i32, i32) 
 
 fn owned_by_player(sim: &World, target: Target) -> bool {
     match target {
-        Target::Unit(id) => sim.unit(id).is_some_and(|unit| unit.owner == local()),
+        Target::Unit(id) => sim.unit(id).is_some_and(|unit| unit.owner == local()) && !sim.is_enslaved(id),
         Target::Building(id) => sim.buildings().iter().any(|b| b.id == id && b.owner == local()),
     }
 }
@@ -713,6 +713,13 @@ fn clicks(
     planning: Res<crate::bar::PlanningMode>,
     mut status: MessageWriter<crate::bar::Status>,
 ) {
+    // A factory loss can cancel even a completed structure held by the mouse.
+    if let Some(building) = placing.0 {
+        let current = sim.0.houses.get(local() as usize).and_then(|house| house.slot(sim.0.is_defence(building)));
+        if current.is_none_or(|production| production.building != building || !production.is_ready()) {
+            placing.0 = None;
+        }
+    }
     // Forget things that no longer exist. A building that has packed up hands its
     // place in the selection to the vehicle it became.
     let before = selection.0.len();
@@ -722,7 +729,7 @@ fn clicks(
         .filter_map(|&target| match target {
             // A type with `Selectable=no` (the
             // paradrop plane) is never selected.
-            Target::Unit(id) if sim.0.unit(id).is_some_and(|unit| unit.stats.unselectable) => None,
+            Target::Unit(id) if sim.0.unit(id).is_some_and(|unit| unit.stats.unselectable) || sim.0.is_enslaved(id) => None,
             _ if exists(&sim.0, target) => Some(target),
             Target::Building(id) => sim.0.unpacked_into(id).map(Target::Unit),
             Target::Unit(_) => None,
@@ -750,7 +757,6 @@ fn clicks(
             sim.give(Order::Deploy { unit });
         } else if sim.0.can_deploy(unit) {
             sim.give(Order::Deploy { unit });
-            cues.write_batch(view.slam_sound.clone().map(Cue::Sound));
         } else if sim.0.unit(unit).is_some_and(|unit| unit.stats.deploys_into.is_some()) {
             info!(
                 "cannot deploy unit {unit} at {:?}: in the way {:?}",
@@ -841,8 +847,9 @@ fn clicks(
                         }
                     }
                     _ => {
-                        sim.give(Order::Sell { building });
-                        cues.write_batch(view.click_sound.clone().map(Cue::Sound));
+                        let allowed = sim.0.can_sell(building);
+                        if allowed { sim.give(Order::Sell { building }); }
+                        cues.write_batch(if allowed { view.click_sound.clone() } else { view.scold_sound.clone() }.map(Cue::Sound));
                     }
                 }
             }
@@ -1045,7 +1052,7 @@ fn clicks(
             (Target::Unit(unit), Action::Enter) => match hover.target {
                 Some(Target::Unit(transport)) => give(&mut sim, &mut plans, planning.0, unit, Order::Board { unit, transport }),
                 Some(Target::Building(building)) if sim.0.unit(unit).is_some_and(|u| u.plane.is_some()) => give(&mut sim, &mut plans, planning.0, unit, Order::Dock { unit, building }),
-                Some(Target::Building(building)) if sim.0.entry_action(unit, building) == Some(ra2_sim::combat::Entry::Treat) => give(&mut sim, &mut plans, planning.0, unit, Order::Enter { unit, building }),
+                Some(Target::Building(building)) if matches!(sim.0.entry_action(unit, building), Some(ra2_sim::combat::Entry::Treat | ra2_sim::combat::Entry::Absorb | ra2_sim::combat::Entry::Grind)) => give(&mut sim, &mut plans, planning.0, unit, Order::Enter { unit, building }),
                 Some(Target::Building(building))
                     if sim.0.unit(unit).is_some_and(|u| u.stats.harvester)
                         && sim.0.buildings().iter().any(|b| b.id == building && b.owner == local() && sim.0.building_types.get(b.kind as usize).is_some_and(|kind| kind.refinery)) =>
@@ -1272,7 +1279,7 @@ fn choose_cursor(
         wanted.0 = match (*mode, own) {
             (Mode::Repair, Some(id)) if world.can_repair(id) => cursor::REPAIR,
             (Mode::Repair, _) => cursor::NO_REPAIR,
-            (_, Some(_)) => cursor::SELL,
+            (_, Some(id)) if world.can_sell(id) => cursor::SELL,
             _ => cursor::NO_SELL,
         };
         return;
@@ -1877,10 +1884,12 @@ fn draw_overlays(
                     continue;
                 };
                 let at = unit_point(world, &view, unit);
-                // Seventeen pips two pixels apart, in
-                // green, yellow or red, with the border art only when selected.
+                // The original art has a 36px vehicle border and an 18px
+                // infantry border (PIPBRD frames 0 and 1).
+                let infantry = unit.stats.infantry;
+                let count = if infantry { 8 } else { 17 };
                 let ratio = unit.health as f32 / unit.stats.strength.max(1) as f32;
-                let lit = ((ratio * 17.0) as i32).clamp(1, 17);
+                let lit = ((ratio * count as f32) as i32).clamp(1, count);
                 let frame = if ratio <= art.red {
                     17
                 } else if ratio <= art.yellow {
@@ -1888,15 +1897,15 @@ fn draw_overlays(
                 } else {
                     15
                 };
-                let key = OverlayKey::UnitBar { lit, frame, border: selected };
+                let key = OverlayKey::UnitBar { lit, frame, border: selected, infantry };
                 if let (Some(pips), Some(border)) = (&art.pips, &art.pip_border) {
                     let image = art.images.entry(key).or_insert_with(|| {
                         let mut canvas = Canvas::new(IVec2::new(-24, -36), IVec2::new(24, -16));
                         if selected {
-                            canvas.shape(border, 0, &art.palette, IVec2::new(1, -26));
+                            canvas.shape(border, usize::from(infantry), &art.palette, IVec2::new(if infantry { 10 } else { 1 }, -26));
                         }
                         for i in 0..lit {
-                            canvas.shape(pips, frame, &art.palette, IVec2::new(-15 + 2 * i, -25));
+                            canvas.shape(pips, frame, &art.palette, IVec2::new(if infantry { -6 } else { -15 } + 2 * i, -25));
                         }
                         canvas.into_image(&mut images)
                     });
@@ -2112,7 +2121,7 @@ fn draw_overlays(
                 // lifted by up to 512 leptons in the middle, a 3-pixel square
                 // at each end, and a pulse of white running along it by the
                 // clock. Only the controller's selection shows it.
-                if let (true, Some(victim)) = (selected, unit.controls.and_then(|id| world.unit(id))) {
+                for victim in world.mind_controlled_units(unit.id).into_iter().filter(|_| selected).filter_map(|id| world.unit(id)) {
                     let from = (unit.x, unit.y, world.ground_z(unit.x, unit.y) + world.altitude(unit));
                     let to = (victim.x, victim.y, world.ground_z(victim.x, victim.y) + world.altitude(victim) + 0x46);
                     let spot = |p: (i32, i32, i32)| scene_point(view.origin, p.0, p.1, 0) - Vec2::new(0.0, p.2 as f32 * LEVEL_HEIGHT as f32 / ra2_sim::combat::LEVEL_HEIGHT as f32);

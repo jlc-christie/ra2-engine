@@ -27,12 +27,18 @@ impl Scenario {
     /// Loads a map with the player at one of its start positions.
     pub fn load_at(map: &str, start: Option<usize>) -> Option<Self> {
         let files = GameFiles::open().ok()?;
+        Self::load_files(&files, map, start)
+    }
+
+    /// Uses an explicitly selected asset edition without changing environment
+    /// variables shared with other tests.
+    fn load_files(files: &GameFiles, map: &str, start: Option<usize>) -> Option<Self> {
         let parsed = files
             .get(&format!("{map}.map"))
             .or_else(|| files.get(&format!("{map}.mpr")))
             .and_then(Map::parse)?;
-        let mut scene = terrain::build(&files, &parsed, &terrain::Player { start, ..terrain::Player::default() })?;
-        let mut built = units::build_world(&files, &mut scene);
+        let mut scene = terrain::build(files, &parsed, &terrain::Player { start, ..terrain::Player::default() })?;
+        let mut built = units::build_world(files, &mut scene);
         // These tests place things wherever the rules allow; the shroud has a
         // test of its own.
         built.world.map.shroud_on = false;
@@ -127,6 +133,62 @@ fn the_base_vehicle_deploys_and_a_power_plant_goes_beside_the_yard() {
     assert_eq!(game.world.power(PLAYER).0, 200);
     // On top of the yard is refused.
     assert!(!game.build_at("GAPOWR", yard));
+}
+
+#[test]
+fn selling_the_last_yard_cancels_a_paid_refinery_with_real_ra2_and_yr_rules() {
+    use crate::files::Edition;
+    let dir = crate::files::dev_dir();
+    if !dir.exists() {
+        eprintln!("game files not found; skipping");
+        return;
+    }
+    for (edition, map) in [(Edition::RedAlert2, "mp02t2"), (Edition::YuriAssets, "xmp02t2")] {
+        if edition == Edition::YuriAssets && crate::files::find(&dir, "ra2md.mix").is_none() {
+            eprintln!("Yuri's Revenge files not found; skipping that edition");
+            continue;
+        }
+        let files = GameFiles::open_for_edition(&dir, edition).unwrap_or_else(|error| panic!("{edition:?}: {error}"));
+        let mut game = Scenario::load_files(&files, map, Some(0)).unwrap_or_else(|| panic!("{edition:?}: could not load {map}"));
+        let yard_cell = game.deploy_base();
+        let yard = game.world.buildings().iter().find(|b| {
+            b.owner == PLAYER && game.world.building_types[b.kind as usize].construction_yard
+        }).expect("the MCV must become a construction yard").id;
+        let plant_cell = game.find_spot("GAPOWR", yard_cell, 12).expect("somewhere beside the yard for a power plant");
+        assert!(game.build_at("GAPOWR", plant_cell), "{edition:?}: power plant production/placement failed");
+        game.run(100);
+        let plant = game.world.buildings().iter().find(|b| b.owner == PLAYER && b.cell == plant_cell).unwrap().id;
+        let refinery = game.building("GAREFN");
+        assert!(game.options().contains(&"GAREFN"), "{edition:?}: real prerequisites must allow the refinery");
+        let initial_credits = game.world.houses[PLAYER as usize].credits;
+        let full_build_ticks = game.world.time_to_build(PLAYER, refinery).max(1) as u32;
+        game.world.order(Order::Build { house: PLAYER, building: refinery });
+        for _ in 0..full_build_ticks {
+            let production = game.world.houses[PLAYER as usize].production.expect("the refinery must remain in production");
+            if production.stage >= 5 { break }
+            game.world.tick();
+        }
+        let production = game.world.houses[PLAYER as usize].production.unwrap();
+        assert_eq!(production.building, refinery);
+        assert!(production.stage >= 5 && !production.is_ready(), "{edition:?}: test needs a partially completed refinery");
+        let paid = initial_credits - game.world.houses[PLAYER as usize].credits;
+        assert!(paid > 0 && paid < game.world.building_types[refinery as usize].cost, "{edition:?}: real production must already have charged credits");
+
+        game.world.order(Order::Sell { building: yard });
+        assert!(game.world.houses[PLAYER as usize].production.is_none(), "{edition:?}: sale must cancel immediately, before its animation ends");
+        assert_eq!(game.world.houses[PLAYER as usize].credits, initial_credits, "{edition:?}: refund exactly the {paid} credits already paid for the refinery");
+        assert!(game.world.buildings().iter().any(|b| b.id == yard && b.buildup.is_some()), "{edition:?}: the yard sale must still be animated, so its sale proceeds have not been paid");
+        assert!(game.world.buildings().iter().any(|b| b.id == plant && b.owner == PLAYER));
+        assert!(!game.world.houses[PLAYER as usize].defeated, "{edition:?}: cancellation must not depend on defeat");
+
+        game.run(full_build_ticks + 200);
+        assert!(game.world.houses[PLAYER as usize].production.is_none(), "{edition:?}: cancelled production must never restart");
+        assert!(!game.world.buildings().iter().any(|b| b.owner == PLAYER && b.kind == refinery), "{edition:?}: the refinery must not complete after losing the last yard");
+        assert!(!game.world.buildings().iter().any(|b| b.id == yard));
+        assert!(game.world.buildings().iter().any(|b| b.id == plant && b.owner == PLAYER));
+        assert!(!game.world.houses[PLAYER as usize].defeated);
+        eprintln!("{edition:?}/{map}: cancelled refinery at stage {}, refunded {paid}; power plant remains", production.stage);
+    }
 }
 
 #[test]

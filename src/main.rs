@@ -17,6 +17,9 @@ mod files;
 mod fuzz;
 mod game;
 mod home;
+mod movie;
+mod loading;
+mod resample;
 mod hud;
 mod lighting;
 mod net;
@@ -56,6 +59,9 @@ fn main() {
         }
     };
     eprintln!("the game's files are in {}", files.dir().display());
+    if files.edition() == files::Edition::YuriAssets {
+        eprintln!("experimental Yuri's Revenge: expansion rules, three sides and six theatres; some expansion mechanics remain unsupported");
+    }
     let video = video::Video::from_settings();
     App::new()
         .insert_resource(files)
@@ -71,6 +77,7 @@ fn main() {
         )
         .add_plugins((shell::ShellPlugin, game::GamePlugin, hud::HudPlugin, units::UnitsPlugin, debug::DebugPlugin, audio::AudioPlugin, cursor::CursorPlugin, control::ControlPlugin, pause::PausePlugin, radar::RadarPlugin, shroud::ShroudPlugin, beams::BeamsPlugin))
         .add_plugins((video::VideoPlugin, bar::BarPlugin, endgame::EndGamePlugin, saves::SavesPlugin, net::NetPlugin, notice::NoticePlugin, depth::DepthPlugin))
+        .add_plugins((movie::MoviePlugin, loading::LoadingPlugin, resample::ResamplePlugin))
         .run();
 }
 

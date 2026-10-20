@@ -14,6 +14,70 @@ const ARCHIVES: &[&str] = &[
     "theme.mix",
 ];
 
+/// Selects the original rules, art, maps and interface. Expansion-specific
+/// simulation behavior is implemented separately, and remains incomplete.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Edition {
+    #[default]
+    RedAlert2,
+    YuriAssets,
+}
+
+impl Edition {
+    fn from_env() -> std::io::Result<Self> {
+        match std::env::var("RA2_EDITION").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("") | Ok("ra2") => Ok(Self::RedAlert2),
+            Ok("yr") => Ok(Self::YuriAssets),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "RA2_EDITION must be ra2 or yr")),
+        }
+    }
+
+    fn asset_name<'a>(self, name: &'a str) -> &'a str {
+        if self == Self::YuriAssets {
+            if let Some((_, md)) = MD_ALIASES.iter().find(|(base, _)| name.eq_ignore_ascii_case(base)) {
+                return md;
+            }
+        }
+        name
+    }
+}
+
+// Highest priority first. In the installed 1.001 data, expandmd01 replaces
+// rulesmd.ini and soundmd.ini from localmd.mix.
+const YR_ARCHIVES: &[&str] = &["expandmd01.mix", "langmd.mix", "ra2md.mix", "multimd.mix", "mapsmd03.mix", "thememd.mix"];
+const YR_NESTED: &[&str] = &[
+    "localmd.mix", "cachemd.mix", "ntrlmd.mix", "cameomd.mix",
+    "isotemmd.mix", "isosnomd.mix", "isourbmd.mix",
+    "temmd.mix", "snomd.mix", "urbmd.mix",
+    "conqmd.mix", "isogenmd.mix", "genermd.mix", "audiomd.mix", "loadmd.mix",
+    "isodesmd.mix", "isolunmd.mix", "isoubnmd.mix",
+    "isodes.mix", "isolun.mix", "isoubn.mix",
+    "desert.mix", "lunar.mix", "urbann.mix",
+];
+// Despite its name, SIDEC02MD contains Yuri's sidebar, not the Soviet one.
+// Allied and Soviet sidebars still come from the original SIDEC01/02 archives.
+const YR_SIDEBARS: &[&str] = &["sidec02md.mix"];
+const MD_ALIASES: &[(&str, &str)] = &[
+    ("rules.ini", "rulesmd.ini"),
+    ("art.ini", "artmd.ini"),
+    ("ai.ini", "aimd.ini"),
+    ("sound.ini", "soundmd.ini"),
+    ("eva.ini", "evamd.ini"),
+    ("theme.ini", "thememd.ini"),
+    ("ra2.csf", "ra2md.csf"),
+    ("missions.pkt", "missionsmd.pkt"),
+    ("mpmodes.ini", "mpmodesmd.ini"),
+    // The direct-to-game debug entry point defaults to MPBattle.ini.
+    ("mpbattle.ini", "mpbattlemd.ini"),
+    ("temperat.ini", "temperatmd.ini"),
+    ("snow.ini", "snowmd.ini"),
+    ("urban.ini", "urbanmd.ini"),
+    ("desert.ini", "desertmd.ini"),
+    ("lunar.ini", "lunarmd.ini"),
+    ("urbann.ini", "urbannmd.ini"),
+    ("ui.ini", "uimd.ini"),
+];
+
 /// Archives nested inside the top-level ones that are searched.
 const NESTED: &[&str] = &[
     "local.mix",
@@ -47,10 +111,12 @@ const SIDEBARS: &[&str] = &["sidec01.mix", "sidec02.mix"];
 #[derive(Resource, Clone)]
 pub struct GameFiles {
     dir: PathBuf,
+    edition: Edition,
     archives: Vec<Mix>,
     /// Each side's sidebar archive (missing ones left empty), and the side
     /// whose art is looked in first.
     sidebars: Vec<Option<Mix>>,
+    sidebar_overlays: Vec<Option<Mix>>,
     side: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -73,21 +139,46 @@ impl GameFiles {
 
     /// Opens the game's archives in `dir`. An error names the file at fault.
     pub fn open_at(dir: &Path) -> std::io::Result<Self> {
+        Self::open_for_edition(dir, Edition::from_env()?)
+    }
+
+    /// Opens an explicit edition without changing process-wide environment.
+    /// YR overlays the expansion's rules, art, maps, theatres and Yuri sidebar.
+    pub fn open_for_edition(dir: &Path, edition: Edition) -> std::io::Result<Self> {
         let dir = dir.to_path_buf();
+        let (mut archives, sidebar_overlays) = if edition == Edition::YuriAssets {
+            let (archives, mut yuri) = Self::read_archives(&dir, YR_ARCHIVES, YR_NESTED, YR_SIDEBARS)?;
+            (archives, vec![None, None, yuri.pop().flatten()])
+        } else {
+            (Vec::new(), SIDEBARS.iter().map(|_| None).collect())
+        };
+        let (base, sidebars) = Self::read_archives(&dir, ARCHIVES, NESTED, SIDEBARS)?;
+        archives.extend(base);
+        let files = Self { dir, edition, archives, sidebars, sidebar_overlays, side: Default::default() };
+        if edition == Edition::YuriAssets {
+            let missing: Vec<_> = MD_ALIASES.iter().filter(|(base, _)| files.get(base).is_none()).map(|(_, md)| *md).collect();
+            if !missing.is_empty() {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("experimental YR assets are incomplete: {}", missing.join(", "))));
+            }
+        }
+        Ok(files)
+    }
+
+    fn read_archives(dir: &Path, names: &[&str], nested_names: &[&str], sidebar_names: &[&str]) -> std::io::Result<(Vec<Mix>, Vec<Option<Mix>>)> {
         let mut archives = Vec::new();
-        let mut sidebars: Vec<Option<Mix>> = SIDEBARS.iter().map(|_| None).collect();
-        for name in ARCHIVES {
+        let mut sidebars: Vec<Option<Mix>> = sidebar_names.iter().map(|_| None).collect();
+        for name in names {
             let path = find(&dir, name).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, format!("{name} not found"))
             })?;
             let named = |error: std::io::Error| std::io::Error::new(error.kind(), format!("{name}: {error}"));
             let mix = Mix::open(path).map_err(named)?;
-            for nested in NESTED {
+            for nested in nested_names {
                 if let Some(inner) = mix.nested(nested) {
                     archives.push(inner.map_err(named)?);
                 }
             }
-            for (slot, nested) in sidebars.iter_mut().zip(SIDEBARS) {
+            for (slot, nested) in sidebars.iter_mut().zip(sidebar_names) {
                 if slot.is_none() {
                     if let Some(inner) = mix.nested(nested) {
                         *slot = Some(inner.map_err(named)?);
@@ -96,12 +187,15 @@ impl GameFiles {
             }
             archives.push(mix);
         }
-        Ok(Self { dir, archives, sidebars, side: Default::default() })
+        Ok((archives, sidebars))
     }
 
     /// The original's executable, if it is there and its tables are where
     /// they are read from.
     pub fn engine_exe(&self) -> Option<Vec<u8>> {
+        // This experimental mode still runs our RA2 simulation/cursor code.
+        // Its shared tables may come only from the digest-checked RA2 game.exe;
+        // gamemd.exe has different addresses and is never interpreted here.
         std::fs::read(find(&self.dir, EXE)?).ok().filter(|exe| exe_tables_match(exe))
     }
 
@@ -110,20 +204,34 @@ impl GameFiles {
         &self.dir
     }
 
+    pub fn edition(&self) -> Edition {
+        self.edition
+    }
+
     /// Reads a file that sits in the game directory outside the archives.
     pub fn loose(&self, relative: &str) -> Option<Vec<u8>> {
         std::fs::read(self.dir.join(relative)).ok()
     }
 
     pub fn get(&self, name: &str) -> Option<&[u8]> {
+        let name = self.edition.asset_name(name);
         let side = self.side.load(std::sync::atomic::Ordering::Relaxed);
+        let shared = if side == 2 { 1 } else { side };
         let sidebar = |at: usize| self.sidebars.get(at).and_then(Option::as_ref).and_then(|mix| mix.get(name));
-        sidebar(side).or_else(|| sidebar(0)).or_else(|| self.archives.iter().find_map(|mix| mix.get(name)))
+        let overlay = |at: usize| self.sidebar_overlays.get(at).and_then(Option::as_ref).and_then(|mix| mix.get(name));
+        overlay(side).or_else(|| sidebar(shared)).or_else(|| sidebar(0)).or_else(|| self.archives.iter().find_map(|mix| mix.get(name)))
     }
 
-    /// Chooses whose sidebar art is used: the player's side (0 Allied, 1 Soviet).
+    /// YR's audio bank adds samples to the original bank. Each index must be
+    /// decoded against its own bag, then missing samples fall through to RA2.
+    pub fn audio_banks(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.archives.iter().filter_map(|mix| mix.get("audio.idx").zip(mix.get("audio.bag")))
+    }
+
+    /// Chooses whose sidebar art is used: 0 Allied, 1 Soviet, 2 Yuri (YR only).
     pub fn set_side(&self, side: usize) {
-        self.side.store(side.min(SIDEBARS.len() - 1), std::sync::atomic::Ordering::Relaxed);
+        let last = if self.edition == Edition::YuriAssets { 2 } else { 1 };
+        self.side.store(side.min(last), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -223,23 +331,31 @@ impl Check {
 /// Not original behaviour.
 pub fn check(dir: &Path) -> Check {
     let failed = |problem: Problem| Check { problems: vec![problem], warnings: Vec::new(), files: None };
+    let edition = match Edition::from_env() {
+        Ok(edition) => edition,
+        Err(error) => return failed(Problem::Damaged(error.to_string())),
+    };
     match std::fs::read_dir(dir) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return failed(Problem::NoPermission),
         Err(_) => return failed(Problem::Gone),
     }
-    let mut problems: Vec<Problem> = ARCHIVES.iter().filter(|name| find(dir, name).is_none()).map(|name| Problem::Missing(name)).collect();
+    let yr_archives = if edition == Edition::YuriAssets { YR_ARCHIVES } else { &[] };
+    let mut problems: Vec<Problem> = ARCHIVES.iter().chain(yr_archives).filter(|name| find(dir, name).is_none()).map(|name| Problem::Missing(name)).collect();
     if !problems.is_empty() {
         return Check { problems, warnings: Vec::new(), files: None };
     }
     let mut warnings = Vec::new();
+    if edition == Edition::YuriAssets {
+        warnings.push("Experimental Yuri's Revenge: expansion rules, three sides and six theatres; expansion gameplay is not yet complete".into());
+    }
     let simpler = "vehicles will turn on the spot and the shroud's edges and the cursor will be plainer";
     match find(dir, EXE).map(std::fs::read) {
         Some(Ok(exe)) if exe_tables_match(&exe) => {}
         Some(Ok(_)) => warnings.push(format!("{EXE} is a version other than 1.006, so {simpler}")),
         _ => warnings.push(format!("{EXE} couldn't be read, so {simpler}")),
     }
-    let files = match GameFiles::open_at(dir) {
+    let files = match GameFiles::open_for_edition(dir, edition) {
         Ok(files) => files,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return failed(Problem::NoPermission),
         Err(error) => {
@@ -252,6 +368,9 @@ pub fn check(dir: &Path) -> Check {
         if slot.is_none() {
             missing.push(name);
         }
+    }
+    if edition == Edition::YuriAssets && files.sidebar_overlays.get(2).is_none_or(Option::is_none) {
+        missing.push("sidec02md.mix");
     }
     if !missing.is_empty() {
         problems.push(Problem::MissingInside(missing));
@@ -340,6 +459,126 @@ pub fn detect() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("ra2-edition-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A minimal unencrypted MIX, so edition selection is also tested without
+    /// requiring commercial game files or modifying an installation.
+    fn write_mix(path: &Path, entries: &[(&str, &[u8])]) {
+        let mut bytes = Vec::new();
+        bytes.extend(0u32.to_le_bytes());
+        bytes.extend((entries.len() as u16).to_le_bytes());
+        bytes.extend((entries.iter().map(|(_, data)| data.len()).sum::<usize>() as u32).to_le_bytes());
+        let mut offset = 0;
+        for (name, data) in entries {
+            bytes.extend(ra2_formats::mix::mix_id(name).to_le_bytes());
+            bytes.extend((offset as u32).to_le_bytes());
+            bytes.extend((data.len() as u32).to_le_bytes());
+            offset += data.len();
+        }
+        for (_, data) in entries { bytes.extend_from_slice(data) }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn edition_fixture(dir: &Path, omit: Option<&str>) {
+        for name in ARCHIVES.iter().chain(YR_ARCHIVES) { write_mix(&dir.join(name), &[]) }
+        write_mix(&dir.join("ra2.mix"), &[("rules.ini", b"[MTNK]\nImage=BASE\n"), ("art.ini", b"base art")]);
+        let entries: Vec<_> = MD_ALIASES.iter().filter(|(_, md)| Some(*md) != omit).map(|(_, md)| (*md, b"unpatched YR data".as_slice())).collect();
+        write_mix(&dir.join("ra2md.mix"), &entries);
+        write_mix(&dir.join("expandmd01.mix"), &[("rulesmd.ini", b"[MTNK]\nImage=GTNK\n")]);
+    }
+
+    #[test]
+    fn yr_patches_override_md_data_while_ra2_ignores_both() {
+        let dir = TestDir::new();
+        edition_fixture(&dir.0, None);
+        let base = GameFiles::open_for_edition(&dir.0, Edition::RedAlert2).unwrap();
+        let yr = GameFiles::open_for_edition(&dir.0, Edition::YuriAssets).unwrap();
+        assert_eq!(base.get("rules.ini"), Some(b"[MTNK]\nImage=BASE\n".as_slice()));
+        assert_eq!(yr.get("RULES.INI"), Some(b"[MTNK]\nImage=GTNK\n".as_slice()));
+        assert_eq!(yr.get("rules.ini"), yr.get("rulesmd.ini"));
+    }
+
+    #[test]
+    fn incomplete_yr_data_does_not_fall_back_to_ra2() {
+        let dir = TestDir::new();
+        edition_fixture(&dir.0, Some("artmd.ini"));
+        let error = GameFiles::open_for_edition(&dir.0, Edition::YuriAssets).err().expect("missing MD art must fail even when base art exists");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("artmd.ini"));
+        std::fs::remove_file(dir.0.join("langmd.mix")).unwrap();
+        let error = GameFiles::open_for_edition(&dir.0, Edition::YuriAssets).err().expect("a missing YR archive must fail");
+        assert!(error.to_string().contains("langmd.mix"));
+        assert!(GameFiles::open_for_edition(&dir.0, Edition::RedAlert2).is_ok());
+    }
+
+    #[test]
+    fn installed_yr_rules_strings_map_and_shared_visuals_load() {
+        use ra2_formats::{csf::Csf, ini::Ini, map::Map, shp::Shp, vxl::{Hva, Vxl}};
+        let dir = dev_dir();
+        if find(&dir, "ra2md.mix").is_none() { return }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).unwrap();
+        assert_eq!(files.edition(), Edition::YuriAssets);
+        let rules = Ini::parse(files.get("rules.ini").unwrap());
+        assert_eq!(rules.get("MTNK", "Image"), Some("GTNK"));
+        let patch = Mix::open(find(&dir, "expandmd01.mix").unwrap()).unwrap();
+        assert_eq!(files.get("rules.ini"), patch.get("rulesmd.ini"));
+        let local = Mix::open(find(&dir, "ra2md.mix").unwrap()).unwrap().nested("localmd.mix").unwrap().unwrap();
+        assert_ne!(files.get("rules.ini"), local.get("rulesmd.ini"));
+        let strings = Csf::parse(files.get("ra2.csf").unwrap()).unwrap();
+        assert!(strings.get("GUI:GameControls").is_some());
+        let map = Map::parse(files.get("xmp02t2.map").unwrap()).unwrap();
+        assert_eq!((&*map.theater, map.width, map.height), ("TEMPERATE", 100, 100));
+        let art = Ini::parse(files.get("art.ini").unwrap());
+        assert_eq!(art.get("GISequence", "Deployed"), Some("292,1,1"));
+        let gi = Shp::parse(files.get("gi.shp").unwrap()).unwrap();
+        assert!(gi.frames.get(292).is_some());
+        let model = rules.get("MTNK", "Image").unwrap().to_lowercase();
+        let vxl = Vxl::parse(files.get(&format!("{model}.vxl")).unwrap()).unwrap();
+        let hva = files.get(&format!("{model}.hva")).and_then(Hva::parse);
+        for facing in (0..=255).step_by(8) {
+            let shadow = crate::voxel::shadow(&vxl, hva.as_ref(), facing, false, 0, None).unwrap();
+            assert!(shadow.rgba.chunks_exact(4).any(|p| p[3] != 0), "YR Grizzly shadow is empty at {facing}");
+        }
+    }
+
+    #[test]
+    fn yr_sidebar_selection_keeps_soviet_art_and_adds_yuri_overlays() {
+        let dir = dev_dir();
+        if find(&dir, "ra2md.mix").is_none() { return }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).unwrap();
+        let base = Mix::open(find(&dir, "ra2.mix").unwrap()).unwrap();
+        let soviet = base.nested("sidec02.mix").unwrap().unwrap();
+        let md = Mix::open(find(&dir, "ra2md.mix").unwrap()).unwrap();
+        let yuri = md.nested("sidec02md.mix").unwrap().unwrap();
+        files.set_side(1);
+        for name in ["sidebar.pal", "side1.shp", "radar.shp"] {
+            assert!(soviet.get(name).is_some(), "missing Soviet {name}");
+            assert_eq!(files.get(name), soviet.get(name), "Soviets must keep their own {name}");
+        }
+        files.set_side(2);
+        for name in ["radary.shp", "radaryuri.pal", "bkgdlgy.shp", "uibkgdy.pal"] {
+            assert!(yuri.get(name).is_some(), "missing Yuri {name}");
+            assert_eq!(files.get(name), yuri.get(name));
+        }
+        assert_eq!(files.get("side1.shp"), soviet.get("side1.shp"), "shared sidebar frames use the Soviet family");
+    }
+
     #[test]
     fn the_steam_copy_passes_its_check() {
         let dir = dev_dir();
@@ -349,10 +588,17 @@ mod tests {
         }
         let check = check(&dir);
         assert_eq!(check.problems, Vec::new());
-        assert_eq!(check.warnings, Vec::<String>::new());
+        if check.files.as_ref().is_some_and(|files| files.edition() == Edition::YuriAssets) {
+            assert_eq!(check.warnings.len(), 1);
+            assert!(check.warnings[0].starts_with("Experimental Yuri's Revenge:"));
+        } else {
+            assert_eq!(check.warnings, Vec::<String>::new());
+        }
         assert!(check.ok());
-        // Found from the folder above it too.
-        assert_eq!(search(dir.parent().unwrap(), 2, 100).as_deref(), Some(dir.as_path()));
+        // Found from the folder above it too. The development depot may be a
+        // symlink to Steam; search deliberately traverses real directories.
+        let actual = dir.canonicalize().unwrap();
+        assert_eq!(search(actual.parent().unwrap(), 2, 100).as_deref(), Some(actual.as_path()));
     }
 
     #[test]

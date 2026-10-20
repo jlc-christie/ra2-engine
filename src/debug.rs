@@ -1,6 +1,6 @@
 //! Development aids.
 
-use bevy::camera::RenderTarget;
+use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::render_resource::Extent3d;
 use bevy::render::render_resource::TextureFormat;
@@ -21,7 +21,7 @@ impl Plugin for DebugPlugin {
             app.insert_resource(Script::parse(&script)).add_systems(PreUpdate, play_script.after(bevy::input::InputSystems));
         }
         if std::env::var_os("RA2_SHOT").is_some() {
-            app.add_systems(PostStartup, draw_off_screen).add_systems(Update, (follow_window, capture_and_exit));
+            app.add_systems(PostStartup, draw_off_screen).add_systems(Update, (follow_window, capture_and_exit).chain());
         }
     }
 }
@@ -39,25 +39,67 @@ fn draw_off_screen(
     camera: Single<Entity, With<Camera2d>>,
 ) {
     let image = Image::new_target_texture(
-        window.width() as u32,
-        window.height() as u32,
+        window.physical_width(),
+        window.physical_height(),
         TextureFormat::Rgba8UnormSrgb,
         None,
     );
     let handle = images.add(image);
-    commands.entity(*camera).insert((RenderTarget::Image(handle.clone().into()), IsDefaultUiCamera));
+    commands.entity(*camera).insert((RenderTarget::Image(ImageRenderTarget { handle: handle.clone(), scale_factor: window.scale_factor() }), IsDefaultUiCamera));
     commands.insert_resource(OffScreen(handle));
 }
 
 /// Keeps the picture the size of the window when the window changes size.
-fn follow_window(mut images: ResMut<Assets<Image>>, window: Single<&Window, With<PrimaryWindow>>, target: Option<Res<OffScreen>>) {
+fn follow_window(mut images: ResMut<Assets<Image>>, window: Single<&Window, With<PrimaryWindow>>, target: Option<Res<OffScreen>>, mut cameras: Query<(&mut RenderTarget, &mut Projection), With<Camera2d>>) {
     let Some(target) = target else {
         return;
     };
-    let wanted = (window.width() as u32, window.height() as u32);
-    if let Some(mut image) = images.get_mut(&target.0) {
-        if (image.width(), image.height()) != wanted {
+    let wanted = (window.physical_width(), window.physical_height());
+    // Only touch the render target when its dimensions change.
+    if images.get(&target.0).is_some_and(|image| (image.width(), image.height()) != wanted) {
+        if let Some(mut image) = images.get_mut(&target.0) {
             image.resize(Extent3d { width: wanted.0, height: wanted.1, depth_or_array_layers: 1 });
+        }
+    }
+    for (mut camera, mut projection) in &mut cameras {
+        if let RenderTarget::Image(image) = &mut *camera {
+            if image.handle == target.0 && image.scale_factor != window.scale_factor() {
+                image.scale_factor = window.scale_factor();
+                // Bevy recalculates target information when the projection
+                // changes, including a DPI change without a physical resize.
+                projection.set_changed();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offscreen_target_tracks_physical_size_and_dpi_independently() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>().add_systems(Update, follow_window);
+        let handle = app.world_mut().resource_mut::<Assets<Image>>().add(Image::new_target_texture(800, 600, TextureFormat::Rgba8UnormSrgb, None));
+        app.insert_resource(OffScreen(handle.clone()));
+        let window = app.world_mut().spawn((Window::default(), PrimaryWindow)).id();
+        let camera = app.world_mut().spawn((Camera2d, RenderTarget::Image(handle.clone().into()))).id();
+        // Include a DPI change with no physical resize, as when moving the
+        // window between monitors while preserving its physical bounds.
+        for (physical, dpi) in [(UVec2::new(1600, 1200), 2.0), (UVec2::new(1600, 1200), 1.25), (UVec2::new(800, 600), 1.0)] {
+            {
+                let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
+                window.resolution.set_physical_resolution(physical.x, physical.y);
+                window.resolution.set_scale_factor(dpi);
+            }
+            app.update();
+            let target = app.world().get::<RenderTarget>(camera).unwrap();
+            let RenderTarget::Image(target) = target else { panic!("expected image target") };
+            assert_eq!(target.scale_factor, dpi);
+            let image = app.world().resource::<Assets<Image>>().get(&handle).unwrap();
+            assert_eq!(image.size(), physical);
+            assert_eq!(image.size().as_vec2() / target.scale_factor, app.world().get::<Window>(window).unwrap().size());
         }
     }
 }
@@ -66,7 +108,7 @@ fn capture_and_exit(
     mut commands: Commands,
     mut frame: Local<u32>,
     mut exit: MessageWriter<AppExit>,
-    target: Option<Res<OffScreen>>,
+    camera: Single<&RenderTarget, With<Camera2d>>,
     sim: Option<Res<crate::units::Sim>>,
     mut reached: Local<Option<u32>>,
 ) {
@@ -87,10 +129,9 @@ fn capture_and_exit(
     };
     if *frame == capture_frame {
         let path = std::env::var("RA2_SHOT").unwrap_or_default();
-        let shot = match &target {
-            Some(target) => Screenshot::image(target.0.clone()),
-            None => Screenshot::primary_window(),
-        };
+        // The image target's DPI participates in its identity. Screenshot::image
+        // assumes 1x, so preserve the camera's complete target on HiDPI screens.
+        let shot = Screenshot(camera.into_inner().clone());
         commands
             .spawn(shot)
             .observe(save_to_disk(path));
@@ -109,13 +150,13 @@ pub struct FakePointer(pub Option<Vec2>);
 /// `<when> <what>`: `<when>` is `t<tick>` (once the simulation has reached that
 /// tick) or `+<frames>` (so many frames after the step before); `<what>` is
 /// `at x,y` (put the mouse there, in window pixels), `left`, `right` (a click),
-/// `hold right` and `let right` (press and let go, for a drag) or
+/// `hold left`/`hold right` and `let left`/`let right` (press and release) or
 /// `key <KeyCode name or letter>`. Mouse steps also go to Bevy's picking,
 /// so menu buttons can be clicked; that works only without `RA2_SHOT` (with
 /// the off-screen picture only the screen's outer nodes are hit; not looked
 /// into).
 #[derive(Resource, Default)]
-struct Script {
+pub(crate) struct Script {
     steps: Vec<(When, What)>,
     next: usize,
     /// Frames since the last step ran.
@@ -157,7 +198,9 @@ impl Script {
                     }
                     ("left", _) => What::Mouse(MouseButton::Left),
                     ("right", _) => What::Mouse(MouseButton::Right),
+                    ("hold", Some("left")) => What::Hold(MouseButton::Left),
                     ("hold", Some("right")) => What::Hold(MouseButton::Right),
+                    ("let", Some("left")) => What::Let(MouseButton::Left),
                     ("let", Some("right")) => What::Let(MouseButton::Right),
                     ("key", Some(name)) => What::Key(key_named(name)?),
                     _ => return None,
@@ -198,7 +241,7 @@ fn key_named(name: &str) -> Option<KeyCode> {
     })
 }
 
-fn play_script(
+pub(crate) fn play_script(
     mut script: ResMut<Script>,
     mut pointer: ResMut<FakePointer>,
     mut buttons: ResMut<ButtonInput<MouseButton>>,

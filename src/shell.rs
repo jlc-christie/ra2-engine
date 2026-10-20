@@ -24,7 +24,7 @@ use ra2_formats::pal::Palette;
 use ra2_formats::pcx::Pcx;
 use ra2_formats::shp::Shp;
 
-use crate::files::GameFiles;
+use crate::files::{Edition, GameFiles};
 use crate::game::GameSetup;
 
 // The shell is laid out for at most 800x600 and the
@@ -169,8 +169,6 @@ enum OptionControl {
     Combo(Combo),
     /// Anywhere outside an open list.
     CloseCombo,
-    /// The arrows of an open list's scroll bar.
-    ScrollCombo(i32),
     ShortGame,
     McvRepacks,
     Crates,
@@ -201,19 +199,71 @@ fn options_from_env() -> crate::game::Options {
     options
 }
 
-/// The countries a player can be, in `[Countries]` order: string table key and
-/// flag picture.
-const COUNTRIES: [(&str, &str); 9] = [
-    ("Name:Americans", "usai.pcx"),
-    ("Name:Alliance", "japi.pcx"),
-    ("Name:French", "frai.pcx"),
-    ("Name:Germans", "geri.pcx"),
-    ("Name:British", "gbri.pcx"),
-    ("Name:Africans", "djbi.pcx"),
-    ("Name:Arabs", "arbi.pcx"),
-    ("Name:Confederation", "lati.pcx"),
-    ("Name:Russians", "rusi.pcx"),
+/// Native country-specific UI assets. The list of countries offered to the
+/// player comes from the selected edition's rules, retaining its original IDs.
+#[derive(Clone, Copy)]
+struct CountryArt {
+    country: &'static str,
+    flag: &'static str,
+    loading: &'static str,
+    unit: &'static str,
+    brief: &'static str,
+    yr_palette: &'static str,
+}
+
+const COUNTRY_ART: &[CountryArt] = &[
+    CountryArt { country: "Americans", flag: "usai.pcx", loading: "ustates", unit: "Name:Para", brief: "LoadBrief:USA", yr_palette: "mplsu.pal" },
+    CountryArt { country: "Alliance", flag: "japi.pcx", loading: "korea", unit: "Name:BEAGLE", brief: "LoadBrief:Korea", yr_palette: "mplsk.pal" },
+    CountryArt { country: "French", flag: "frai.pcx", loading: "france", unit: "Name:GTGCAN", brief: "LoadBrief:French", yr_palette: "mplsf.pal" },
+    CountryArt { country: "Germans", flag: "geri.pcx", loading: "germany", unit: "Name:TNKD", brief: "LoadBrief:Germans", yr_palette: "mplsg.pal" },
+    CountryArt { country: "British", flag: "gbri.pcx", loading: "ukingdom", unit: "Name:SNIPE", brief: "LoadBrief:British", yr_palette: "mplsuk.pal" },
+    CountryArt { country: "Africans", flag: "djbi.pcx", loading: "libya", unit: "Name:DTRUCK", brief: "LoadBrief:Lybia", yr_palette: "mplsl.pal" },
+    CountryArt { country: "Arabs", flag: "arbi.pcx", loading: "iraq", unit: "Name:DESO", brief: "LoadBrief:Iraq", yr_palette: "mplsi.pal" },
+    CountryArt { country: "Confederation", flag: "lati.pcx", loading: "cuba", unit: "Name:TERROR", brief: "LoadBrief:Cuba", yr_palette: "mplsc.pal" },
+    CountryArt { country: "Russians", flag: "rusi.pcx", loading: "russia", unit: "Name:TTNK", brief: "LoadBrief:Russia", yr_palette: "mplsr.pal" },
+    CountryArt { country: "YuriCountry", flag: "yrii.pcx", loading: "yuri", unit: "Name:YURI", brief: "LoadBrief:YuriCountry", yr_palette: "mpyls.pal" },
 ];
+
+#[derive(Clone)]
+struct CountryChoice {
+    id: usize,
+    ui_name: String,
+    art: CountryArt,
+}
+
+fn country_art(rules: &Ini, country: usize) -> CountryArt {
+    let section = rules.section("Countries").get(country).map(|(_, name)| name.as_str()).unwrap_or("");
+    COUNTRY_ART.iter().find(|art| art.country.eq_ignore_ascii_case(section)).copied().unwrap_or_else(|| {
+        COUNTRY_ART[match crate::terrain::country_side(rules, country) { 1 => 8, 2 => 9, _ => 0 }]
+    })
+}
+
+pub(crate) fn country_flag(rules: &Ini, country: usize) -> &'static str {
+    country_art(rules, country).flag
+}
+
+fn country_choices(rules: &Ini) -> Vec<CountryChoice> {
+    crate::terrain::multiplayer_countries(rules).into_iter().map(|id| {
+        let section = &rules.section("Countries")[id].1;
+        CountryChoice { id, ui_name: rules.get(section, "UIName").unwrap_or(section).to_owned(), art: country_art(rules, id) }
+    }).collect()
+}
+
+fn country_item(countries: &[CountryChoice], selected: i32) -> usize {
+    countries.iter().position(|country| country.id as i32 == selected).map_or(0, |index| index + 1)
+}
+
+fn country_value(countries: &[CountryChoice], item: usize) -> i32 {
+    item.checked_sub(1).and_then(|index| countries.get(index)).map_or(-2, |country| country.id as i32)
+}
+
+fn loading_country(countries: &[CountryChoice], selected: i32, random: usize) -> Option<usize> {
+    countries.iter().find(|country| country.id as i32 == selected).or_else(|| countries.get(random % countries.len().max(1))).map(|country| country.id)
+}
+
+fn loading_palette(edition: Edition, art: CountryArt) -> &'static str {
+    if edition == Edition::YuriAssets { art.yr_palette } else { "mpls.pal" }
+}
 
 /// The swatch of each colour a player can have.
 // Gold, red, blue, green, orange, sky blue,
@@ -273,6 +323,7 @@ struct Shell {
     /// rules file of each.
     modes: Vec<String>,
     mode_rules: Vec<String>,
+    countries: Vec<CountryChoice>,
     pics: HashMap<String, Pic>,
 }
 
@@ -330,7 +381,7 @@ impl Plugin for ShellPlugin {
             .add_systems(OnEnter(Screen::ChooseMap), start_slide)
             .add_systems(OnEnter(Screen::Options), (spawn_options, start_slide))
             .add_systems(OnEnter(Screen::LoadScreen), spawn_load_screen)
-            .add_systems(Update, (fill_load_bar, leave_load_screen).run_if(in_state(Screen::LoadScreen)))
+            .add_systems(Update, (prepare_load, fill_load_bar, leave_load_screen).chain().run_if(in_state(Screen::LoadScreen)))
             .add_systems(
                 Update,
                 (
@@ -338,6 +389,7 @@ impl Plugin for ShellPlugin {
                     slot_frames.run_if(not(in_state(Screen::InGame))),
                     finish_leaving.run_if(not(in_state(Screen::InGame))),
                     highlight_combo_rows,
+                    scroll_combos,
                     run_meter,
                     drag_sliders.run_if(|screen: Option<Res<State<Screen>>>| screen.is_some_and(|s| matches!(s.get(), Screen::Skirmish | Screen::Options))),
                     map_list_scroll,
@@ -423,6 +475,7 @@ impl Shell {
             .filter_map(|(label, rules)| Some((strings.get(label)?.to_owned(), rules)))
             .unzip();
 
+        let countries = country_choices(&Ini::parse(files.get("rules.ini").expect("rules.ini")));
         Self {
             files,
             font,
@@ -430,6 +483,7 @@ impl Shell {
             maps,
             modes,
             mode_rules,
+            countries,
             pics: HashMap::new(),
         }
     }
@@ -836,8 +890,13 @@ fn spawn_main_menu(
     mut commands: Commands,
     mut shell: ResMut<Shell>,
     mut images: ResMut<Assets<Image>>,
+    movie: Option<Res<crate::movie::MenuMovie>>,
 ) {
+    let movie = crate::movie::image(movie.as_deref(), &shell.files, &mut images, &mut commands);
     spawn_screen(&mut commands, Screen::MainMenu, &mut shell, &mut images, |painter, p| {
+        if let Some(movie) = movie {
+            p.spawn((place(0.0, 0.0, 632.0, 570.0), ImageNode::new(movie), Pickable::IGNORE));
+        }
         painter.sidebar(
             p,
             "GUI:MainMenu",
@@ -855,26 +914,9 @@ fn spawn_main_menu(
     });
 }
 
-/// What the loading screen shows for each country, in `[Countries]` order:
-/// the picture's name, the country's name, its special unit and the line about it.
-const LOAD_SCREENS: [(&str, &str, &str, &str); 9] = [
-    ("ustates", "Name:Americans", "Name:Para", "LoadBrief:USA"),
-    ("korea", "Name:Alliance", "Name:BEAGLE", "LoadBrief:Korea"),
-    ("france", "Name:French", "Name:GTGCAN", "LoadBrief:French"),
-    ("germany", "Name:Germans", "Name:TNKD", "LoadBrief:Germans"),
-    ("ukingdom", "Name:British", "Name:SNIPE", "LoadBrief:British"),
-    ("libya", "Name:Africans", "Name:DTRUCK", "LoadBrief:Lybia"),
-    ("iraq", "Name:Arabs", "Name:DESO", "LoadBrief:Iraq"),
-    ("cuba", "Name:Confederation", "Name:TERROR", "LoadBrief:Cuba"),
-    ("russia", "Name:Russians", "Name:TTNK", "LoadBrief:Russia"),
-];
-
-/// Not original behaviour: the original shows the screen only as long as the
-/// map takes to load, which is now too quick to read it.
-const LOAD_SCREEN_SECONDS: f64 = 2.5;
-
+/// The loading screen has reached its rendered map and texture upload stages.
 #[derive(Resource)]
-struct LoadScreenShown(f64);
+struct LoadScreenShown { frames: u32, finished: Option<u32> }
 
 /// The loading screen: the country's picture, its name at the bottom right,
 /// its special unit, the line about that unit and "Loading..." at the left, in
@@ -884,22 +926,28 @@ fn spawn_load_screen(
     mut shell: ResMut<Shell>,
     mut images: ResMut<Assets<Image>>,
     setup: Res<GameSetup>,
-    time: Res<Time<Real>>,
     lobby: Res<crate::net::Lobby>,
 ) {
-    let country = match setup.options.country {
-        country @ 0..=8 => country as usize,
-        _ => {
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.subsec_nanos());
-            let country = nanos as usize % LOAD_SCREENS.len();
-            commands.insert_resource(crate::game::DrawnCountry(country));
-            country
-        }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.subsec_nanos() as usize);
+    let country = loading_country(&shell.countries, setup.options.country, nanos).expect("rules contain a multiplayer country");
+    if setup.options.country != country as i32 {
+        commands.insert_resource(crate::game::DrawnCountry(country));
+    }
+    let country_choice = shell.countries.iter().find(|entry| entry.id == country).unwrap().clone();
+    let art = country_choice.art;
+    let palette = loading_palette(shell.files.edition(), art);
+    let player_colour_index = if setup.options.colour >= 0 { setup.options.colour as usize } else {
+        let free: Vec<usize> = (0..8).filter(|&c| !setup.options.opponents.iter().any(|row| row.level >= 0 && row.colour == c as i32)).collect();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.subsec_nanos() as usize);
+        let colour = free.get(nanos % free.len().max(1)).copied().unwrap_or(0);
+        commands.insert_resource(crate::game::DrawnColour(colour));
+        colour
     };
-    commands.insert_resource(LoadScreenShown(time.elapsed_secs_f64()));
-    let (picture_name, name, unit, brief) = LOAD_SCREENS[country];
+    commands.insert_resource(LoadScreenShown { frames: 0, finished: None });
+    let (picture_name, name, unit, brief) = (art.loading, country_choice.ui_name.as_str(), art.unit, art.brief);
     let rules = shell.files.get("rules.ini").map(Ini::parse);
-    let scheme = if country < 5 { "AlliedLoad" } else { "SovietLoad" };
+    let side = rules.as_ref().map_or(0, |rules| crate::terrain::country_side(rules, country));
+    let scheme = match side { 1 => "SovietLoad", 2 => "Purple", _ => "AlliedLoad" };
     let hsv = rules.as_ref().and_then(|rules| rules.get("Colors", scheme)).and_then(|value| {
         let parts: Vec<u8> = value.split(',').filter_map(|part| part.split(';').next()?.trim().parse().ok()).collect();
         <[u8; 3]>::try_from(parts.get(..3)?).ok()
@@ -926,7 +974,7 @@ fn spawn_load_screen(
             outer
                 .spawn(Node { width: Val::Px(SCREEN.x), height: Val::Px(SCREEN.y), flex_shrink: 0.0, overflow: Overflow::clip(), ..default() })
                 .with_children(|p| {
-                    let back = painter.shell.shp(painter.images, &format!("ls800{picture_name}.shp"), "mpls.pal", 0);
+                    let back = painter.shell.shp(painter.images, &format!("ls800{picture_name}.shp"), palette, 0);
                     p.spawn(picture(&back, 0.0, 0.0));
 
                     let name = painter.shell.string(name);
@@ -958,24 +1006,31 @@ fn spawn_load_screen(
                     // past the bar. The row is the taller of the bar plus 6 and
                     // the text, plus 4.
                     let player_name = if lobby.name.is_empty() { painter.shell.string("GUI:Player") } else { lobby.name.clone() };
-                    let player_colour = rules
+                    let player_hsv = rules
                         .as_ref()
-                        .and_then(|rules| rules.get("Colors", crate::terrain::PLAYER_COLOURS[setup.options.colour.clamp(0, 7) as usize]))
+                        .and_then(|rules| rules.get("Colors", crate::terrain::PLAYER_COLOURS[player_colour_index.min(7)]))
                         .and_then(|value| <[u8; 3]>::try_from(value.split(',').filter_map(|part| part.trim().parse().ok()).collect::<Vec<u8>>().get(..3)?).ok())
-                        .map_or([255, 255, 255], crate::colors::hsv_to_rgb);
-                    let bar = painter.shell.shp(painter.images, "progbarm.shp", "mpls.pal", 0);
+                        .unwrap_or([0, 0, 255]);
+                    let player_colour = crate::colors::hsv_to_rgb(player_hsv);
+                    // PROGBARM uses the house-remap palette indices.
+                    let bar = painter.shell.cached(painter.images, format!("load-bar/{player_hsv:?}"), |shell| {
+                        let shape = Shp::parse(shell.files.get("progbarm.shp").expect("loading bar")).expect("parse loading bar");
+                        let mut palette = Palette::parse(shell.files.get("mpls.pal").expect("loading palette")).expect("parse loading palette");
+                        palette.0[16..32].copy_from_slice(&crate::colors::remap_shades(player_hsv));
+                        (u32::from(shape.width), u32::from(shape.height), shape.frame_rgba(0, &palette))
+                    });
+                    let flag = painter.shell.pcx(painter.images, art.flag);
                     let name = painter.shell.text(painter.images, &player_name, player_colour);
-                    let row = (bar.size.y + 6.0).max(name.size.y) + 4.0;
+                    let row = (bar.size.y + 6.0).max(name.size.y).max(flag.size.y) + 4.0;
                     let (x, y) = (16.0, 321.0);
-                    p.spawn((place(x, y, bar.size.x + name.size.x + 36.0, row + 1.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
+                    p.spawn((place(x, y, bar.size.x + flag.size.x + name.size.x + 46.0, row + 1.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
                     let (bar_x, bar_y) = (x + 5.0, y + ((row - 6.0 - bar.size.y) / 2.0).floor());
                     let [r, g, b] = player_colour;
-                    p.spawn((place(bar_x + 3.0, bar_y + 3.0, bar.size.x, bar.size.y), BackgroundColor(Color::srgb_u8(r, g, b))));
-                    // Not original behaviour: the map loads at once here, so
-                    // the bar fills over the time the screen is shown.
+                    p.spawn((Node { border: UiRect::all(Val::Px(1.0)), ..place(bar_x, bar_y, bar.size.x + 6.0, bar.size.y + 6.0) }, BorderColor::all(Color::srgb_u8(r, g, b)), BackgroundColor(Color::BLACK)));
                     p.spawn((Node { overflow: Overflow::clip(), ..place(bar_x + 3.0, bar_y + 3.0, 0.0, bar.size.y) }, LoadBar(bar.size.x)))
                         .with_child(picture(&bar, 0.0, 0.0));
-                    p.spawn(picture(&name, x + 21.0 + bar.size.x, y + ((row - name.size.y) / 2.0).floor()));
+                    p.spawn(picture(&flag, x + 21.0 + bar.size.x, y + ((row - flag.size.y) / 2.0).floor()));
+                    p.spawn(picture(&name, x + 31.0 + bar.size.x + flag.size.x, y + ((row - name.size.y) / 2.0).floor()));
                 });
         });
 }
@@ -987,6 +1042,17 @@ fn wrap(font: &Font, text: &str, width: usize) -> Vec<String> {
     for paragraph in text.split('\n') {
         let mut line = String::new();
         for word in paragraph.split_whitespace() {
+            // CJK text has no spaces; break long runs at glyph boundaries.
+            if font.width(word) > width {
+                for ch in word.chars() {
+                    let candidate = format!("{line}{ch}");
+                    if !line.is_empty() && font.width(&candidate) > width {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    line.push(ch);
+                }
+                continue;
+            }
             let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
             if !line.is_empty() && font.width(&candidate) > width {
                 lines.push(std::mem::replace(&mut line, word.to_owned()));
@@ -1005,16 +1071,49 @@ fn wrap(font: &Font, text: &str, width: usize) -> Vec<String> {
 #[derive(Component)]
 struct LoadBar(f32);
 
-fn fill_load_bar(shown: Option<Res<LoadScreenShown>>, time: Res<Time<Real>>, mut bars: Query<(&LoadBar, &mut Node)>) {
-    let done = shown.map_or(1.0, |shown| ((time.elapsed_secs_f64() - shown.0) / LOAD_SCREEN_SECONDS).clamp(0.0, 1.0)) as f32;
+fn fill_load_bar(shown: Option<Res<LoadScreenShown>>, textures: Option<Res<crate::loading::Textures>>, mut bars: Query<(&LoadBar, &mut Node)>) {
+    // Completed work, rather than a wall-clock animation.
+    let done = shown.map_or(0.0, |shown| if shown.finished.is_some() {
+        if textures.as_ref().is_some_and(|textures| textures.ready()) { 1.0 } else { 0.8 }
+    } else { 0.0 });
     for (bar, mut node) in &mut bars {
         node.width = Val::Px((bar.0 * done).round());
     }
 }
 
-fn leave_load_screen(shown: Option<Res<LoadScreenShown>>, time: Res<Time<Real>>, mut next_screen: ResMut<NextState<Screen>>) {
-    if shown.is_none_or(|shown| time.elapsed_secs_f64() - shown.0 >= LOAD_SCREEN_SECONDS) {
+fn prepare_load(world: &mut bevy::ecs::world::World) {
+    use bevy::ecs::system::RunSystemOnce;
+    let Some(mut shown) = world.get_resource_mut::<LoadScreenShown>() else { return };
+    shown.frames += 1;
+    // Let the loading picture reach the display before building the map.
+    if shown.frames < 3 || shown.finished.is_some() { return }
+    if let Err(error) = world.run_system_once(crate::game::load_map) {
+        error!("could not prepare the map: {error}");
+        world.resource_mut::<NextState<Screen>>().set(Screen::Skirmish);
+        return;
+    }
+    if world.contains_resource::<crate::units::UnitView>() {
+        world.insert_resource(crate::game::PreparedGame);
+        let textures = crate::loading::Textures::watch(world.resource::<Assets<Image>>());
+        world.insert_resource(textures);
+        let mut shown = world.resource_mut::<LoadScreenShown>();
+        shown.finished = Some(shown.frames);
+    }
+}
+
+fn leave_load_screen(shown: Res<LoadScreenShown>, textures: Option<Res<crate::loading::Textures>>, mut next_screen: ResMut<NextState<Screen>>) {
+    // A loading-screen screenshot can inspect the fully loaded bar.
+    if std::env::var("RA2_SCREEN").as_deref() == Ok("loading") && std::env::var_os("RA2_SHOT").is_some() && std::env::var_os("RA2_SHOT_TICK").is_none() { return }
+    if shown.finished.is_some_and(|frame| shown.frames >= frame + 2) && textures.is_some_and(|textures| textures.ready()) {
         next_screen.set(Screen::InGame);
+    }
+}
+
+fn score_background(side: crate::endgame::ScoreSide, edition: Edition) -> (&'static str, &'static str) {
+    match (side, edition) {
+        (crate::endgame::ScoreSide::Soviet, _) => ("mpsscrnl.shp", "mpsscrn.pal"),
+        (crate::endgame::ScoreSide::Yuri, Edition::YuriAssets) => ("mpyscrnl.shp", "mpyscrn.pal"),
+        _ => ("mpascrnl.shp", "mpascrn.pal"),
     }
 }
 
@@ -1024,10 +1123,9 @@ fn leave_load_screen(shown: Option<Res<LoadScreenShown>>, time: Res<Time<Real>>,
 fn spawn_score(mut commands: Commands, mut shell: ResMut<Shell>, mut images: ResMut<Assets<Image>>, board: Res<crate::endgame::ScoreBoard>) {
     let board = board.clone();
     spawn_screen(&mut commands, Screen::Score, &mut shell, &mut images, |painter, p| {
-        // The score dialog's main panel is MPASCRNL.SHP in MPASCRN.PAL when
-        // the player's side is the first (the Allies), else MPSSCRNL.SHP in
-        // MPSSCRN.PAL (the S shapes on a screen 640 wide).
-        let (shape, palette) = if board.soviet { ("mpsscrnl.shp", "mpsscrn.pal") } else { ("mpascrnl.shp", "mpascrn.pal") };
+        // YR adds MPYSCRNL.SHP/MPYSCRN.PAL for Yuri; the two RA2 sides
+        // keep their original backgrounds and palettes.
+        let (shape, palette) = score_background(board.side, painter.shell.files.edition());
         let back = painter.shell.shp(painter.images, shape, palette, 0);
         p.spawn(picture(&back, 0.0, 0.0));
         // The rectangle from the game line to the last used row's last
@@ -1073,8 +1171,13 @@ fn spawn_single_player(
     mut commands: Commands,
     mut shell: ResMut<Shell>,
     mut images: ResMut<Assets<Image>>,
+    movie: Option<Res<crate::movie::MenuMovie>>,
 ) {
+    let movie = crate::movie::image(movie.as_deref(), &shell.files, &mut images, &mut commands);
     spawn_screen(&mut commands, Screen::SinglePlayer, &mut shell, &mut images, |painter, p| {
+        if let Some(movie) = movie {
+            p.spawn((place(0.0, 0.0, 632.0, 570.0), ImageNode::new(movie), Pickable::IGNORE));
+        }
         painter.sidebar(
             p,
             "GUI:SinglePlayerMenu",
@@ -1480,6 +1583,14 @@ fn colour_values(options: &crate::game::Options, row: usize) -> Vec<i32> {
 #[derive(Component)]
 struct ComboRow(Combo, usize);
 
+/// Scroll geometry in the shell's unscaled 800x600 coordinates.
+#[derive(Component)]
+struct ComboScroll {
+    area: Rect,
+    most: usize,
+    rows: usize,
+}
+
 /// The part of a slider that takes the mouse, and its grip.
 #[derive(Component, Clone, Copy)]
 struct SliderTrack(Slider);
@@ -1661,6 +1772,7 @@ impl Painter<'_> {
             },
             BorderColor::all(EDGE),
             GlobalZIndex(6),
+            ComboScroll { area: list, most: items.len() - rows, rows },
         ))
         .with_children(|inner| {
             inner.spawn(picture(&backdrop, -list.min.x, -list.min.y));
@@ -1716,14 +1828,12 @@ impl Painter<'_> {
                 inner.spawn((
                     place(x, 0.0, 18.0, 22.0),
                     ImageNode::new(up.image.clone()),
-                    Button,
-                    OptionControl::ScrollCombo(-1),
+                    Pickable::IGNORE,
                 ));
                 inner.spawn((
                     place(x, list.height() - 22.0, 18.0, 22.0),
                     ImageNode::new(down.image.clone()),
-                    Button,
-                    OptionControl::ScrollCombo(1),
+                    Pickable::IGNORE,
                 ));
             }
         });
@@ -1815,7 +1925,7 @@ fn spawn_skirmish(
         painter.map_preview(p, choice.selected);
 
         // Eight player rows: name or AI level, flag, country, colour.
-        // The first row is the player, with random or any of the nine countries,
+        // The first row is the player, with random or any multiplayer country,
         // and random or any of the eight colours no other row has; the other
         // seven are computer players, each none, easy, medium or brutal; a row
         // set to none shows random for both and its lists do not open.
@@ -1824,7 +1934,7 @@ fn spawn_skirmish(
         let marks = painter.shell.string("GUI:RandomAsSymbols");
         let levels: Vec<(String, Option<Color>)> = LEVELS.iter().map(|(_, key)| (painter.shell.string(key), None)).collect();
         let countries: Vec<(String, Option<Color>)> = std::iter::once((random.clone(), None))
-            .chain(COUNTRIES.iter().map(|(key, _)| (painter.shell.string(key), None)))
+            .chain(painter.shell.countries.iter().map(|country| (painter.shell.string(&country.ui_name), None)))
             .collect();
         let colour_items = |values: &[i32]| -> Vec<(String, Option<Color>)> {
             values
@@ -1875,17 +1985,17 @@ fn spawn_skirmish(
                 }
             }
             if active {
-                let flag = if country < 0 { "rani.pcx" } else { COUNTRIES[country as usize % 9].1 };
+                let flag = painter.shell.countries.iter().find(|entry| entry.id as i32 == country).map_or("rani.pcx", |entry| entry.art.flag);
                 let pic = painter.shell.pcx(painter.images, flag);
                 let slot = dialog_rect(143.0, y, 32.0, 12.0);
                 p.spawn(picture(&pic, slot.min.x, slot.min.y + ((COMBO_HEIGHT - pic.size.y) / 2.0).round()));
             }
             let country_at = dialog_rect(180.0, y, 78.0, 12.0);
             let colour_at = dialog_rect(264.0, y, 35.0, 12.0);
-            let country_item = if country < 0 { 0 } else { country as usize + 1 };
+            let country_item = country_item(&painter.shell.countries, country);
             let (country_text, swatch, colour_text) = if active {
                 let swatch = usize::try_from(colour).ok().map(|c| Color::srgb_u8(SWATCHES[c % 8][0], SWATCHES[c % 8][1], SWATCHES[c % 8][2]));
-                (countries[country_item.min(9)].0.as_str(), swatch, if colour < 0 { marks.as_str() } else { "" })
+                (countries[country_item].0.as_str(), swatch, if colour < 0 { marks.as_str() } else { "" })
             } else {
                 (random.as_str(), None, marks.as_str())
             };
@@ -2096,7 +2206,7 @@ fn on_option(
                 }
             }
             // The first item is Random (-2); the rest are the countries in order.
-            Combo::Country(row) => *row_choice(options, row).0 = if index == 0 { -2 } else { index as i32 - 1 },
+            Combo::Country(row) => *row_choice(options, row).0 = country_value(&shell.countries, index),
             Combo::Colour(row) => {
                 let value = colour_values(options, row).get(index).copied().unwrap_or(-2);
                 *row_choice(options, row).1 = value;
@@ -2124,7 +2234,7 @@ fn on_option(
                             Combo::Level(_) => (0, 4, 4),
                             Combo::Country(row) => {
                                 let chosen = *row_choice(options, row).0;
-                                (if chosen < 0 { 0 } else { chosen as usize + 1 }, 7, 10)
+                                (country_item(&shell.countries, chosen), 7, shell.countries.len() + 1)
                             }
                             Combo::Colour(row) => {
                                 let values = colour_values(options, row);
@@ -2142,16 +2252,6 @@ fn on_option(
                 open.0 = None;
                 sound("GUIComboCloseSound");
             }
-            OptionControl::ScrollCombo(step) => {
-                if let Some((combo, scroll)) = open.0 {
-                    let most = match combo {
-                        Combo::Country(_) => 3,
-                        Combo::Resolution => (RESOLUTIONS.len() - RESOLUTION_ROWS) as i32,
-                        _ => 0,
-                    };
-                    open.0 = Some((combo, (scroll as i32 + step).clamp(0, most) as usize));
-                }
-            }
             OptionControl::ShortGame => options.short_game = !options.short_game,
             OptionControl::McvRepacks => options.mcv_repacks = !options.mcv_repacks,
             OptionControl::Crates => options.crates = !options.crates,
@@ -2168,7 +2268,7 @@ fn on_option(
         if matches!(control, OptionControl::Tooltips | OptionControl::TargetLines | OptionControl::ShowHidden) {
             prefs.save();
         }
-        if !matches!(control, OptionControl::Combo(_) | OptionControl::CloseCombo | OptionControl::ScrollCombo(_)) {
+        if !matches!(control, OptionControl::Combo(_) | OptionControl::CloseCombo) {
             sound("GUICheckboxSound");
         }
     } else {
@@ -2216,6 +2316,62 @@ fn highlight_combo_rows(mut rows: Query<(&Hovered, &mut BackgroundColor), With<C
         if fill.0 != wanted {
             fill.0 = wanted;
         }
+    }
+}
+
+/// Wheel, arrow, page and grip input all change the same list offset.
+fn scroll_combos(
+    mut wheel: MessageReader<MouseWheel>,
+    lists: Query<&ComboScroll>,
+    pointer: Res<crate::cursor::Pointer>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    scale: Res<UiScale>,
+    mut open: ResMut<OpenCombo>,
+    mut dragging: Local<Option<f32>>,
+    mut redraw: ResMut<Redraw>,
+    screen: Res<State<Screen>>,
+    mut next: ResMut<NextState<Screen>>,
+) {
+    let lines: f32 = wheel.read().map(|event| match event.unit {
+        bevy::input::mouse::MouseScrollUnit::Line => event.y,
+        bevy::input::mouse::MouseScrollUnit::Pixel => event.y / COMBO_ROW,
+    }).sum();
+    if !mouse.pressed(MouseButton::Left) {
+        *dragging = None;
+    }
+    let Some((combo, old)) = open.0 else { return };
+    let Some(at) = pointer.0 else { return };
+    let at = at / scale.0 - (Vec2::new(window.width(), window.height()) / scale.0 - SCREEN) / 2.0;
+    let Some(list) = lists.iter().next() else { return };
+    if list.most == 0 { return }
+    let mut scroll = old as i32;
+    if list.area.contains(at) && lines != 0.0 {
+        scroll -= (lines.signum() * lines.abs().ceil()) as i32;
+    }
+    let track = list.area.height() - 44.0;
+    let grip = (track - 0.2 * ((list.most + 1) as f32).ln() * track).max(14.0).floor();
+    let travel = (track - grip).max(1.0);
+    let grip_top = list.area.min.y + 22.0 + (travel * old as f32 / list.most as f32).floor();
+    if mouse.just_pressed(MouseButton::Left) && list.area.contains(at) && at.x >= list.area.max.x - 20.0 {
+        if at.y < list.area.min.y + 22.0 {
+            scroll -= 1;
+        } else if at.y >= list.area.max.y - 22.0 {
+            scroll += 1;
+        } else if at.y >= grip_top && at.y < grip_top + grip {
+            *dragging = Some(at.y - grip_top);
+        } else {
+            scroll += if at.y < grip_top { -(list.rows as i32) } else { list.rows as i32 };
+        }
+    }
+    if let Some(offset) = *dragging {
+        scroll = ((at.y - list.area.min.y - 22.0 - offset) / travel * list.most as f32).round() as i32;
+    }
+    let scroll = scroll.clamp(0, list.most as i32) as usize;
+    if scroll != old {
+        open.0 = Some((combo, scroll));
+        redraw.0 = true;
+        next.set(*screen.get());
     }
 }
 
@@ -2676,5 +2832,143 @@ fn map_list_scroll(
         if node.top != top {
             node.top = top;
         }
+    }
+}
+
+#[cfg(test)]
+mod combo_tests {
+    use super::*;
+
+    #[test]
+    fn score_background_uses_the_native_three_faction_assets() {
+        use crate::endgame::ScoreSide;
+        assert_eq!(score_background(ScoreSide::Allied, Edition::RedAlert2), ("mpascrnl.shp", "mpascrn.pal"));
+        assert_eq!(score_background(ScoreSide::Soviet, Edition::RedAlert2), ("mpsscrnl.shp", "mpsscrn.pal"));
+        assert_eq!(score_background(ScoreSide::Allied, Edition::YuriAssets), ("mpascrnl.shp", "mpascrn.pal"));
+        assert_eq!(score_background(ScoreSide::Soviet, Edition::YuriAssets), ("mpsscrnl.shp", "mpsscrn.pal"));
+        let yuri = score_background(ScoreSide::Yuri, Edition::YuriAssets);
+        assert_eq!(yuri, ("mpyscrnl.shp", "mpyscrn.pal"));
+        // A base-game run never asks for expansion-only assets.
+        assert_eq!(score_background(ScoreSide::Yuri, Edition::RedAlert2), ("mpascrnl.shp", "mpascrn.pal"));
+        let Ok(files) = GameFiles::open_for_edition(&crate::files::dev_dir(), Edition::YuriAssets) else { return };
+        let image = Shp::parse(files.get(yuri.0).unwrap()).unwrap();
+        assert_eq!((image.width, image.height, image.frames.len()), (632, 568, 1));
+        assert!(Palette::parse(files.get(yuri.1).unwrap()).is_some());
+    }
+
+    #[test]
+    fn countries_keep_rule_ids_when_passive_houses_are_between_playable_ones() {
+        let rules = Ini::parse(b"[Countries]\n0=Americans\n1=Observer\n2=YuriCountry\n3=Russians\n[Americans]\nMultiplay=yes\nSide=GDI\nUIName=Name:Americans\n[Observer]\nMultiplayPassive=yes\n[YuriCountry]\nMultiplay=yes\nSide=ThirdSide\nUIName=Name:YuriCountry\n[Russians]\nMultiplay=yes\nSide=Nod\nUIName=Name:Russians\n");
+        let countries = country_choices(&rules);
+        assert_eq!(countries.iter().map(|country| country.id).collect::<Vec<_>>(), [0, 2, 3]);
+        assert_eq!(country_item(&countries, 2), 2);
+        assert_eq!(country_item(&countries, 1), 0);
+        assert_eq!((0..5).map(|item| country_value(&countries, item)).collect::<Vec<_>>(), [-2, 0, 2, 3, -2]);
+        assert_eq!((0..3).map(|draw| loading_country(&countries, -2, draw).unwrap()).collect::<Vec<_>>(), [0, 2, 3]);
+        assert_eq!(loading_country(&countries, 2, 0), Some(2));
+        assert_eq!(country_flag(&rules, 2), "yrii.pcx");
+        assert_eq!(loading_palette(Edition::YuriAssets, countries[1].art), "mpyls.pal");
+        assert_eq!(loading_palette(Edition::RedAlert2, countries[0].art), "mpls.pal");
+    }
+
+    #[test]
+    fn native_yr_country_loading_assets_and_menu_movie_are_selected_from_the_expansion() {
+        let dir = crate::files::dev_dir();
+        let Ok(base) = GameFiles::open_for_edition(&dir, Edition::RedAlert2) else { return };
+        let Ok(yr) = GameFiles::open_for_edition(&dir, Edition::YuriAssets) else { return };
+        let base_shell = Shell::load(base.clone());
+        let yr_shell = Shell::load(yr.clone());
+        assert_eq!(base_shell.countries.len(), 9);
+        assert_eq!(yr_shell.countries.len(), 10);
+        let yuri = yr_shell.countries.iter().find(|country| country.art.country == "YuriCountry").unwrap();
+        assert_eq!(yuri.id, 9);
+        assert_eq!(yuri.ui_name, "Name:YuriCountry");
+        assert!(yr_shell.strings.get(&yuri.ui_name).is_some());
+        assert!(yr_shell.strings.get(yuri.art.brief).is_some());
+        for country in &yr_shell.countries {
+            let image = Shp::parse(yr.get(&format!("ls800{}.shp", country.art.loading)).unwrap()).unwrap();
+            assert_eq!((image.width, image.height), (800, 600));
+            assert!(Palette::parse(yr.get(loading_palette(Edition::YuriAssets, country.art)).unwrap()).is_some());
+            assert!(Pcx::parse(yr.get(country.art.flag).unwrap()).is_some());
+        }
+        // The native MD movie deliberately keeps the original filename.
+        // Archive precedence must choose its bytes, rather than reuse RA2's.
+        assert_ne!(base.get("ra2ts_l.bik").unwrap(), yr.get("ra2ts_l.bik").unwrap());
+    }
+
+    #[test]
+    fn chinese_loading_text_wraps_without_spaces() {
+        let Ok(files) = GameFiles::open() else { return };
+        let font = Font::parse(files.get("game.fnt").unwrap()).unwrap();
+        let text = "美國擁有世界上最佳的傘兵與建立一座空指部空降傘兵到戰場的各個角落。";
+        let lines = wrap(&font, text, 120);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| font.width(line) <= 120));
+        assert_eq!(lines.concat(), text);
+    }
+
+    fn app() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_message::<MouseWheel>()
+            .insert_resource(State::new(Screen::Skirmish))
+            .init_resource::<NextState<Screen>>()
+            .init_resource::<Redraw>()
+            .insert_resource(OpenCombo(Some((Combo::Country(0), 0))))
+            .insert_resource(UiScale(2.0))
+            .insert_resource(crate::cursor::Pointer(Some(Vec2::new(600.0, 300.0))))
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(Update, scroll_combos);
+        let window = app.world_mut().spawn((Window {
+            resolution: bevy::window::WindowResolution::new(1600, 1200).with_scale_factor_override(1.0),
+            ..default()
+        }, PrimaryWindow)).id();
+        app.world_mut().spawn(ComboScroll { area: Rect::new(200.0, 100.0, 400.0, 254.0), most: 3, rows: 7 });
+        (app, window)
+    }
+
+    fn offset(app: &App) -> usize { app.world().resource::<OpenCombo>().0.unwrap().1 }
+
+    fn point(app: &mut App, x: f32, y: f32) {
+        app.world_mut().resource_mut::<crate::cursor::Pointer>().0 = Some(Vec2::new(x, y) * 2.0);
+    }
+
+    #[test]
+    fn wheel_scrolls_only_the_open_list_and_clamps_at_both_ends() {
+        let (mut app, window) = app();
+        for (y, expected) in [(-1.0, 1), (-20.0, 3), (20.0, 0)] {
+            app.world_mut().write_message(MouseWheel { unit: bevy::input::mouse::MouseScrollUnit::Line, x: 0.0, y, window, phase: bevy::input::touch::TouchPhase::Moved });
+            app.update();
+            assert_eq!(offset(&app), expected);
+        }
+        point(&mut app, 100.0, 100.0);
+        app.world_mut().write_message(MouseWheel { unit: bevy::input::mouse::MouseScrollUnit::Line, x: 0.0, y: -1.0, window, phase: bevy::input::touch::TouchPhase::Moved });
+        app.update();
+        assert_eq!(offset(&app), 0);
+    }
+
+    #[test]
+    fn scrollbar_arrows_and_grip_work_at_scaled_ui_coordinates() {
+        let (mut app, _) = app();
+        point(&mut app, 390.0, 245.0);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
+        app.update();
+        assert_eq!(offset(&app), 1);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().reset_all();
+        point(&mut app, 390.0, 105.0);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
+        app.update();
+        assert_eq!(offset(&app), 0);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().reset_all();
+        point(&mut app, 390.0, 130.0);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().clear();
+        point(&mut app, 390.0, 225.0);
+        app.update();
+        assert_eq!(offset(&app), 3);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().release(MouseButton::Left);
+        point(&mut app, 390.0, 130.0);
+        app.update();
+        assert_eq!(offset(&app), 3);
     }
 }

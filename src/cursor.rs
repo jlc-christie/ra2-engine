@@ -56,7 +56,7 @@ pub const DISARM: usize = 59;
 #[derive(Resource, Default)]
 pub struct Pointer(pub Option<Vec2>);
 
-fn track_pointer(mut pointer: ResMut<Pointer>, window: Single<&Window, With<PrimaryWindow>>, fake: Res<crate::debug::FakePointer>) {
+pub(crate) fn track_pointer(mut pointer: ResMut<Pointer>, window: Single<&Window, With<PrimaryWindow>>, fake: Res<crate::debug::FakePointer>) {
     let fixed: Vec<f32> = std::env::var("RA2_CURSOR")
         .unwrap_or_default()
         .split(',')
@@ -102,7 +102,7 @@ impl Plugin for CursorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WantedCursor>()
             .init_resource::<Pointer>()
-            .add_systems(PreUpdate, track_pointer)
+            .add_systems(PreUpdate, track_pointer.after(bevy::input::InputSystems).after(crate::debug::play_script))
             .add_systems(Startup, setup)
             .add_systems(PostUpdate, show.run_if(resource_exists::<CursorArt>));
     }
@@ -184,6 +184,7 @@ fn show(
     mut art: ResMut<CursorArt>,
     wanted: Res<WantedCursor>,
     pointer: Res<Pointer>,
+    scale: Res<UiScale>,
     time: Res<Time<Real>>,
     mut images: ResMut<Assets<Image>>,
     window: Single<&mut CursorOptions, With<PrimaryWindow>>,
@@ -264,7 +265,65 @@ fn show(
     if image.image != *handle {
         image.image = handle.clone();
     }
+    // Window positions already include the window's DPI conversion. UI nodes
+    // additionally use UiScale, which grows when the menu is maximised. Undo
+    // that extra scale here so the pointer also follows the mouse in the blank
+    // margins around the centred menu instead of moving beyond the viewport.
+    let position = position / scale.0;
     node.left = Val::Px(position.x.floor() - entry.hot_spot.0 as f32);
     node.top = Val::Px(position.y.floor() - entry.hot_spot.1 as f32);
     *visibility = Visibility::Visible;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_follows_mouse_into_blank_margins_after_menu_resize() {
+        let mut app = App::new();
+        app.add_message::<bevy::window::CursorEntered>()
+            .add_message::<bevy::window::WindowFocused>()
+            .init_resource::<WantedCursor>()
+            .init_resource::<Pointer>()
+            .init_resource::<Time<Real>>()
+            .init_resource::<Assets<Image>>()
+            .insert_resource(UiScale(1.0))
+            .add_systems(Update, show);
+        let window = app.world_mut().spawn((Window::default(), CursorOptions::default(), PrimaryWindow)).id();
+        let node = app.world_mut().spawn((Node::default(), ImageNode::default(), Visibility::Hidden)).id();
+        app.insert_resource(CursorArt {
+            shp: Shp { width: 1, height: 1, frames: vec![] },
+            palette: Palette([[0; 3]; 256]),
+            entries: vec![Entry { start: 0, small: None, count: 1, rate: 0, hot_spot: (4, 6) }],
+            frames: HashMap::new(),
+            node,
+            current: usize::MAX,
+            offset: 0,
+            since: 0.0,
+        });
+
+        // Start in a window, maximise into a display with blank menu margins,
+        // then restore the original size. Each position is in window pixels.
+        for (size, scale, pointer) in [
+            ((800, 600), 1.0, Vec2::new(700.0, 500.0)),
+            ((1920, 1440), 2.0, Vec2::new(1900.0, 1400.0)),
+            ((3072, 1920), 3.0, Vec2::new(3000.0, 1860.0)),
+            ((800, 600), 1.0, Vec2::new(700.0, 500.0)),
+        ] {
+            app.world_mut().get_mut::<Window>(window).unwrap().resolution =
+                bevy::window::WindowResolution::new(size.0, size.1).with_scale_factor_override(1.0);
+            app.world_mut().resource_mut::<UiScale>().0 = scale;
+            app.world_mut().resource_mut::<Pointer>().0 = Some(pointer);
+            app.update();
+            let shown = app.world().get::<Node>(node).unwrap();
+            let (Val::Px(left), Val::Px(top)) = (shown.left, shown.top) else { panic!("cursor must have a position") };
+            let hotspot = (Vec2::new(left, top) + Vec2::new(4.0, 6.0)) * scale;
+            assert_eq!(hotspot, pointer);
+            assert_eq!(*app.world().get::<Visibility>(node).unwrap(), Visibility::Visible);
+        }
+        app.world_mut().resource_mut::<Pointer>().0 = None;
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(node).unwrap(), Visibility::Hidden);
+    }
 }

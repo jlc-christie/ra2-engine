@@ -181,6 +181,7 @@ struct Kind {
     aux_sounds: (Option<String>, Option<String>),
     roll_angle: f32,
     deploy_sounds: (Option<String>, Option<String>),
+    move_sound: Option<String>,
     unloading: Option<String>,
     sheet: Option<crate::terrain::Sheet>,
     shadow_index: usize,
@@ -521,6 +522,9 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
     world.repair_interval = upkeep.repair_interval;
     world.survivor_divisors = upkeep.survivor_divisors;
     world.crew_types = upkeep.crew_types;
+    world.third_survivor_divisor = upkeep.third_survivor_divisor;
+    world.third_crew = upkeep.third_crew;
+    world.slave_rules = scene.slave_rules;
     let mining = &scene.mining;
     world.ore_values = mining.values.clone();
     world.set_ore_types(mining.kinds.clone());
@@ -550,6 +554,7 @@ pub fn build_world(files: &GameFiles, scene: &mut crate::terrain::Scene) -> Buil
             aux_sounds: info.aux_sounds,
             roll_angle: info.roll_angle,
             deploy_sounds: info.deploy_sounds,
+            move_sound: info.move_sound,
             unloading: info.unloading,
             sheet: info.sheet,
             shadow_index: info.shadow_index,
@@ -1039,6 +1044,7 @@ fn show_units(
         let cell = unit.cell();
         // A unit on a bridge's deck stands four levels up.
         let level = sim.0.map.level(cell.0, cell.1) as i32 + if unit.on_bridge { 4 } else { 0 };
+        let row = unit_draw_row(unit.x, unit.y);
         if unit.stats.infantry {
             // The frame is the sequence's first, plus the stage within the
             // sequence, plus the facing's column times the frames per facing; the
@@ -1082,6 +1088,8 @@ fn show_units(
                 Stance::Standing if turning_over => (if unit.prone { "down" } else { "up" }, since(unit.prone_at)),
                 Stance::Standing if unit.arms.firing > 0 && unit.prone => ("fireprone", firing),
                 Stance::Standing if unit.arms.firing > 0 => ("fireup", firing),
+                Stance::Standing if unit.work.digging && !unit.is_moving() && has("shovel") > 0 => ("shovel", (tick / 3) as usize),
+                Stance::Standing if unit.stepping && unit.work.load() > 0 && has("carry") > 0 => ("carry", (tick / 3) as usize),
                 // Crawling steps a frame a tick; a soldier
                 // with fear of 200 or more walks in `Panic`, a frame every
                 // four ticks.
@@ -1108,7 +1116,7 @@ fn show_units(
                 action
             };
             let (first, count, per_facing) = sequences.and_then(|s| s.get(action).or(s.get("ready"))).copied().unwrap_or((0, 1, 1));
-            let stage = if matches!(action, "walk" | "crawl" | "panic" | "prone" | "fly" | "hover" | "swim" | "tread") { stage % count } else { stage.min(count - 1) };
+            let stage = if matches!(action, "walk" | "crawl" | "panic" | "prone" | "fly" | "hover" | "swim" | "tread" | "shovel" | "carry") { stage % count } else { stage.min(count - 1) };
             let column = crate::terrain::INFANTRY_FACINGS[((((unit.facing as usize) >> 2) + 1) >> 1) & 31];
             let frame = first + stage + column * per_facing;
             let key = (model.clone(), frame, *palette, level, false);
@@ -1135,7 +1143,6 @@ fn show_units(
             // is its own frame half the file on; in the air it is the
             // shadow blob on the ground under him.
             if casts_shadow {
-                let row = (cell.0 + cell.1) as f32;
                 let key = if up.y == 0.0 {
                     let frames = view.art.frame_count(&files, model);
                     (format!("shp:{model}:{}", frame + frames / 2), 0)
@@ -1153,7 +1160,6 @@ fn show_units(
             if sprite.image != *handle {
                 sprite.image = handle.clone();
             }
-            let row = (cell.0 + cell.1) as f32;
             let over = if up.y > 0.0 { 40.0 } else { 0.0 };
             let mut depth = 2.0 + (row + 0.9 + over) * DEPTH_PER_ROW;
             if unit.on_bridge {
@@ -1204,7 +1210,7 @@ fn show_units(
             let centre = snapped(point, *middle);
             if casts_shadow {
                 let frames = view.art.frame_count(&files, model);
-                cast.insert(unit.id, ((format!("shp:{model}:{}", frame + frames / 2), 0), point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
+                cast.insert(unit.id, ((format!("shp:{model}:{}", frame + frames / 2), 0), point, 1.0 + (row + 0.95) * DEPTH_PER_ROW));
             }
             // Its own adjustment and -2.
             let height = 15 * level + slope_up(&sim.0, unit).y as i32;
@@ -1212,7 +1218,7 @@ fn show_units(
             if sprite.image != *handle {
                 sprite.image = handle.clone();
             }
-            let depth = 2.0 + ((cell.0 + cell.1) as f32 + 0.9) * DEPTH_PER_ROW;
+            let depth = 2.0 + (row + 0.9) * DEPTH_PER_ROW;
             transform.translation = Vec3::new(centre.x, -centre.y, depth);
             continue;
         }
@@ -1329,7 +1335,7 @@ fn show_units(
             let ramp = if unit.on_bridge { 0 } else { sim.0.map.ramp(cell.0, cell.1) };
             let base = model.split_once('@').map_or(model.as_str(), |(base, _)| base);
             let key = (format!("{base}@s{section}{}@r{ramp}", if half { "h" } else { "" }), direction);
-            cast.insert(unit.id, (key, point, 1.0 + ((cell.0 + cell.1) as f32 + 0.95) * DEPTH_PER_ROW));
+            cast.insert(unit.id, (key, point, 1.0 + (row + 0.95) * DEPTH_PER_ROW));
         }
         // A vehicle's picture is tested
         // against the depth with its own adjustment, less the pixels of its
@@ -1340,7 +1346,6 @@ fn show_units(
         if sprite.image != image.handle {
             sprite.image = image.handle.clone();
         }
-        let row = (cell.0 + cell.1) as f32;
         // Units draw over everything in their own row.
         let over = if up.y > 0.0 { 40.0 } else { 0.0 };
         let mut depth = 2.0 + (row + 0.9 + over) * DEPTH_PER_ROW;
@@ -1380,6 +1385,8 @@ fn show_units(
                     }
                 }
                 let drawn = art.voxel_shadow(&files, model, key.1 << 3, half, section, ramp)?;
+                // The body and shadow have different cropped canvases. Keep
+                // their model-space origins on the same ground point.
                 (drawn.width, drawn.height, drawn.rgba, Vec2::new(drawn.width as f32 / 2.0 - drawn.origin.0 as f32, drawn.height as f32 / 2.0 - drawn.origin.1 as f32))
             };
             let image = Image::new(Extent3d { width, height, depth_or_array_layers: 1 }, TextureDimension::D2, rgba, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
@@ -1398,6 +1405,36 @@ fn show_units(
     }
     for id in cast.into_keys() {
         commands.spawn((DespawnOnExit(Screen::InGame), UnitShadow(id), Sprite::default(), Transform::from_xyz(0.0, 0.0, -10.0)));
+    }
+}
+
+/// Continuous map row of a unit's feet, keeping cell centres at their cell's
+/// row. Infantry share a cell's spots, so sorting by the cell alone lets
+/// a rear soldier's sandbags draw over the soldier below it on screen.
+fn unit_draw_row(x: i32, y: i32) -> f32 {
+    (x as f32 + y as f32) / LEPTONS_PER_CELL as f32 - 1.0
+}
+
+#[cfg(test)]
+mod draw_order_tests {
+    use super::*;
+
+    #[test]
+    fn infantry_in_one_cell_draw_from_the_rear_spot_to_the_front_spot() {
+        let cell = (135, 80);
+        let at = |dx, dy| (cell.0 * LEPTONS_PER_CELL + dx, cell.1 * LEPTONS_PER_CELL + dy);
+        let rear = [at(192, 64), at(64, 192)];
+        let front = at(192, 192);
+        for rear in rear {
+            let behind = scene_point(Vec2::ZERO, rear.0, rear.1, 0);
+            let in_front = scene_point(Vec2::ZERO, front.0, front.1, 0);
+            assert!(behind.y < in_front.y);
+            let behind_z = 2.0 + (unit_draw_row(rear.0, rear.1) + 0.9) * DEPTH_PER_ROW;
+            let in_front_z = 2.0 + (unit_draw_row(front.0, front.1) + 0.9) * DEPTH_PER_ROW;
+            assert!(behind_z < in_front_z, "the lower soldier's complete sprite must draw last");
+        }
+        let centre = at(128, 128);
+        assert_eq!(unit_draw_row(centre.0, centre.1), (cell.0 + cell.1) as f32);
     }
 }
 
@@ -3022,8 +3059,20 @@ fn show_effects(
                     }
                 }
             }
-            // `SellSound` as a building starts to
-            // come down; the announcer when it has gone.
+            // MCV sounds follow simulation phases, also for debug, AI and
+            // network orders. Starting the turn is not starting the buildup.
+            Event::DeployTurning { unit, kind, at, .. } => {
+                let sound = (kind as usize).checked_sub(1).and_then(|index| view.kinds.get(index)).and_then(|kind| kind.move_sound.clone());
+                debug!(tick, unit, ?sound, "MCV begins turning to deploy");
+                cues.write_batch(sound.map(|sound| Cue::SoundOn(sound, scene_point_3d(view.origin, at))));
+            }
+            Event::Deployed { unit, kind, at, .. } => {
+                let sound = view.deploy_sound(kind, false).or_else(|| view.slam_sound.clone());
+                debug!(tick, unit, ?sound, "MCV begins unfolding into its building");
+                cues.write_batch(sound.map(|sound| Cue::SoundOn(sound, scene_point_3d(view.origin, at))));
+            }
+            // `SellSound` as a building starts to come down; the announcer
+            // when it has gone.
             Event::SaleBegan { owner } => {
                 if owner == local() {
                     cues.write_batch(view.sell_sound.clone().map(Cue::Sound));
@@ -3356,6 +3405,9 @@ fn show_effects(
                 cues.write_batch(sound.cloned().map(|name| Cue::SoundOn(name, scene_point_3d(view.origin, at))));
             }
             Event::Mended { .. } => {}
+            Event::MindOverload { controller, count, damage } => {
+                debug!(tick, controller, count, damage, "mind controller overloaded");
+            }
             // One of the player's
             // buildings hit starts a radar event at it, and only if that is
             // accepted (none like it alive within eight cells) the announcer

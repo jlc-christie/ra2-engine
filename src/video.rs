@@ -11,7 +11,7 @@
 //! the size it has.
 
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, PrimaryWindow, WindowMode, WindowResolution};
+use bevy::window::{Monitor, MonitorSelection, OnMonitor, PrimaryMonitor, PrimaryWindow, WindowMode, WindowResolution};
 
 /// The size the game starts at when nothing is asked for.
 pub const DEFAULT: (u32, u32) = (800, 600);
@@ -40,6 +40,8 @@ impl Video {
         let (width, height) = self.screen.unwrap_or(DEFAULT);
         Window {
             title: crate::home::APP_NAME.into(),
+            // Game coordinates are logical pixels. Let the window backend
+            // apply the desktop's DPI to the world, sidebar and pointer alike.
             resolution: WindowResolution::new(width, height),
             mode: if self.fullscreen { WindowMode::BorderlessFullscreen(MonitorSelection::Current) } else { WindowMode::Windowed },
             // Screenshots are drawn off screen, so a run that takes one stays
@@ -59,7 +61,7 @@ pub struct VideoPlugin;
 
 impl Plugin for VideoPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (toggle, fit, resize_for_checks).chain())
+        app.add_systems(Update, (toggle, fit, resize_for_checks, fit_desktop).chain())
             // The menus may be drawn larger on a big screen; the game's sidebar
             // and bar are always drawn at their own size.
             .add_systems(OnEnter(crate::shell::Screen::InGame), |mut scale: ResMut<UiScale>| scale.0 = 1.0);
@@ -68,11 +70,12 @@ impl Plugin for VideoPlugin {
 
 /// Puts the window into the state asked for.
 pub fn apply(video: &Video, window: &mut Window) {
+    // Drop a previous fullscreen fit before returning to the desktop's DPI.
+    window.resolution.set_scale_factor_override(None);
     if video.fullscreen {
         window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Current);
     } else {
         window.mode = WindowMode::Windowed;
-        window.resolution.set_scale_factor_override(None);
         let (width, height) = video.screen.unwrap_or(DEFAULT);
         window.resolution.set(width as f32, height as f32);
     }
@@ -100,10 +103,10 @@ fn fit(video: Res<Video>, mut windows: Query<&mut Window, With<PrimaryWindow>>) 
     let Ok(mut window) = windows.single_mut() else {
         return;
     };
-    if !video.fullscreen || window.mode == WindowMode::Windowed {
-        return;
-    }
-    let Some((width, height)) = video.screen else {
+    let Some((width, height)) = video.screen.filter(|_| video.fullscreen && window.mode != WindowMode::Windowed) else {
+        if window.resolution.scale_factor_override().is_some() {
+            window.resolution.set_scale_factor_override(None);
+        }
         return;
     };
     let (pw, ph) = (window.physical_width() as f32, window.physical_height() as f32);
@@ -113,6 +116,92 @@ fn fit(video: Res<Video>, mut windows: Query<&mut Window, With<PrimaryWindow>>) 
     let scale = (pw / width as f32).min(ph / height as f32).max(0.25);
     if window.resolution.scale_factor_override().is_none_or(|now| (now - scale).abs() > 0.001) {
         window.resolution.set_scale_factor_override(Some(scale));
+    }
+}
+
+/// A saved size from a lower-DPI desktop may exceed this display at its native
+/// DPI. Let the compositor maximise into its actual work area (including its
+/// panels and title bar) instead of leaving part of the game off screen.
+fn fit_desktop(mut windows: Query<(&mut Window, Option<&OnMonitor>), With<PrimaryWindow>>, monitors: Query<&Monitor>, primary: Query<&Monitor, With<PrimaryMonitor>>) {
+    let Ok((mut window, on_monitor)) = windows.single_mut() else { return };
+    if window.mode != WindowMode::Windowed { return }
+    let monitor = on_monitor.and_then(|at| monitors.get(at.0).ok()).or_else(|| primary.iter().next()).or_else(|| monitors.iter().next());
+    let Some(monitor) = monitor else { return };
+    if window.physical_width() > monitor.physical_width || window.physical_height() > monitor.physical_height {
+        window.set_maximized(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec2;
+
+    #[test]
+    fn window_and_pointer_follow_desktop_dpi() {
+        let video = Video { screen: Some((800, 600)), fullscreen: false };
+        let mut window = video.window();
+        assert_eq!(window.resolution.scale_factor_override(), None);
+        window.resolution.set_scale_factor_and_apply_to_physical_size(2.0);
+        window.set_physical_cursor_position(Some(DVec2::new(1500.0, 800.0)));
+        assert_eq!(window.physical_size(), UVec2::new(1600, 1200));
+        assert_eq!(window.size(), Vec2::new(800.0, 600.0));
+        assert_eq!(window.cursor_position(), Some(Vec2::new(750.0, 400.0)));
+
+        window.resolution.set_scale_factor(1.5);
+        apply(&video, &mut window);
+        assert_eq!(window.physical_size(), UVec2::new(1200, 900));
+        assert_eq!(window.size(), Vec2::new(800.0, 600.0));
+    }
+
+    #[test]
+    fn leaving_fullscreen_restores_native_dpi_and_requested_window_size() {
+        let video = Video { screen: Some((800, 600)), fullscreen: false };
+        let mut window = video.window();
+        window.resolution.set_scale_factor(2.0);
+        window.resolution.set_scale_factor_override(Some(3.2));
+        window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Current);
+        apply(&video, &mut window);
+        assert_eq!(window.mode, WindowMode::Windowed);
+        assert_eq!(window.resolution.scale_factor_override(), None);
+        assert_eq!(window.scale_factor(), 2.0);
+        assert_eq!(window.physical_size(), UVec2::new(1600, 1200));
+    }
+
+    #[test]
+    fn fullscreen_uses_selected_resolution_then_returns_to_desktop_dpi() {
+        let mut app = App::new();
+        let video = Video { screen: Some((800, 600)), fullscreen: true };
+        app.insert_resource(video).add_systems(Update, fit);
+        let mut window = video.window();
+        window.resolution.set_scale_factor(2.0);
+        window.resolution.set_physical_resolution(3072, 1920);
+        let entity = app.world_mut().spawn((window, PrimaryWindow)).id();
+        app.update();
+        let window = app.world().get::<Window>(entity).unwrap();
+        assert_eq!(window.scale_factor(), 3.2);
+        assert_eq!(window.size(), Vec2::new(960.0, 600.0));
+
+        app.world_mut().resource_mut::<Video>().screen = None;
+        app.update();
+        let window = app.world().get::<Window>(entity).unwrap();
+        assert_eq!(window.scale_factor(), 2.0);
+        assert_eq!(window.size(), Vec2::new(1536.0, 960.0));
+    }
+
+    #[test]
+    fn saved_large_window_is_maximised_into_the_hidpi_desktop_work_area() {
+        let mut app = App::new();
+        app.add_systems(Update, fit_desktop);
+        app.world_mut().spawn((Monitor { name: None, physical_width: 3072, physical_height: 1920, physical_position: IVec2::ZERO, refresh_rate_millihertz: None, scale_factor: 2.0, video_modes: vec![] }, PrimaryMonitor));
+        let mut window = Video { screen: Some((1920, 1080)), fullscreen: false }.window();
+        window.resolution.set_scale_factor_and_apply_to_physical_size(2.0);
+        let entity = app.world_mut().spawn((window, PrimaryWindow)).id();
+        app.update();
+        let mut window = app.world_mut().get_mut::<Window>(entity).unwrap();
+        assert_eq!(window.internal.take_maximize_request(), Some(true));
+        assert_eq!(window.scale_factor(), 2.0);
+        assert_eq!(window.resolution.scale_factor_override(), None);
     }
 }
 

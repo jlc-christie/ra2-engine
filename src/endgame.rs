@@ -24,6 +24,21 @@ pub struct ScoreRow {
     pub score: i32,
 }
 
+/// The player's faction determines the native score background.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreSide {
+    #[default]
+    Allied,
+    Soviet,
+    Yuri,
+}
+
+impl ScoreSide {
+    fn from_house_side(side: i32) -> Self {
+        match side { 1 => Self::Soviet, 2 => Self::Yuri, _ => Self::Allied }
+    }
+}
+
 /// What the score screen shows: the rows, best first, the game's length in
 /// seconds, and how many games have been played.
 #[derive(Resource, Default, Clone, Debug)]
@@ -31,8 +46,7 @@ pub struct ScoreBoard {
     pub rows: Vec<ScoreRow>,
     pub seconds: u64,
     pub games: u32,
-    /// Whether the player's side is the Soviets (the picture behind the rows).
-    pub soviet: bool,
+    pub side: ScoreSide,
 }
 
 /// The names of the houses, by owner, for messages and the score screen.
@@ -153,7 +167,20 @@ fn watch(
     // The clock counts sixty ticks to the second.
     board.seconds = world.current_tick() / 60;
     board.games += 1;
-    board.soviet = world.houses.get(local() as usize).is_some_and(|house| house.side == 1);
+    board.side = world.houses.get(local() as usize).map_or(ScoreSide::Allied, |house| ScoreSide::from_house_side(house.side));
     *progress = Progress::default();
     next_screen.set(Screen::Score);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn score_side_keeps_yuri_distinct_from_allied_and_soviet() {
+        assert_eq!(ScoreSide::from_house_side(0), ScoreSide::Allied);
+        assert_eq!(ScoreSide::from_house_side(1), ScoreSide::Soviet);
+        assert_eq!(ScoreSide::from_house_side(2), ScoreSide::Yuri);
+        assert_eq!(ScoreSide::from_house_side(-1), ScoreSide::Allied);
+    }
 }

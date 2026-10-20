@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use ra2_formats::pal::Palette;
 use ra2_formats::vxl::{Hva, Vpl, Vxl};
 
+/// Opacity shared by the generated SHP and voxel shadows. Black at 148/255
+/// gently darkens the ground after linear-light blending and sRGB encoding.
+pub const SHADOW_ALPHA: u8 = 148;
+
 /// Unit vectors a voxel's normal index refers to, per normals type.
 pub struct NormalTables(HashMap<u8, Vec<[f32; 3]>>);
 
@@ -354,7 +358,7 @@ pub fn render(
     // up by (shade, colour) straight from the VPL sections.
     for (x, y, d, rgb) in points {
         let (px, py) = ((x.floor() as i32 - min_x) as usize, (y.floor() as i32 - min_y) as usize);
-        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        for (dx, dy) in [(0, 0), (1, 0)] {
             let at = (py + dy) * width + px + dx;
             if at < depth.len() && d > depth[at] {
                 depth[at] = d;
@@ -370,10 +374,10 @@ pub fn render(
     })
 }
 
-/// A model's shadow on the ground: the footprint of one of its sections seen
-/// from above, turned to a compass direction and laid on the slope under it, as
+/// A model's contact shadow on the ground: the vertical footprint of one of its
+/// sections, turned to a compass direction and laid on the slope under it, as
 /// translucent black.
-// The section is turned by its facing and the slope, flattened to no height, and drawn
+// The section is flattened to no height, turned by its facing and the slope, and drawn
 // at half size for a `ConsideredAircraft` type. Its place in the model is that
 // of the animation's first frame. A section the model does not have leaves the
 // whole model to cast it.
@@ -391,8 +395,10 @@ pub fn shadow(vxl: &Vxl, hva: Option<&Hva>, facing: u8, half: bool, section: usi
                 Some(m) => std::array::from_fn(|i| m[i][0] * local[0] + m[i][1] * local[1] + m[i][2] * local[2] + m[i][3] * limb.scale * extent[i]),
                 None => local,
             };
-            let mut ground = to_world(position.map(|c: f32| c * scale), facing, tilt.as_ref());
-            ground[2] = 0.0;
+            // Project straight down before laying the footprint onto the ramp.
+            // Height must not push the shadow sideways out from the tracks, or
+            // shift it off the ramp's ground plane.
+            let ground = to_world([position[0] * scale, position[1] * scale, 0.0], facing, tilt.as_ref());
             let view = world_to_view(ground);
             points.push((view[0], -view[1]));
         }
@@ -408,12 +414,92 @@ pub fn shadow(vxl: &Vxl, hva: Option<&Hva>, facing: u8, half: bool, section: usi
     let mut rgba = vec![0u8; width * height * 4];
     for (x, y) in points {
         let (px, py) = ((x.floor() as i32 - min_x) as usize, (y.floor() as i32 - min_y) as usize);
-        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        // Match the model's two horizontal samples; a second row broadens the
+        // contact shadow beyond the bottom edge of the tracks.
+        for (dx, dy) in [(0, 0), (1, 0)] {
             let at = (py + dy) * width + px + dx;
             if at * 4 + 3 < rgba.len() {
-                rgba[at * 4..at * 4 + 4].copy_from_slice(&[0, 0, 0, 128]);
+                rgba[at * 4..at * 4 + 4].copy_from_slice(&[0, 0, 0, SHADOW_ALPHA]);
             }
         }
     }
     Some(VoxelSprite { width: width as u32, height: height as u32, rgba, origin: (-min_x, -min_y) })
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+
+    fn marker(at: [f32; 3]) -> Vxl {
+        use ra2_formats::vxl::{Limb, Voxel};
+        Vxl {
+            limbs: vec![Limb {
+                name: "marker".to_owned(),
+                scale: 1.0,
+                min: at.map(|c| c - 0.5),
+                max: at.map(|c| c + 0.5),
+                size: [1, 1, 1],
+                normals_type: 0,
+                voxels: vec![Voxel { x: 0, y: 0, z: 0, color: 1, normal: 0 }],
+            }],
+        }
+    }
+
+    fn ink(sprite: &VoxelSprite) -> Vec<(i32, i32)> {
+        sprite.rgba.chunks_exact(4).enumerate().filter(|(_, rgba)| rgba[3] != 0).map(|(i, _)| {
+            (i as i32 % sprite.width as i32 - sprite.origin.0, i as i32 / sprite.width as i32 - sprite.origin.1)
+        }).collect()
+    }
+
+    #[test]
+    fn height_does_not_displace_the_contact_shadow_from_its_ground_point() {
+        for ramp in [0, 1, 5, 13] {
+            for facing in (0..=255).step_by(8) {
+                let tilt = slope_matrix(ramp, None);
+                let ground = ink(&shadow(&marker([9.0, -7.0, 0.0]), None, facing, false, 0, tilt).unwrap());
+                let raised = ink(&shadow(&marker([9.0, -7.0, 16.0]), None, facing, false, 0, tilt).unwrap());
+                assert_eq!(raised, ground, "height displaced the footprint at facing {facing}, ramp {ramp}");
+                assert_eq!(raised.len(), 2, "the footprint must keep the model's two horizontal samples");
+            }
+        }
+        let half = ink(&shadow(&marker([12.0, 0.0, 8.0]), None, 0, true, 0, None).unwrap());
+        let full = ink(&shadow(&marker([12.0, 0.0, 8.0]), None, 0, false, 0, None).unwrap());
+        assert!(half[0].0 < full[0].0);
+    }
+
+    fn check_grizzly_contact_shadow(files: &crate::files::GameFiles, model: &str) {
+        let vxl = Vxl::parse(files.get(&format!("{model}.vxl")).expect("Grizzly model")).unwrap();
+        let hva = files.get(&format!("{model}.hva")).and_then(Hva::parse);
+        let palette = Palette([[255; 3]; 256]);
+        for facing in (0..=255).step_by(8) {
+            let hull = render(&vxl, hva.as_ref(), None, &NormalTables::empty(), &palette, facing, [1000; 3], 0, Pose::default()).unwrap();
+            let cast = shadow(&vxl, hva.as_ref(), facing, false, 0, None).unwrap();
+            let (hull_ink, cast_ink) = (ink(&hull), ink(&cast));
+            assert_eq!(cast_ink.iter().map(|p| p.0).min(), hull_ink.iter().map(|p| p.0).min(), "{model} left contact edge at facing {facing}; hull origin {:?}, shadow origin {:?}", hull.origin, cast.origin);
+            assert_eq!(cast_ink.iter().map(|p| p.0).max(), hull_ink.iter().map(|p| p.0).max(), "{model} right contact edge at facing {facing}; hull origin {:?}, shadow origin {:?}", hull.origin, cast.origin);
+            let below_tracks = cast_ink.iter().map(|p| p.1).max().unwrap() - hull_ink.iter().map(|p| p.1).max().unwrap();
+            assert!((0..=4).contains(&below_tracks), "{model} contact shadow extends {below_tracks} pixels below the tracks at facing {facing}");
+            let outside = cast_ink.into_iter().filter(|&(x, y)| {
+                let (x, y) = (x + hull.origin.0, y + hull.origin.1);
+                x < 0 || y < 0 || x >= hull.width as i32 || y >= hull.height as i32 || hull.rgba[(y as usize * hull.width as usize + x as usize) * 4 + 3] == 0
+            }).count();
+            assert!(outside >= 8, "{model} must leave visible ground shadow at facing {facing}: {outside} pixels");
+        }
+    }
+
+    #[test]
+    fn the_ra2_grizzly_contact_shadow_fits_under_its_tracks() {
+        use crate::files::{Edition, GameFiles};
+        let Ok(files) = GameFiles::open_for_edition(&crate::files::dev_dir(), Edition::RedAlert2) else { return };
+        check_grizzly_contact_shadow(&files, "mtnk");
+    }
+
+    #[test]
+    fn the_yr_grizzly_contact_shadow_fits_under_its_tracks() {
+        use crate::files::{Edition, GameFiles};
+        let dir = crate::files::dev_dir();
+        if crate::files::find(&dir, "ra2md.mix").is_none() { return }
+        let files = GameFiles::open_for_edition(&dir, Edition::YuriAssets).unwrap();
+        check_grizzly_contact_shadow(&files, "gtnk");
+    }
 }

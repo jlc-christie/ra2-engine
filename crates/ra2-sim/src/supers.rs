@@ -42,6 +42,8 @@ pub struct Rules {
     pub american: Vec<(u16, u32)>,
     pub allied: Vec<(u16, u32)>,
     pub soviet: Vec<(u16, u32)>,
+    /// Yuri's Revenge `YuriParaDropInf` and `YuriParaDropNum`.
+    pub third: Vec<(u16, u32)>,
     /// `ParadropRadius` in leptons.
     pub radius: i32,
     /// `ParachuteMaxFallRate`, as a speed downward.
@@ -793,10 +795,8 @@ impl World {
         let rules = self.super_rules.clone();
         let list = if american {
             rules.american
-        } else if self.houses[house as usize].side == 0 {
-            rules.allied
         } else {
-            rules.soviet
+            match self.houses[house as usize].side { 0 => rules.allied, 1 => rules.soviet, 2 => rules.third, _ => Vec::new() }
         };
         for (soldier, count) in list {
             self.create_paradrop(house, target, soldier, count);
