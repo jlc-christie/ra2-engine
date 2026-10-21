@@ -967,8 +967,8 @@ fn spawn_load_screen(
                     p.spawn(picture(&pic, 20.0, 300.0));
 
                     // The player's row at (16, 321): a darkened box; the bar,
-                    // its inside filled with the player's colour and PROGBARM.SHP
-                    // over as much of it as is loaded; then the name, 21 pixels
+                    // outlined in the player's colour, with PROGBARM.SHP over
+                    // as much of it as is loaded; then the name, 21 pixels
                     // past the bar. The row is the taller of the bar plus 6 and
                     // the text, plus 4.
                     let player_name = if lobby.name.is_empty() { painter.shell.string("GUI:Player") } else { lobby.name.clone() };
@@ -987,9 +987,10 @@ fn spawn_load_screen(
                     let (x, y) = (16.0, 321.0);
                     p.spawn((place(x, y, bar.size.x + name.size.x + 36.0, row + 1.0), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62))));
                     let (bar_x, bar_y) = (x + 5.0, y + ((row - 6.0 - bar.size.y) / 2.0).floor());
-                    // The inside not yet loaded, in the darkest of the colour's shades.
-                    let [r, g, b] = player_hsv.map_or([0, 0, 0], |hsv| crate::colors::remap_shades(hsv)[15]);
-                    p.spawn((place(bar_x + 3.0, bar_y + 3.0, bar.size.x, bar.size.y), BackgroundColor(Color::srgb_u8(r, g, b))));
+                    p.spawn((
+                        Node { border: UiRect::all(Val::Px(1.0)), ..place(bar_x, bar_y, bar.size.x + 6.0, bar.size.y + 6.0) },
+                        BorderColor::all(Color::srgb_u8(player_colour[0], player_colour[1], player_colour[2])),
+                    ));
                     // Not original behaviour: the map loads at once here, so
                     // the bar fills over the time the screen is shown.
                     p.spawn((Node { overflow: Overflow::clip(), ..place(bar_x + 3.0, bar_y + 3.0, 0.0, bar.size.y) }, LoadBar(bar.size.x)))
