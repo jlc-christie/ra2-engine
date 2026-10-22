@@ -342,12 +342,9 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(not(game_files), ignore = "needs the game's files")]
     fn the_steam_copy_passes_its_check() {
         let dir = dev_dir();
-        if !dir.exists() {
-            eprintln!("game files not found; skipping");
-            return;
-        }
         let check = check(&dir);
         assert_eq!(check.problems, Vec::new());
         assert_eq!(check.warnings, Vec::<String>::new());

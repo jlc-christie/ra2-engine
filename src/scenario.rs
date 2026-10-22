@@ -1,6 +1,6 @@
 //! Tests that run the simulation on a real map with the real rules, without a
 //! window: load, give orders, tick as far as needed, look at the result. They are
-//! skipped when the game's files are not there.
+//! ignored when the game's files were not there at build time.
 
 use ra2_formats::map::Map;
 use ra2_sim::{Order, World};
@@ -20,12 +20,17 @@ pub struct Scenario {
 
 impl Scenario {
     /// Loads a map by file name without extension, as the game does.
-    pub fn load(map: &str) -> Option<Self> {
+    pub fn load(map: &str) -> Self {
         Self::load_at(map, None)
     }
 
     /// Loads a map with the player at one of its start positions.
-    pub fn load_at(map: &str, start: Option<usize>) -> Option<Self> {
+    pub fn load_at(map: &str, start: Option<usize>) -> Self {
+        Self::try_load_at(map, start).unwrap_or_else(|| panic!("{map} did not load"))
+    }
+
+    /// Loads a map, if it is there and its terrain can be built.
+    pub fn try_load_at(map: &str, start: Option<usize>) -> Option<Self> {
         let files = GameFiles::open().ok()?;
         let parsed = files
             .get(&format!("{map}.map"))
@@ -115,11 +120,9 @@ impl Scenario {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_base_vehicle_deploys_and_a_power_plant_goes_beside_the_yard() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        eprintln!("game files not found; skipping");
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     assert!(game.options().contains(&"GAPOWR"), "{:?}", game.options());
     let spot = game.find_spot("GAPOWR", yard, 8).expect("somewhere to put a power plant");
@@ -130,10 +133,9 @@ fn the_base_vehicle_deploys_and_a_power_plant_goes_beside_the_yard() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_base_vehicle_drives_across_the_map_and_can_come_back() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let unit = game.player_unit();
     let start = game.world.unit(unit).unwrap().cell();
     for goal in [(40, 92), start] {
@@ -146,10 +148,9 @@ fn the_base_vehicle_drives_across_the_map_and_can_come_back() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_american_player_is_offered_only_their_own_airforce_command() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     for name in ["GAPOWR", "GAREFN"] {
         let spot = game.find_spot(name, yard, 10).unwrap_or_else(|| panic!("nowhere for {name}"));
@@ -165,17 +166,12 @@ fn an_american_player_is_offered_only_their_own_airforce_command() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_shipyard_goes_on_water_and_not_on_land() {
     // Tried on several maps; at least one has water within reach of the start.
-    if Scenario::load("mp03t4").is_none() {
-        eprintln!("game files not found; skipping");
-        return;
-    }
     let mut total = 0;
     for map in ["mp03t4", "mp01t4", "mp02t2", "mp05t4", "mp06t2", "mp08t2", "mp10s4", "mp11t2"] {
-        let Some(mut game) = Scenario::load(map) else {
-            continue;
-        };
+        let mut game = Scenario::load(map);
         let yard = game.deploy_base();
         let mut built = true;
         for name in ["GAPOWR", "GAREFN"] {
@@ -209,10 +205,9 @@ fn a_shipyard_goes_on_water_and_not_on_land() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_war_factory_builds_tanks_that_come_out_and_can_be_driven() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let names = |game: &Scenario| -> Vec<String> {
         game.world.buildable_units(PLAYER).iter().map(|&unit| game.units[unit as usize].clone()).collect()
@@ -278,11 +273,13 @@ fn a_war_factory_builds_tanks_that_come_out_and_can_be_driven() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_refinery_comes_with_a_miner_that_digs_and_is_paid() {
     miner_digs_and_is_paid("mp03t4", None);
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_miner_digs_and_is_paid_on_defcon_6() {
     // Most of Defcon 6's ore is the third kind (`Vinifera`, the TIB2 overlays),
     // worth the same as ore; the sixth start has only that near it.
@@ -290,9 +287,7 @@ fn a_miner_digs_and_is_paid_on_defcon_6() {
 }
 
 fn miner_digs_and_is_paid(map: &str, start: Option<usize>) {
-    let Some(mut game) = Scenario::load_at(map, start) else {
-        return;
-    };
+    let mut game = Scenario::load_at(map, start);
     let yard = game.deploy_base();
     for name in ["GAPOWR", "GAREFN"] {
         let spot = game.find_spot(name, yard, 12).unwrap_or_else(|| panic!("nowhere for {name}"));
@@ -328,10 +323,9 @@ fn miner_digs_and_is_paid(map: &str, start: Option<usize>) {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn units_go_to_their_factory_s_rally_point() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     for name in ["GAPOWR", "GAREFN", "GAPILE", "GAWEAP"] {
         let spot = game.find_spot(name, yard, 12).unwrap_or_else(|| panic!("nowhere for {name}"));
@@ -360,10 +354,9 @@ fn units_go_to_their_factory_s_rally_point() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn tanks_of_two_houses_fight_until_one_dies() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let tank = game.units.iter().position(|name| name == "MTNK").unwrap();
     let stats = ra2_sim::UnitStats { kind: tank as u16 + 1, ..game.world.unit_types[tank].stats };
@@ -396,10 +389,9 @@ fn tanks_of_two_houses_fight_until_one_dies() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_building_can_be_sold_for_half_its_cost_and_its_people_walk_out() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("GAPOWR", yard, 12).unwrap();
     assert!(game.build_at("GAPOWR", spot));
@@ -418,11 +410,10 @@ fn a_building_can_be_sold_for_half_its_cost_and_its_people_walk_out() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn soldiers_with_special_orders_jump_dig_in_and_take_buildings() {
     use ra2_sim::combat::Stance;
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("GAPOWR", yard, 12).unwrap();
     assert!(game.build_at("GAPOWR", spot));
@@ -464,10 +455,9 @@ fn soldiers_with_special_orders_jump_dig_in_and_take_buildings() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_rocketeer_flies_to_where_it_is_sent_and_hovers() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let kind = game.units.iter().position(|n| n == "JUMPJET").unwrap();
     let stats = ra2_sim::UnitStats { kind: kind as u16 + 1, ..game.world.unit_types[kind].stats };
@@ -491,10 +481,9 @@ fn a_rocketeer_flies_to_where_it_is_sent_and_hovers() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_ifv_takes_a_passenger_changes_its_weapon_and_lets_it_out() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -535,10 +524,9 @@ fn an_ifv_takes_a_passenger_changes_its_weapon_and_lets_it_out() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn factories_keep_turning_units_out_whatever_they_are() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     for name in ["GAPOWR", "GAREFN", "GAPILE", "GAWEAP", "GAPOWR", "GAAIRC", "GATECH"] {
         let name = if name == "GAAIRC" && !game.options().contains(&"GAAIRC") { "AMRADR" } else { name };
@@ -586,10 +574,9 @@ fn factories_keep_turning_units_out_whatever_they_are() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_tank_attacks_a_building_from_its_range_not_from_beside_it() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let tank = game.units.iter().position(|name| name == "MTNK").unwrap();
     let stats = ra2_sim::UnitStats { kind: tank as u16 + 1, ..game.world.unit_types[tank].stats };
@@ -610,10 +597,9 @@ fn a_tank_attacks_a_building_from_its_range_not_from_beside_it() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn soldiers_fire_from_a_civilian_building_and_are_put_out_when_it_is_badly_hurt() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -659,10 +645,9 @@ fn soldiers_fire_from_a_civilian_building_and_are_put_out_when_it_is_badly_hurt(
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn units_find_their_way_round_things_to_far_places() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -697,10 +682,9 @@ fn units_find_their_way_round_things_to_far_places() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn soldiers_board_a_helicopter_that_has_flown_and_landed() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -742,10 +726,9 @@ fn soldiers_board_a_helicopter_that_has_flown_and_landed() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_engineer_mends_a_damaged_building_of_its_own_side() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -765,10 +748,9 @@ fn an_engineer_mends_a_damaged_building_of_its_own_side() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_prism_tank_fires() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -790,10 +772,9 @@ fn a_prism_tank_fires() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_unit_held_by_a_legionnaire_stops_firing_and_is_erased() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -839,10 +820,9 @@ fn a_unit_held_by_a_legionnaire_stops_firing_and_is_erased() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_shroud_lifts_round_the_players_things_and_nothing_goes_under_it() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     game.world.map.shroud_on = true;
     let unit = game.player_unit();
     let at = game.world.unit(unit).unwrap().cell();
@@ -859,10 +839,9 @@ fn the_shroud_lifts_round_the_players_things_and_nothing_goes_under_it() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn tanya_blows_up_a_building_with_a_charge() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap();
@@ -892,10 +871,9 @@ fn tanya_blows_up_a_building_with_a_charge() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_harrier_is_built_on_a_pad_flies_out_fires_and_comes_home_to_reload() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     for name in ["GAPOWR", "GAREFN", "GAPILE", "GAAIRC"] {
         let name = if name == "GAAIRC" && !game.options().contains(&"GAAIRC") { "AMRADR" } else { name };
@@ -956,11 +934,10 @@ fn a_harrier_is_built_on_a_pad_flies_out_fires_and_comes_home_to_reload() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_pad_repairs_its_aircraft_a_step_at_a_time_and_selling_it_sends_them_off() {
     use ra2_sim::combat::Event;
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     for name in ["GAPOWR", "GAREFN", "GAPILE", "GAAIRC"] {
         let name = if name == "GAAIRC" && !game.options().contains(&"GAAIRC") { "AMRADR" } else { name };
@@ -1025,10 +1002,9 @@ fn a_pad_repairs_its_aircraft_a_step_at_a_time_and_selling_it_sends_them_off() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_computer_house_deploys_its_base_vehicle_and_both_sides_get_starting_units() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     assert!(game.world.houses.len() > enemy as usize, "no computer house");
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(2));
@@ -1070,10 +1046,9 @@ fn the_computer_house_deploys_its_base_vehicle_and_both_sides_get_starting_units
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn special_weapons_do_what_they_are_for() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1134,10 +1109,9 @@ fn special_weapons_do_what_they_are_for() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_dying_building_marks_the_ground() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     assert!(!game.world.map.smudge_types.is_empty(), "no smudge types loaded");
     assert_eq!(game.world.map.smudges().count(), 0);
@@ -1151,13 +1125,12 @@ fn a_dying_building_marks_the_ground() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn tanya_over_an_enemy_building_is_offered_the_charge() {
     // So is the Psi Commando, whose mind control cannot touch a building: the
     // engine's attack test asks only that the soldier be armed.
     for soldier in ["TANY", "PTROOP"] {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let kind = game.units.iter().position(|n| n == soldier).unwrap();
     let stats = ra2_sim::UnitStats { kind: kind as u16 + 1, ..game.world.unit_types[kind].stats };
@@ -1180,10 +1153,9 @@ fn tanya_over_an_enemy_building_is_offered_the_charge() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_american_radar_gives_a_paradrop() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let index = game.world.super_types.iter().position(|kind| kind.kind == 6).expect("no American paradrop type");
     assert!(!game.world.houses[PLAYER as usize].supers.get(index).is_some_and(|s| s.granted));
@@ -1212,10 +1184,9 @@ fn the_american_radar_gives_a_paradrop() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_v3_launches_its_rocket_and_grows_another() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1245,10 +1216,9 @@ fn a_v3_launches_its_rocket_and_grows_another() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_carrier_sends_its_hornets_and_takes_them_back() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1283,10 +1253,9 @@ fn a_carrier_sends_its_hornets_and_takes_them_back() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_spy_is_disguised_passed_over_and_steals() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1329,18 +1298,15 @@ fn a_spy_is_disguised_passed_over_and_steals() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn low_bridges_can_be_crossed() {
     // Some stock map has low bridges over water (Tower of Power, Lost Lake...).
-    let Ok(files) = GameFiles::open() else {
-        return;
-    };
-    let Some(list) = files.get("missions.pkt").map(ra2_formats::ini::Ini::parse) else {
-        return;
-    };
+    let files = GameFiles::open().expect("the game's files");
+    let list = files.get("missions.pkt").map(ra2_formats::ini::Ini::parse).expect("missions.pkt");
     let best = list
         .section("MultiMaps")
         .iter()
-        .filter_map(|(_, id)| Scenario::load(id.trim()))
+        .filter_map(|(_, id)| Scenario::try_load_at(id.trim(), None))
         .map(|game| {
             let map = &game.world.map;
             let (w, h) = map.size();
@@ -1356,10 +1322,9 @@ fn low_bridges_can_be_crossed() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_computer_forms_teams_and_attacks() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     let data = &game.world.team_data;
     assert!(data.triggers.len() > 50 && data.team_types.len() > 50 && !data.task_forces.is_empty() && !data.scripts.is_empty(), "ai.ini not read: {} triggers, {} teams", data.triggers.len(), data.team_types.len());
@@ -1401,12 +1366,11 @@ fn the_computer_forms_teams_and_attacks() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_hardest_computer_walls_in_its_buildings() {
     // At the hardest level half the computer's defence places become a ring of
     // walls round its latest unwalled yard, tech centre or super weapon.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
     game.world.houses[enemy as usize].credits = 30_000;
@@ -1424,10 +1388,9 @@ fn the_hardest_computer_walls_in_its_buildings() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn kills_bring_rank_and_rank_brings_its_bonuses() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1456,10 +1419,9 @@ fn kills_bring_rank_and_rank_brings_its_bonuses() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn walls_are_worn_down_and_broken_by_shellfire() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1490,10 +1452,9 @@ fn walls_are_worn_down_and_broken_by_shellfire() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn prism_towers_lend_their_beams() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1524,10 +1485,9 @@ fn prism_towers_lend_their_beams() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn yuri_deploys_his_wave_and_gets_up_again() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1548,10 +1508,9 @@ fn yuri_deploys_his_wave_and_gets_up_again() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn submarines_cloak_and_sensors_find_them() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1576,10 +1535,9 @@ fn submarines_cloak_and_sensors_find_them() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn tanks_crush_soldiers_and_the_demolition_truck_goes_off() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let stats = |game: &Scenario, name: &str| {
         let kind = game.units.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
@@ -1608,10 +1566,9 @@ fn tanks_crush_soldiers_and_the_demolition_truck_goes_off() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_flak_trooper_shoots_at_things_in_the_air() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 8);
     let rocketeer = game.world.add_infantry(at, 0, 0, game.stats("JUMPJET"), 2).unwrap();
@@ -1628,10 +1585,9 @@ fn a_flak_trooper_shoots_at_things_in_the_air() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_spanner_mends_a_building_for_money() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let plant = game.building("GAPOWR");
     let spot = game.find_spot("GAPOWR", (yard.0 + 6, yard.1 + 6), 6).unwrap();
@@ -1649,10 +1605,9 @@ fn the_spanner_mends_a_building_for_money() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_tech_airport_gives_a_second_paradrop() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let american = game.world.super_types.iter().position(|kind| kind.kind == 6).unwrap();
     let plain = game.world.super_types.iter().position(|kind| kind.kind == 5).unwrap();
@@ -1683,10 +1638,9 @@ fn a_tech_airport_gives_a_second_paradrop() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_tank_sent_past_an_enemy_soldier_drives_through_him() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 10);
     for (row, moving) in [(0, false), (3, true)] {
@@ -1706,10 +1660,9 @@ fn a_tank_sent_past_an_enemy_soldier_drives_through_him() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_computer_house_short_of_power_loses_its_coils() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 8, yard.1 + 10);
     let coil = game.world.add_map_building(2, game.building("TESLA"), at, 10_000);
@@ -1726,10 +1679,9 @@ fn a_computer_house_short_of_power_loses_its_coils() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_computer_answers_an_attack_on_its_base() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(2));
     game.world.create_starting_units(10);
@@ -1750,10 +1702,9 @@ fn the_computer_answers_an_attack_on_its_base() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_oil_derrick_and_a_reactor_go_off_when_destroyed() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     for (name, reach) in [("CAOILD", 2), ("NANRCT", 4), ("NAPOWR", 0)] {
@@ -1776,10 +1727,9 @@ fn an_oil_derrick_and_a_reactor_go_off_when_destroyed() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_house_with_nothing_left_is_defeated_and_the_game_ends() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     game.deploy_base();
     game.world.end_checks = true;
     game.world.short_game = true;
@@ -1801,10 +1751,9 @@ fn a_house_with_nothing_left_is_defeated_and_the_game_ends() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_computer_with_no_factory_left_sells_up_and_charges() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let vehicle = game.world.units().iter().find(|u| u.owner == 2).map(|u| u.id).unwrap();
     game.world.remove_unit(vehicle);
@@ -1827,10 +1776,9 @@ fn a_computer_with_no_factory_left_sells_up_and_charges() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_other_super_weapons_do_their_work() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let kind = |game: &Scenario, kind: i32| game.world.super_types.iter().position(|t| t.kind == kind).unwrap_or_else(|| panic!("no super of kind {kind}"));
@@ -1904,10 +1852,9 @@ fn super_of(game: &Scenario, kind: i32) -> u16 {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_missile_climbs_falls_and_burns_out_before_it_goes_off() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     use ra2_sim::supers::NukeStage;
     let yard = charged_supers(&mut game);
     let at = (yard.0 + 4, yard.1 + 24);
@@ -1941,10 +1888,9 @@ fn the_missile_climbs_falls_and_burns_out_before_it_goes_off() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_chronosphere_waits_then_moves_and_drowns_what_it_drops_in_water() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = charged_supers(&mut game);
     let field = (yard.0 + 4, yard.1 + 22);
     let tank = game.world.add_unit(field, 0, game.stats("MTNK"), PLAYER);
@@ -1986,10 +1932,9 @@ fn the_chronosphere_waits_then_moves_and_drowns_what_it_drops_in_water() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_lightning_storm_jams_the_radar_of_its_callers_enemies() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = charged_supers(&mut game);
     let enemy = terrain::ENEMY;
     let at = (yard.0 + 4, yard.1 + 24);
@@ -2017,10 +1962,9 @@ fn a_lightning_storm_jams_the_radar_of_its_callers_enemies() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_computer_without_miners_or_money_sells_to_buy_one() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(1));
     game.run(9000);
@@ -2039,10 +1983,9 @@ fn a_computer_without_miners_or_money_sells_to_buy_one() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_computer_fires_its_missile_at_what_is_worth_most() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let enemy = terrain::ENEMY;
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(1));
@@ -2062,12 +2005,11 @@ fn the_computer_fires_its_missile_at_what_is_worth_most() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn high_bridges_are_crossed_on_the_deck_and_passed_under() {
     // DATA: mp23t4 has a high bridge along x on row 74 over water; mp06t2 has
     // one along x on row 55 over a dry valley.
-    let Some(mut game) = Scenario::load("mp23t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp23t4");
     let track = |game: &Scenario, cell: (i32, i32)| game.world.map.speed_percent(cell.0, cell.1, ra2_sim::SpeedType::Track);
     assert!(game.world.map.deck(85, 74) && game.world.map.deck(85, 73) && game.world.map.deck(85, 75));
     assert_eq!(track(&game, (85, 74)), 0, "the water under the deck is still water");
@@ -2096,9 +2038,7 @@ fn high_bridges_are_crossed_on_the_deck_and_passed_under() {
     assert_eq!(ship.cell(), (85, 68), "the ship did not pass under the bridge");
     assert!(!ship.on_bridge);
 
-    let Some(mut game) = Scenario::load("mp06t2") else {
-        return;
-    };
+    let mut game = Scenario::load("mp06t2");
     // Over the valley on the deck...
     let tank = game.world.add_unit((31, 55), 0, game.stats("MTNK"), PLAYER);
     game.world.order(Order::Move { unit: tank, x: 48, y: 55 });
@@ -2129,10 +2069,9 @@ fn high_bridges_are_crossed_on_the_deck_and_passed_under() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_kirov_bombs_what_is_under_it() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 10);
@@ -2151,10 +2090,9 @@ fn a_kirov_bombs_what_is_under_it() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn stolen_technology_offers_the_special_soldiers() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let mut spot = (yard.0 + 6, yard.1 + 6);
     for name in ["GAPOWR", "GAPILE", "NAHAND", "GATECH", "NATECH", "GAAIRC", "NARADR"] {
@@ -2187,10 +2125,9 @@ fn stolen_technology_offers_the_special_soldiers() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_cloning_vat_sends_its_copies_to_its_rally_point() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     game.world.add_map_building(PLAYER, game.building("NAPOWR"), (yard.0 + 6, yard.1 + 6), 10_000);
     game.world.add_map_building(PLAYER, game.building("NAHAND"), (yard.0 + 6, yard.1 + 10), 10_000);
@@ -2209,10 +2146,9 @@ fn a_cloning_vat_sends_its_copies_to_its_rally_point() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_deployed_desolator_poisons_the_ground() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 12);
     let desolator = game.world.add_infantry(at, 2, 0, game.stats("DESO"), PLAYER).unwrap();
@@ -2250,10 +2186,9 @@ fn a_deployed_desolator_poisons_the_ground() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_hospital_mends_and_an_armory_promotes() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let hospital = game.world.add_map_building(PLAYER, game.building("CAHOSP"), (yard.0 + 6, yard.1 + 8), 10_000);
     let armory = game.world.add_map_building(PLAYER, game.building("CAARMR"), (yard.0 + 12, yard.1 + 8), 10_000);
@@ -2280,10 +2215,9 @@ fn a_hospital_mends_and_an_armory_promotes() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_enemy_gap_generator_darkens_what_is_not_watched() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     game.world.map.shroud_on = true;
     let at = (yard.0 + 24, yard.1 + 6);
@@ -2307,10 +2241,9 @@ fn an_enemy_gap_generator_darkens_what_is_not_watched() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_repair_depot_mends_a_tank_for_money_and_sends_it_off() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     game.world.add_map_building(PLAYER, game.building("GAPOWR"), (yard.0 + 6, yard.1 + 6), 10_000);
     let spot = (yard.0 + 6, yard.1 + 11);
@@ -2335,10 +2268,9 @@ fn a_repair_depot_mends_a_tank_for_money_and_sends_it_off() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_dolphins_wave_hurts_a_ship() {
-    let Some(mut game) = Scenario::load("mp01t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp01t4");
     use ra2_sim::combat::Aim;
     let (w, h) = game.world.map.size();
     let float = |game: &Scenario, x: i32, y: i32| game.world.map.speed_percent(x, y, ra2_sim::SpeedType::Float) > 0;
@@ -2354,10 +2286,9 @@ fn a_dolphins_wave_hurts_a_ship() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_high_bridge_falls_and_an_engineer_puts_it_back() {
-    let Some(mut game) = Scenario::load("mp23t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp23t4");
     use ra2_sim::combat::Entry;
     // A tank on the deck, a ship under it, a tank waiting to cross.
     let rider = game.world.add_unit((72, 75), 0, game.stats("MTNK"), PLAYER);
@@ -2392,20 +2323,17 @@ fn a_high_bridge_falls_and_an_engineer_puts_it_back() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_low_bridge_section_is_damaged_then_gone() {
-    let Ok(files) = GameFiles::open() else {
-        return;
-    };
-    let Some(list) = files.get("missions.pkt").map(ra2_formats::ini::Ini::parse) else {
-        return;
-    };
+    let files = GameFiles::open().expect("the game's files");
+    let list = files.get("missions.pkt").map(ra2_formats::ini::Ini::parse).expect("missions.pkt");
     // A stock map with a whole low bridge section over water (its middle cell
     // is the one whose overlay data is 1).
     let found = list.section("MultiMaps").iter().find_map(|(_, id)| {
         let id = id.trim().to_lowercase();
         let parsed = files.get(&format!("{id}.map")).and_then(Map::parse)?;
         let cell = (0..300).flat_map(|y| (0..300).map(move |x| (x, y))).find(|&(x, y)| matches!(parsed.overlay_at(x, y), Some((74..=77 | 83..=86, 1))))?;
-        let game = Scenario::load(&id)?;
+        let game = Scenario::try_load_at(&id, None)?;
         let wet = |dx: i32, dy: i32| game.world.map.wet(cell.0 + dx, cell.1 + dy);
         ((wet(3, 0) && wet(-3, 0)) || (wet(0, 3) && wet(0, -3))).then_some((game, cell))
     });
@@ -2426,9 +2354,7 @@ fn a_low_bridge_section_is_damaged_then_gone() {
 /// Sends vehicles between random reachable cells of a map and reports those
 /// that do not arrive.
 fn stuck_moves(map: &str, kind: &str, trips: usize, seed: u64) -> Vec<String> {
-    let Some(mut game) = Scenario::load(map) else {
-        return Vec::new();
-    };
+    let mut game = Scenario::load(map);
     let stats = game.stats(kind);
     let (w, h) = game.world.map.size();
     let mut state = seed;
@@ -2525,6 +2451,7 @@ fn stuck_moves_from(_game: Scenario, _unit: u32, _trips: usize, _state: u64) -> 
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn vehicles_reach_where_they_are_sent_over_the_slopes_of_the_tournament_map() {
     let mut all = Vec::new();
     for seed in 1..=20u64 {
@@ -2534,10 +2461,9 @@ fn vehicles_reach_where_they_are_sent_over_the_slopes_of_the_tournament_map() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_group_crosses_the_slopes_of_the_tournament_map() {
-    let Some(mut game) = Scenario::load("tn01t2") else {
-        return;
-    };
+    let mut game = Scenario::load("tn01t2");
     let stats = game.stats("FV");
     for id in game.world.units().iter().map(|u| u.id).collect::<Vec<_>>() {
         game.world.remove_unit(id);
@@ -2590,10 +2516,9 @@ fn a_group_crosses_the_slopes_of_the_tournament_map() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_computer_spreads_its_defences_round_its_base() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
     game.world.houses[enemy as usize].credits = 60_000;
@@ -2608,10 +2533,9 @@ fn the_computer_spreads_its_defences_round_its_base() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_ifv_is_promoted_and_fires_its_elite_weapon() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 8);
@@ -2639,9 +2563,7 @@ fn an_ifv_is_promoted_and_fires_its_elite_weapon() {
 /// ground does not allow (a change of level with no ramp), and every trip it
 /// does not finish.
 fn illegal_steps(map: &str, kind: &str, trips: usize, seed: u64, near: Option<((i32, i32), i32)>) -> Vec<String> {
-    let Some(mut game) = Scenario::load(map) else {
-        return Vec::new();
-    };
+    let mut game = Scenario::load(map);
     let stats = game.stats(kind);
     let (w, h) = game.world.map.size();
     let mut state = seed;
@@ -2726,6 +2648,7 @@ fn illegal_steps(map: &str, kind: &str, trips: usize, seed: u64, near: Option<((
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn soldiers_keep_to_the_ground_by_the_cliffs_of_the_isle_of_war() {
     let mut all = Vec::new();
     for seed in 1..=10u64 {
@@ -2741,10 +2664,9 @@ fn soldiers_keep_to_the_ground_by_the_cliffs_of_the_isle_of_war() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn the_pointer_finds_the_cell_it_is_on_by_the_cliffs_of_the_isle_of_war() {
-    let Some(game) = Scenario::load("mp02t2") else {
-        return;
-    };
+    let game = Scenario::load("mp02t2");
     let map = &game.world.map;
     let (w, h) = map.size();
     let (cw, ch, lh) = (terrain::CELL_WIDTH as f32, terrain::CELL_HEIGHT as f32, terrain::LEVEL_HEIGHT as f32);
@@ -2772,10 +2694,9 @@ fn the_pointer_finds_the_cell_it_is_on_by_the_cliffs_of_the_isle_of_war() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_captured_oil_derrick_pays() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let derrick = game.building("CAOILD");
     let spot = game.find_spot("CAOILD", (yard.0 + 6, yard.1 + 6), 6).unwrap();
@@ -2795,10 +2716,9 @@ fn a_captured_oil_derrick_pays() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn an_enemy_gap_generator_darkens_its_ground_even_under_the_satellite() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     game.world.map.shroud_on = true;
     let spot = (yard.0 + 16, yard.1);
@@ -2821,9 +2741,7 @@ fn an_enemy_gap_generator_darkens_its_ground_even_under_the_satellite() {
 /// Sends a group to attack a building somewhere else on the map and reports the
 /// ones that never get within reach of it.
 fn attack_runs(map: &str, kind: &str, group: i32, runs: usize, seed: u64) -> Vec<String> {
-    let Some(mut game) = Scenario::load(map) else {
-        return Vec::new();
-    };
+    let mut game = Scenario::load(map);
     let stats = game.stats(kind);
     let (w, h) = game.world.map.size();
     let mut state = seed;
@@ -2888,6 +2806,7 @@ fn attack_runs(map: &str, kind: &str, group: i32, runs: usize, seed: u64) -> Vec
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn groups_get_within_reach_of_what_they_are_sent_to_attack() {
     let mut all = Vec::new();
     for map in ["mp02t2", "tn01t2", "mp18s3", "mp23t4", "mp03t4"] {
@@ -2899,10 +2818,9 @@ fn groups_get_within_reach_of_what_they_are_sent_to_attack() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_soldier_walks_into_a_tree_cell_a_vehicle_cannot_enter() {
-    let Some(mut game) = Scenario::load("mp02t2") else {
-        return;
-    };
+    let mut game = Scenario::load("mp02t2");
     for id in game.world.units().iter().map(|u| u.id).collect::<Vec<_>>() {
         game.world.remove_unit(id);
     }
@@ -2919,6 +2837,7 @@ fn a_soldier_walks_into_a_tree_cell_a_vehicle_cannot_enter() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn units_keep_to_the_ground_and_arrive_on_every_kind_of_map() {
     let mut all = Vec::new();
     for map in ["mp18s3", "mp23t4", "mp06t2", "mp09t3", "mp14t2", "mp27t8", "mp34u4", "mp01t4"] {
@@ -2930,10 +2849,9 @@ fn units_keep_to_the_ground_and_arrive_on_every_kind_of_map() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_chrono_commando_jumps_to_a_building_and_brings_it_down() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let plant = game.building("NAPOWR");
     let commando = game.world.add_infantry((yard.0 + 4, yard.1 + 6), 2, 0, game.stats("CCOMAND"), PLAYER).unwrap();
@@ -2955,10 +2873,9 @@ fn a_chrono_commando_jumps_to_a_building_and_brings_it_down() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_chrono_miner_sent_home_by_hand_jumps_onto_the_dock() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("GAREFN", (yard.0 + 5, yard.1 + 5), 8).unwrap();
     let refinery = game.world.add_map_building(PLAYER, game.building("GAREFN"), spot, 256);
@@ -2973,10 +2890,9 @@ fn a_chrono_miner_sent_home_by_hand_jumps_onto_the_dock() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_dog_leaves_falling_soldiers_alone_until_they_are_down() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let plain = game.world.super_types.iter().position(|kind| kind.kind == 5).unwrap();
     game.world.add_map_building(PLAYER, game.building("CAAIRP"), (yard.0 + 12, yard.1 + 6), 10_000);
@@ -2998,10 +2914,9 @@ fn a_dog_leaves_falling_soldiers_alone_until_they_are_down() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn rocketeers_follow_a_target_that_drives_off() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let start = (yard.0 + 4, yard.1 + 8);
@@ -3030,10 +2945,9 @@ fn rocketeers_follow_a_target_that_drives_off() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn tesla_troopers_charge_the_coil_they_stand_by() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("TESLA", (yard.0 + 7, yard.1 + 7), 6).unwrap();
     let coil = game.world.add_map_building(PLAYER, game.building("TESLA"), spot, 256);
@@ -3069,10 +2983,9 @@ fn tesla_troopers_charge_the_coil_they_stand_by() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_psychic_sensor_shows_enemies_headed_for_its_ground() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("NAPSIS", (yard.0 + 7, yard.1 + 7), 6).unwrap();
     game.world.add_map_building(PLAYER, game.building("NAPSIS"), spot, 256);
@@ -3101,20 +3014,16 @@ fn a_psychic_sensor_shows_enemies_headed_for_its_ground() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn computer_houses_stand_together_when_allies_are_allowed() {
     // DATA: MPModes.ini offers Battle and Free For All for skirmish; both
     // rules files set `AlliesAllowed`.
-    let files = crate::files::GameFiles::open();
-    let Ok(files) = files else {
-        return;
-    };
+    let files = crate::files::GameFiles::open().expect("the game's files");
     for mode in ["mpbattle.ini", "mpfreeforall.ini"] {
         let ini = ra2_formats::ini::Ini::parse(files.get(mode).expect(mode));
         assert_eq!(ini.get("MultiplayerDialogSettings", "AlliesAllowed").map(str::trim), Some("yes"), "{mode}");
     }
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     for _ in 0..2 {
         game.world.houses.push(ra2_sim::House { ai: Some(ra2_sim::ai::Brain::of(1)), ..ra2_sim::House::default() });
     }
@@ -3139,10 +3048,9 @@ fn computer_houses_stand_together_when_allies_are_allowed() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn ore_grows_denser_and_spreads_and_drills_bring_more() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let total = |game: &Scenario| game.world.map.ore_cells().filter(|(_, kind, _)| *kind == 0).map(|(_, _, amount)| amount as u32 + 1).sum::<u32>();
     let cells = |game: &Scenario| game.world.map.ore_cells().count();
     let gems = |game: &Scenario| game.world.map.ore_cells().filter(|(_, kind, _)| *kind == 1).map(|(_, _, amount)| amount as u32 + 1).sum::<u32>();
@@ -3163,10 +3071,9 @@ fn ore_grows_denser_and_spreads_and_drills_bring_more() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_dog_goes_for_a_disguised_spy() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 8);
     let dog = game.world.add_infantry(at, 2, 0, game.stats("DOG"), PLAYER).unwrap();
@@ -3193,11 +3100,10 @@ fn a_dog_goes_for_a_disguised_spy() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_bridge_the_map_starts_with_broken_can_be_mended() {
     // Isle of War starts with four sections of one high bridge gone.
-    let Some(mut game) = Scenario::load("mp02t2") else {
-        return;
-    };
+    let mut game = Scenario::load("mp02t2");
     use ra2_sim::combat::Entry;
     let fallen = game.world.map.fallen_bridge_cells();
     assert_eq!(fallen.len(), 4, "{fallen:?}");
@@ -3220,10 +3126,9 @@ fn a_bridge_the_map_starts_with_broken_can_be_mended() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_rocket_in_flight_lifts_the_shroud_under_it() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     game.world.map.shroud_on = true;
     use ra2_sim::combat::Aim;
@@ -3259,13 +3164,12 @@ fn a_rocket_in_flight_lifts_the_shroud_under_it() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_crate_is_picked_up_and_another_put_down() {
     // At least
     // `CrateMinimum` crates at the start; walking onto one picks it up, and a
     // new one goes down at once somewhere else.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     game.deploy_base();
     game.world.start_crates(4);
     let before: Vec<(i32, i32)> = game.world.crates().iter().map(|c| c.cell).collect();
@@ -3298,13 +3202,12 @@ fn a_crate_is_picked_up_and_another_put_down() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_tank_on_ground_a_lost_building_stood_on_can_still_be_sent() {
     // Two Prism Tanks in a player's game stood where an enemy building had
     // been and took no more orders: the zones, built again while the building
     // stood, had counted its cells as solid ground for good.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("GAPOWR", yard, 12).expect("room for a power plant");
     assert!(game.build_at("GAPOWR", spot));
@@ -3322,13 +3225,12 @@ fn a_tank_on_ground_a_lost_building_stood_on_can_still_be_sent() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_crate_beneath_building_leaves_money_when_destroyed() {
     // Destroyed, a
     // `CrateBeneath` building leaves a crate at its centre (money with
     // `CrateBeneathIsMoney`), even with crates off.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let Some(building) = game.world.buildings().iter().find(|b| game.world.building_types[b.kind as usize].crate_beneath).cloned() else {
         eprintln!("no CrateBeneath building on this map; skipping");
         return;
@@ -3342,12 +3244,11 @@ fn a_crate_beneath_building_leaves_money_when_destroyed() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn each_kind_of_crate_does_its_thing() {
     use ra2_sim::powerups as p;
     for kind in [p::ARMOR, p::FIREPOWER, p::SPEED, p::VETERAN, p::UNIT, p::HEAL_BASE] {
-        let Some(mut game) = Scenario::load("mp03t4") else {
-            return;
-        };
+        let mut game = Scenario::load("mp03t4");
         let yard = game.deploy_base();
         let at = (yard.0 + 6, yard.1 + 9);
         let gi = game.world.add_infantry((at.0 - 1, at.1), 2, 0, game.stats("E1"), PLAYER).unwrap();
@@ -3373,11 +3274,10 @@ fn each_kind_of_crate_does_its_thing() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn rocketeers_fight_rocketeers() {
     // DATA: their gun's shot is AA=yes and AG=yes, range 5.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 10);
@@ -3393,12 +3293,11 @@ fn rocketeers_fight_rocketeers() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn yuris_wave_spares_those_immune_to_psionics() {
     // `PsychicDamage` does nothing to an
     // `ImmuneToPsionics` target; a soldier beside him still falls.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 10);
     let yuri = game.world.add_infantry(at, 2, 0, game.stats("YURI"), PLAYER).unwrap();
@@ -3416,12 +3315,11 @@ fn yuris_wave_spares_those_immune_to_psionics() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_tank_yuri_takes_stops_what_it_was_doing() {
     // Yuri Prime is the same thing with a longer reach.
     for who in ["YURI", "YURIPR"] {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 10);
@@ -3457,10 +3355,9 @@ fn a_tank_yuri_takes_stops_what_it_was_doing() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn yuri_prime_takes_a_tank_from_afar_and_only_one_can_be_trained() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 10);
@@ -3475,10 +3372,9 @@ fn yuri_prime_takes_a_tank_from_afar_and_only_one_can_be_trained() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_mirage_standing_still_is_taken_for_a_tree() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 10);
     let mirage = game.world.add_unit(at, 0, game.stats("MGTK"), PLAYER);
@@ -3498,12 +3394,11 @@ fn a_mirage_standing_still_is_taken_for_a_tree() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn shellfire_marks_the_ground_without_anything_drawing_it() {
     // The marks used to be made by the drawing code; the sim makes them now,
     // so a game with no picture (a test, a replay, another machine) agrees.
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 10);
@@ -3517,10 +3412,9 @@ fn shellfire_marks_the_ground_without_anything_drawing_it() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_house_cannot_order_what_is_not_its_own() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 10);
     let ours = game.world.add_unit(at, 0, game.stats("MTNK"), PLAYER);
@@ -3547,8 +3441,8 @@ fn a_house_cannot_order_what_is_not_its_own() {
 /// so that building and harvesting are going on. Played with `advance`, it
 /// has battles too.
 #[cfg(test)]
-fn skirmish() -> Option<Scenario> {
-    let mut game = Scenario::load("mp03t4")?;
+fn skirmish() -> Scenario {
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
     game.world.houses[enemy as usize].credits = 30_000;
@@ -3560,7 +3454,7 @@ fn skirmish() -> Option<Scenario> {
         }
     }
     game.world.houses[PLAYER as usize].credits = 10_000;
-    Some(game)
+    game
 }
 
 /// The ticks at which `advance` starts a battle. The snapshot tests take
@@ -3656,32 +3550,30 @@ fn first_difference(a: &World, b: &World) -> String {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_snapshot_restored_gives_the_same_snapshot() {
-    let Some(mut game) = skirmish() else {
-        return;
-    };
+    let mut game = skirmish();
     advance_into_battle(&mut game, 3000);
     let saved = game.world.snapshot();
-    let mut fresh = Scenario::load("mp03t4").unwrap();
+    let mut fresh = Scenario::load("mp03t4");
     fresh.world.restore(&saved).unwrap();
     let again = fresh.world.snapshot();
     assert_eq!(saved.len(), again.len());
     assert!(saved == again, "sections that differ: {:?}", differing(&game.world.state_hashes(), &fresh.world.state_hashes()));
     assert_eq!(game.world.state_hash(), fresh.world.state_hash());
     // Not half of one, and not one of another format.
-    assert!(Scenario::load("mp03t4").unwrap().world.restore(&saved[..saved.len() / 2]).is_err());
+    assert!(Scenario::load("mp03t4").world.restore(&saved[..saved.len() / 2]).is_err());
     let mut other = saved.clone();
     other[0] ^= 0xff;
     assert!(fresh.world.restore(&other).is_err());
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn two_games_set_up_alike_stay_alike() {
     // The control for the test below: without this, a game restored could not
     // be expected to keep step either.
-    let (Some(mut a), Some(mut b)) = (skirmish(), skirmish()) else {
-        return;
-    };
+    let (mut a, mut b) = (skirmish(), skirmish());
     for tick in 0..5000 {
         advance(&mut a);
         advance(&mut b);
@@ -3692,21 +3584,20 @@ fn two_games_set_up_alike_stay_alike() {
 /// The skirmish at a tick, played again from the start (which the control test
 /// shows to be the same game), for looking at where a restored one left it.
 #[cfg(test)]
-fn replay(until: u64) -> Option<Scenario> {
-    let mut game = skirmish()?;
+fn replay(until: u64) -> Scenario {
+    let mut game = skirmish();
     while game.world.current_tick() < until {
         advance(&mut game);
     }
-    Some(game)
+    game
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_game_restored_plays_on_as_the_one_it_was_taken_from() {
     // Anything play changes that the snapshot leaves out shows here, some ticks
     // after the restore, as the two games parting.
-    let Some(mut a) = skirmish() else {
-        return;
-    };
+    let mut a = skirmish();
     const AFTER: usize = 3000;
     for start in [500, 4000, 12000] {
         advance_into_battle(&mut a, start);
@@ -3722,7 +3613,7 @@ fn a_game_restored_plays_on_as_the_one_it_was_taken_from() {
             shooting += !a.world.bullets().is_empty() as u32;
             hashes.push((a.world.state_hash(), a.world.state_hashes()));
         }
-        let mut b = Scenario::load("mp03t4").unwrap();
+        let mut b = Scenario::load("mp03t4");
         let clock = std::time::Instant::now();
         b.world.restore(&saved).unwrap();
         let restored = clock.elapsed();
@@ -3734,7 +3625,7 @@ fn a_game_restored_plays_on_as_the_one_it_was_taken_from() {
                 "restored at {start}, apart {} ticks later in {:?}: {}",
                 tick + 1,
                 differing(sections, &b.world.state_hashes()),
-                replay(b.world.current_tick()).map_or(String::new(), |a| first_difference(&a.world, &b.world))
+                first_difference(&replay(b.world.current_tick()).world, &b.world)
             );
         }
         eprintln!(
@@ -3746,10 +3637,9 @@ fn a_game_restored_plays_on_as_the_one_it_was_taken_from() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_shot_at_something_in_the_air_spares_the_building_under_it() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("GAPOWR", (yard.0 + 6, yard.1 + 6), 6).unwrap();
     let plant = game.world.add_map_building(PLAYER, game.building("GAPOWR"), spot, 256);
@@ -3770,13 +3660,10 @@ fn a_shot_at_something_in_the_air_spares_the_building_under_it() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn battle_sets_the_computers_on_the_player_and_free_for_all_does_not() {
-    let Ok(files) = GameFiles::open() else {
-        return;
-    };
-    let Some(parsed) = files.get("mp03t4.map").or_else(|| files.get("mp03t4.mpr")).and_then(ra2_formats::map::Map::parse) else {
-        return;
-    };
+    let files = GameFiles::open().expect("the game's files");
+    let parsed = files.get("mp03t4.map").or_else(|| files.get("mp03t4.mpr")).and_then(ra2_formats::map::Map::parse).expect("mp03t4");
     let allied = |mode: &str| terrain::build(&files, &parsed, &terrain::Player { mode_rules: mode.to_owned(), ..terrain::Player::default() }).map(|scene| scene.allies_allowed);
     // DATA: MPBattle.ini `AlliesAllowed=yes`, which allies the computer houses.
     assert_eq!(allied("MPBattle.ini"), Some(true));
@@ -3785,10 +3672,9 @@ fn battle_sets_the_computers_on_the_player_and_free_for_all_does_not() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_captured_construction_yard_packs_up_and_drives_off() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     // The other side's yard, taken by an engineer.
     let spot = game.find_spot("NACNST", (yard.0 + 8, yard.1 + 8), 8).unwrap();
@@ -3807,10 +3693,9 @@ fn a_captured_construction_yard_packs_up_and_drives_off() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_spy_on_the_move_takes_a_disguise_at_once() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     use ra2_sim::combat::Aim;
     let at = (yard.0 + 6, yard.1 + 10);
@@ -3834,8 +3719,9 @@ fn a_spy_on_the_move_takes_a_disguise_at_once() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_long_free_for_all_does_not_jam_its_factories() {
-    let Ok(files) = GameFiles::open() else { return };
+    let files = GameFiles::open().expect("the game's files");
     let Some(parsed) = files.get("mp03t4.map").or_else(|| files.get("mp03t4.mpr")).and_then(ra2_formats::map::Map::parse) else { return };
     let opponents = vec![terrain::Opponent { level: 0, country: None, colour: None }; 3];
     let player = terrain::Player { opponents, mode_rules: "MPFreeForAll.ini".into(), ..terrain::Player::default() };
@@ -3876,10 +3762,9 @@ fn a_long_free_for_all_does_not_jam_its_factories() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_computer_soldier_told_to_move_while_dug_in_gets_up_and_goes() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 6, yard.1 + 8);
     let gi = game.world.add_infantry(at, 2, 0, game.stats("E1"), 2).unwrap();
@@ -3904,10 +3789,9 @@ fn team_type(game: &Scenario, name: &str) -> usize {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_reinforce_team_cut_down_goes_back_to_forming_beside_its_base() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     let yard = game.deploy_base();
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
@@ -3947,10 +3831,9 @@ fn a_reinforce_team_cut_down_goes_back_to_forming_beside_its_base() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_transport_that_returns_on_unload_drives_back_where_it_loaded() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     let yard = game.deploy_base();
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
@@ -3988,10 +3871,9 @@ fn a_transport_that_returns_on_unload_drives_back_where_it_loaded() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_team_sent_to_its_own_refinery_waits_by_its_corner_not_its_dock() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let enemy = terrain::ENEMY;
     let yard = game.deploy_base();
     game.world.houses[enemy as usize].ai = Some(ra2_sim::ai::Brain::of(0));
@@ -4016,9 +3898,7 @@ fn a_team_sent_to_its_own_refinery_waits_by_its_corner_not_its_dock() {
 /// A cell of open water with water all round it, on the first map that has one.
 fn open_water() -> Option<(Scenario, (i32, i32))> {
     for map in ["mp01t4", "mp02t2", "mp05t4", "mp06t2", "mp08t2", "mp10s4", "mp11t2"] {
-        let Some(game) = Scenario::load(map) else {
-            continue;
-        };
+        let game = Scenario::load(map);
         let water = |x: i32, y: i32| game.world.map.describe(x, y).3 == ra2_sim::Land::Water as u8;
         let (width, height) = game.world.map.size();
         let found = (2..height - 2).flat_map(|y| (2..width - 2).map(move |x| (x, y))).find(|&(x, y)| (-1..=1).all(|dy| (-1..=1).all(|dx| water(x + dx, y + dy))));
@@ -4030,10 +3910,9 @@ fn open_water() -> Option<(Scenario, (i32, i32))> {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn crews_get_out_of_destroyed_vehicles_and_buildings() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 8, yard.1 + 8);
     let crew_kind = game.stats("E1").kind;
@@ -4080,10 +3959,9 @@ fn crews_get_out_of_destroyed_vehicles_and_buildings() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_ship_sinks_for_81_frames_and_a_light_one_does_not() {
-    let Some((mut game, cell)) = open_water() else {
-        return;
-    };
+    let (mut game, cell) = open_water().expect("a map with open water");
     let ship = game.world.add_unit(cell, 0, game.stats("DEST"), 2);
     game.world.kill_unit_for_tests(ship);
     assert!(game.world.unit(ship).is_none(), "the destroyer is still about");
@@ -4101,10 +3979,9 @@ fn a_ship_sinks_for_81_frames_and_a_light_one_does_not() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_destroyed_building_throws_debris_that_comes_down() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let at = (yard.0 + 8, yard.1 + 8);
     let plant = game.world.add_map_building(PLAYER, game.building("GAPOWR"), at, 256);
@@ -4116,10 +3993,9 @@ fn a_destroyed_building_throws_debris_that_comes_down() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_chrono_miner_jumping_leaves_its_terror_drone_behind() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let spot = game.find_spot("GAREFN", (yard.0 + 5, yard.1 + 5), 8).unwrap();
     let refinery = game.world.add_map_building(2, game.building("GAREFN"), spot, 256);
@@ -4156,10 +4032,9 @@ fn a_chrono_miner_jumping_leaves_its_terror_drone_behind() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn soldiers_under_fire_lie_down_crawl_and_get_up_when_calm() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let gi = game.stats("E1");
     let spot = (yard.0 + 6, yard.1 + 8);
@@ -4198,10 +4073,9 @@ fn soldiers_under_fire_lie_down_crawl_and_get_up_when_calm() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn soldiers_at_rest_fidget_now_and_then() {
-    let Some(mut game) = Scenario::load("mp03t4") else {
-        return;
-    };
+    let mut game = Scenario::load("mp03t4");
     let yard = game.deploy_base();
     let ours = game.world.add_unit((yard.0 + 6, yard.1 + 8), 0, game.stats("E1"), PLAYER);
     let mut fidgets = 0;
@@ -4223,10 +4097,9 @@ fn soldiers_at_rest_fidget_now_and_then() {
 }
 
 #[test]
+#[cfg_attr(not(game_files), ignore = "needs the game's files")]
 fn a_map_starts_with_its_own_marks() {
-    let Some(game) = Scenario::load("mp02t2") else {
-        return;
-    };
+    let game = Scenario::load("mp02t2");
     // DATA: the Isle of War's `[Smudge]` puts CRATER07 at 103,66.
     assert!(game.world.map.smudges().any(|(cell, _)| cell == (103, 66)), "the map's crater is missing");
 }
