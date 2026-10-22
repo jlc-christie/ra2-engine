@@ -167,6 +167,10 @@ fn an_american_player_is_offered_only_their_own_airforce_command() {
 #[test]
 fn a_shipyard_goes_on_water_and_not_on_land() {
     // Tried on several maps; at least one has water within reach of the start.
+    if Scenario::load("mp03t4").is_none() {
+        eprintln!("game files not found; skipping");
+        return;
+    }
     let mut total = 0;
     for map in ["mp03t4", "mp01t4", "mp02t2", "mp05t4", "mp06t2", "mp08t2", "mp10s4", "mp11t2"] {
         let Some(mut game) = Scenario::load(map) else {
