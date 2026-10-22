@@ -7311,11 +7311,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(game_files), ignore = "needs the game's executable")]
     fn tracks_carry_a_unit_round_corners_to_exact_cell_centres() {
-        let Some(tracks) = engine_tracks() else {
-            eprintln!("game.exe not found; skipping");
-            return;
-        };
+        let tracks = engine_tracks().expect("the game's track tables");
         let mut open = Map::new(30, 30);
         for y in 0..30 {
             for x in 0..30 {
@@ -7343,10 +7341,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(game_files), ignore = "needs the game's executable")]
     fn straight_track_points_face_and_sit_where_the_selector_says() {
-        let Some(tracks) = engine_tracks() else {
-            return;
-        };
+        let tracks = engine_tracks().expect("the game's track tables");
         // Heading east: 245 leptons west of the destination, facing east.
         let east = tracks.selector[2 * 8 + 2];
         assert_eq!(east.place(tracks.tracks[east.track as usize].points[0]), (-245, 0, 64));

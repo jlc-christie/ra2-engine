@@ -341,10 +341,7 @@ fn round_trip(files: &GameFiles, setup: &Setup, world: &mut World) -> Result<(),
 #[test]
 #[ignore]
 fn fuzz_games() {
-    let Ok(files) = GameFiles::open() else {
-        println!("no game files; nothing to fuzz");
-        return;
-    };
+    let files = GameFiles::open().expect("the game's files");
     let maps = maps(&files);
     let modes = mode_files(&files);
     assert!(!maps.is_empty(), "no multiplayer maps found");
@@ -400,7 +397,7 @@ fn watch_ai(world: &World, names: &[String], tick: u64) {
 #[test]
 #[ignore]
 fn watch_one_computer() {
-    let Ok(files) = GameFiles::open() else { return };
+    let files = GameFiles::open().expect("the game's files");
     let map = std::env::var("FUZZ_MAP").unwrap_or("mp03t4".into());
     let Some(parsed) = files.get(&format!("{map}.map")).or_else(|| files.get(&format!("{map}.mpr"))).and_then(ra2_formats::map::Map::parse) else { return };
     let country = std::env::var("WATCH_COUNTRY").ok().and_then(|n| n.parse().ok()).unwrap_or(8);

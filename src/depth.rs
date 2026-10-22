@@ -239,10 +239,9 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(not(game_files), ignore = "needs the game's files")]
     fn the_building_depth_shape_is_nearest_up_its_middle() {
-        let Ok(files) = crate::files::GameFiles::open() else {
-            return;
-        };
+        let files = crate::files::GameFiles::open().expect("the game's files");
         let (width, height, data) = building_shape(&files).expect("buildngz.shp");
         assert_eq!((width, height), (396, 477));
         let at = |x: usize, y: usize| data[y * width as usize + x] as i8;
