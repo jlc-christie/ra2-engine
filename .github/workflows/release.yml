@@ -18,9 +18,8 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # The game's own files aren't here, so only the crates that don't need
-      # them are tested.
-      - run: cargo test --locked -p ra2-sim -p ra2-formats -p ra2-net -p ra2-bundle
+      # The game's own files aren't here; the tests that need them skip.
+      - run: cargo test --workspace --locked
 
   bundle:
     environment: release
