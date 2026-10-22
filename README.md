@@ -42,12 +42,10 @@ cargo run --release
 
 To run the tests:
 ```shell
-# these are pure unit tests that don't rely on any game files
-cargo test -p ra2-sim -p ra2-formats -p ra2-net
-
-# these tests rely on game.exe existing to extract data tables from the original binary
-cargo test --release --bin ra2-rust
+cargo test --workspace --release
 ```
+Tests that need the game's files (in `app_2229850`, or the folder `RA2_DIR` points to) are marked ignored when they
+aren't there, so the rest still run.
 
 ## Known Issues
 > [!NOTE]
